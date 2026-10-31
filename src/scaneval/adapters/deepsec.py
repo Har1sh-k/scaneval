@@ -155,19 +155,19 @@ is an error.
 from __future__ import annotations
 
 from collections import Counter
+import errno
 import hashlib
 from importlib import import_module
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
-import shutil
 import stat
 import subprocess
 from typing import Any, NamedTuple, Sequence
 
 from ..collectors import EXTERNAL_PREFIX, relocate_paths, workspace_path
-from ..execution import list_directory
+from ..execution import list_directory, read_regular_file
 from ..kinds import kind_for_harness_class, load_mapping
 from ..observer import Observer, create_jsonl_sink
 from .base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command
@@ -2109,6 +2109,39 @@ def _overlapping(candidates: tuple[Candidate, ...], path: str, slug: str,
     return sorted(dict.fromkeys(ids))
 
 
+def move_transcript(source: Path, target: Path, enclosure: Enclosure) -> str | None:
+    """Move one verified transcript to *target*; return why it was not moved, never raise.
+
+    *source* is in the operator's projects directory, which every Claude Code session on the
+    machine writes to, so its name can change between any two opens of it. Discovery checked the
+    name and the import opened it without following a link, and the move then opened it a third
+    time with :func:`shutil.copyfile`, which does follow one: a transcript replaced by a link after
+    the import had read it brought a host file's bytes into the bundle, registered and hashed as
+    that session's transcript, and nothing said so. Now the source is read by
+    :func:`~scaneval.execution.read_regular_file`, whose ``O_NOFOLLOW`` open refuses a link and
+    whose :func:`os.fstat` refuses anything that is not a regular file, in the same open that reads
+    the bytes. The bytes the import read are not reused instead: the collector hands back a summary
+    rather than the file, and the lines it decodes are bounded and repaired, so they are not the
+    file either. Reading the file whole is bounded in practice, because discovery adopts only a
+    transcript it read to its end under the collector's size limit.
+    """
+    try:
+        data = read_regular_file(source)
+    except OSError as exc:
+        reason = ("it is a symbolic link, not a regular file" if exc.errno == errno.ELOOP
+                  else exc.strerror or str(exc))
+        return f"the transcript could not be read as a regular file ({reason})"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if enclosure.write(target.parent) is None:
+            return "the destination does not resolve inside this run's raw output"
+        target.write_bytes(data)
+        source.unlink()
+    except OSError as exc:
+        return exc.strerror or str(exc)
+    return None
+
+
 def preserve_transcripts(sessions: tuple[Session, ...], transcripts: dict[str, tuple[Path, ...]],
                          projects_dir: Path, raw_dir: Path, enclosure: Enclosure) -> tuple[list[dict], list[str]]:
     """Move each session's Claude Code transcripts into ``raw/claude-sessions`` and register them.
@@ -2118,12 +2151,17 @@ def preserve_transcripts(sessions: tuple[Session, ...], transcripts: dict[str, t
     directory with every other session on the machine; moved here they become hashed artifacts of
     the run that wrote them. Only the files the workspace history verified are moved, the same
     paths the import read, and a subagent transcript keeps its ``subagents/`` level. That includes
-    the sessions no analysis entry names, which are the evidence of a failed batch. A transcript
-    that cannot be moved stays where it was and is counted in the note.
+    the sessions no analysis entry names, which are the evidence of a failed batch.
+
+    Each move is :func:`move_transcript`. A transcript it refuses stays where it was, is not
+    registered, and is named in the note with the reason, so a transcript this run did not keep
+    never reads as one it moved. Neither the status nor any claim depends on this: a transcript
+    is evidence about how the run went, and a refused one costs that evidence and nothing else.
     """
     root = raw_dir / "claude-sessions"
     artifacts: list[dict] = []
-    moved = failed = 0
+    moved = 0
+    refused: list[str] = []
     seen: set[str] = set()
     for session in sessions:
         if not session.discoverable or session.session_id in seen:
@@ -2133,21 +2171,17 @@ def preserve_transcripts(sessions: tuple[Session, ...], transcripts: dict[str, t
             relative = (Path("subagents", source.name) if source.parent.name == "subagents"
                         else Path(source.name))
             target = root / session.session_id / relative
-            try:
-                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                if enclosure.write(target.parent) is None:
-                    raise OSError("the transcript directory escaped the private run directory")
-                shutil.copyfile(source, target)
-                source.unlink()
-            except OSError:
-                failed += 1
+            failure = move_transcript(source, target, enclosure)
+            if failure is not None:
+                refused.append(f"{session.session_id}/{relative.as_posix()} ({failure})")
                 continue
             artifacts.append({"id": f"claude-session/{session.session_id}/{relative.as_posix()}", "path": target})
             moved += 1
     notes = [f"{moved} Claude Code transcript(s) were moved from {projects_dir} into raw/claude-sessions and "
              "registered as artifacts of this run."
-             + (f" {failed} transcript(s) could not be moved and were left in place."
-                if failed else "")]
+             + (f" {len(refused)} transcript(s) could not be moved and were left in place: "
+                + "; ".join(refused[:5]) + ("; ..." if len(refused) > 5 else "") + "."
+                if refused else "")]
     return artifacts, notes
 
 

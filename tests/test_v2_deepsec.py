@@ -3491,6 +3491,70 @@ def test_transcripts_stay_in_place_unless_capture_is_configured(tmp_path, monkey
     assert main.exists()
 
 
+HOST_TEXT = "a host file this run never wrote\n"
+
+
+def host_file(tmp_path: Path) -> Path:
+    """A file outside every directory the run was given, standing for one the operator owns."""
+    path = tmp_path / "outside" / "host-file.txt"
+    path.parent.mkdir()
+    path.write_text(HOST_TEXT, encoding="utf-8")
+    return path
+
+
+def capture_note(execution: dict) -> str:
+    return next(note for note in execution["notes"] if "Claude Code transcript(s) were moved" in note)
+
+
+def outcome_of(result: dict) -> tuple:
+    """The status, error and claims of a result, so two runs of the fake CLI can be compared.
+
+    Without each claim's ``claim_id`` and ``native_id``: the fake CLI draws the finding id from
+    a per-process :func:`hash`, so those two differ between any two runs of it.
+    """
+    claims = [{key: value for key, value in claim.items() if key not in ("claim_id", "native_id")}
+              for claim in result["claims"]]
+    return result["status"], result.get("error"), sorted(claims, key=lambda claim: json.dumps(claim, sort_keys=True))
+
+
+def test_a_transcript_swapped_for_a_link_after_the_import_is_refused_rather_than_followed(tmp_path, monkeypatch):
+    """A transcript that became a link once discovery and the import had read it is never followed.
+
+    Discovery checked the name and the import opened it without following a link, and then the
+    move opened it a third time with :func:`shutil.copyfile`, which does follow one: the host
+    file the link named was registered and hashed in the bundle as that session's transcript,
+    and nothing said so.
+    """
+    root = fake_deepsec_root(tmp_path, session_ids=["session-aaaa"])
+    stub_collector(monkeypatch, tmp_path)
+    main = transcript_fixture(tmp_path)
+    baseline, _ = documents(invoke(tmp_path / "baseline", root))
+    host = host_file(tmp_path)
+    find, load = deepsec_module.collector()
+
+    def import_then_swap(observer, path, **options):
+        summary = load(observer, path, **options)
+        main.unlink()
+        main.symlink_to(host)
+        return summary
+
+    monkeypatch.setattr(deepsec_module, "collector", lambda: (find, import_then_swap))
+    bundle = invoke(tmp_path, root, capture_claude_sessions=True)
+    result, execution = documents(bundle)
+
+    assert not any(artifact["id"].startswith("claude-session/") for artifact in execution["raw_artifacts"])
+    assert not list(bundle.rglob("claude-sessions")), "nothing is created for a transcript that was not read"
+    assert not [path for path in bundle.rglob("*")
+                if path.is_file() and not path.is_symlink() and HOST_TEXT.encode() in path.read_bytes()]
+    assert main.is_symlink() and host.read_text(encoding="utf-8") == HOST_TEXT, "the link is left where it was"
+    note = capture_note(execution)
+    assert note.startswith("0 Claude Code transcript(s) were moved")
+    assert note.endswith("1 transcript(s) could not be moved and were left in place: session-aaaa/session-aaaa.jsonl "
+                         "(the transcript could not be read as a regular file (it is a symbolic link, not a "
+                         "regular file)).")
+    assert outcome_of(result) == outcome_of(baseline) and len(result["claims"]) == 2
+
+
 THIRD_FILE = {"src/jobs.js": "module.exports = () => 1;\n"}
 FAILED_CALL = "deepsec/workspace-history/session-cccc"
 
