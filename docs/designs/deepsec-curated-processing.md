@@ -47,6 +47,9 @@ its systems' adapter identity, so executing it with 1.2.0 is refused as version
 drift until a new configuration is deliberately frozen, and the matrix report flags
 an execution whose adapter differs from the frozen identity as
 `adapter_version_drift`. Existing 1.1.0 runs and their replay are not rewritten.
+Adapter 1.2.1 reads a standard-mode `process` exit 1 from DeepSec's records
+instead of ending the run with no claims (#120), so a failed batch's records
+written before and after that change carry different versions.
 
 ## What runs
 
@@ -98,19 +101,28 @@ The curated run only names populations inside that accounting:
 | --- | --- |
 | Regex records on a listed path | Selected. Only these can be assigned an AI batch. |
 | Regex records not listed, left as the scan wrote them | Assigned no AI batch. They stay `pending`, which makes the run `scope_incomplete`, and they are the result's `omitted_paths`: candidates with no assigned verdict, not files shown to be unread. |
-| Listed paths with no record | No regex candidate there, or DeepSec's ignore filter skipped the file. No AI batch ran. That is native triage, not a model's miss. |
+| Listed paths with no record | No regex candidate there, or DeepSec's ignore filter skipped the file. No AI batch ran. That is native triage, not a model's miss. This holds only after a completed scan: when the scan fails or is killed, the note says the missing record cannot be attributed. |
 | Unlisted records with analysis, findings, or a status other than `pending`, and claims on unlisted paths | Kept, and the run fails as `process_manifest_not_honored`. |
 
 Status precedence is unchanged, and two checks are added. The full order is:
-timeout, a failed step, an unreadable export, import loss, failed batches, an
-undeclared record status, then the new `process_manifest_not_honored`, then
-unfinished records (`scope_incomplete`). The second check applies to a curated
+timeout, a failed step, an unreadable export, import loss, an exhausted quota
+(`quota_exhausted`), failed batches, an undeclared record status, then the new
+`process_manifest_not_honored`, then unfinished records (`scope_incomplete`). A
+standard-mode `process` exit 1 that the records explain is not a failed step (see
+below). The second check applies to a curated
 run that reaches the point where it would otherwise succeed: every candidate was
 selected, there was no candidate, or the intersection was empty. Such a run is
 `partial` with `scope_incomplete`. Every curated run has
 `bundles_resolved: false`, so no claim budget or random-order expectation is
 read from a selection made before the run. Claims are kept in every `partial`
-outcome, so target detection stays visible.
+outcome, so target detection stays visible. A standard-mode `process` exit 1,
+which 2.3.10 gives an errored batch or an exhausted quota once every record is
+written, does not stop the run before export. It is read from the records like
+the rest: a failed selected batch keeps the claims of the batches that finished,
+and a run in which no file reached a verdict is an `error`. Only a selected file
+left in `error`, or one still `processing` when a run that died was holding it,
+explains that exit. An unlisted record is `pending` by design, so it explains
+nothing, and an exit 1 with no such record stays `error` with no claims.
 
 `examined_nothing` is not set. The regex scan examined the tree. The notes say
 when no AI batch ran, and `partial` already withholds every quiet credit.
@@ -130,5 +142,6 @@ when no AI batch ran, and `partial` already withholds every quiet credit.
 - The adapter cannot see DeepSec's ignore filter. A listed path with no record is
   reported as "no candidate or ignored", without saying which.
 - A file whose name begins or ends with whitespace cannot be listed.
-- The tests use a fake CLI that mirrors the 2.3.10 selection code. No live
-  DeepSec, model, or provider has been run with this mode.
+- The tests use a fake CLI that mirrors the 2.3.10 selection code and its
+  standard-mode exit codes. No live DeepSec, model, or provider has been run with
+  this mode.

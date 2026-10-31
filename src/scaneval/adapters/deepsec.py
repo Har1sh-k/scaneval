@@ -45,11 +45,14 @@ the bundle wants it: it is registered as artifacts in place rather than duplicat
 itself. The reads are hardened exactly the same way either path would need.
 
 Status, exactly. A non-zero exit from any of the three steps is an error, named by the step
-it came from; a step that ran out of the shared timeout budget is a timeout; an export this
+it came from, except the exit 1 ``process`` gives a run that ended short, which is read from the
+records (below); a step that ran out of the shared timeout budget is a timeout; an export this
 adapter cannot read is an error and never an empty successful scan. A run whose records
 report a file left in ``status: "error"``, a parse-failure dump under ``debug/``, or an
 agent refusal is ``partial`` with code ``deepsec_batches_failed``: part of the input
-reached no verdict, so the scan cannot stand as a complete or quiet observation of it.
+reached no verdict, so the scan cannot stand as a complete or quiet observation of it. The
+code is ``quota_exhausted`` when the exit says the quota ran out, and the status is an
+``error`` with no claims when no file reached a verdict in a run whose exit 1 is read below.
 
 PR mode. A request whose ``input.mode`` is ``pr`` is a review of the change between two commits
 of the workspace's own history (:mod:`scaneval.adapters.pr`), run through DeepSec's own direct
@@ -114,22 +117,32 @@ not a sandbox: the agent still runs with the whole repository visible and may re
 files shown to be unread. Nothing is filtered out of the reconciliation: every record, status and
 exported claim counts as in an ordinary run, so the regex candidates the manifest did not list are
 assigned no AI batch, stay ``pending``, make the run ``scope_incomplete``, and are its
-``omitted_paths``. A listed path with no record had no regex candidate, or was skipped by DeepSec's ignore filter, so no
-AI batch ran on it: native triage, not a model's miss. An unlisted record carrying analysis, a finding
-or a status other than ``pending``, a claim on an unlisted path, or a manifest whose bytes changed is
+``omitted_paths``. After a scan that ran to the end, a listed path with no record had no regex
+candidate, or was skipped by DeepSec's ignore filter, so no AI batch ran on it: native triage, not a
+model's miss; after a scan that failed or was killed, the note says only that no scan completed. An
+unlisted record carrying analysis, a finding or a status other than ``pending``, a claim on an unlisted
+path, or a manifest whose bytes changed is
 ``process_manifest_not_honored``; its claims are kept. Every other failure keeps its precedence, and a
 curated run that would otherwise succeed is ``partial`` with ``scope_incomplete`` instead. Its bundles
 are never resolved, so it completes no control and earns no quiet credit.
 
-Direct mode exits 1 for three different reasons (a run that produced findings, a batch that
-errored, an exhausted quota) and also for a runtime failure such as an unresolvable range, so an
-exit 1 is not fatal here and is not innocent either. The run goes on to export, and what an exit 1
-means is read from DeepSec's own records: findings, files left in ``error`` or unfinished, a
-parse-failure dump. An exit 1 that none of those explains is an ``error`` naming the step. What
-DeepSec prints is used to name the reason, never to decide the status, because text an agent's
-output can reach must not be able to turn a failure into a success. A run stopped by an exhausted
-quota, with an errored batch, or with a changed path DeepSec could not list (above) is ``partial``
-when some file still reached a verdict and an ``error`` when none did. "Nothing to process" is a
+``process`` exits 1 when a run ends short. Direct mode does it for three different reasons (a run
+that produced findings, a batch that errored, an exhausted quota) and standard mode for the last two,
+never for findings; both also exit 1 for a runtime failure such as an unresolvable range. Every
+verdict is on disk before DeepSec exits, so an exit 1 is not fatal here and is not innocent either.
+The run goes on to export, and what an exit 1 means is read from DeepSec's own records. In direct
+mode findings, files left in ``error`` or unfinished, and a parse-failure dump explain it. In
+standard mode only two things do: a file left in ``error``, which both of its causes leave on every
+file of the batch that failed, and a file still ``processing``, which a run that died was holding. A
+``pending`` record there is one the manifest or ``--limit`` left out or a quota stop put back, and a
+dump can come from a batch that finished, so neither explains anything. An exit 1 that nothing
+explains is an ``error`` naming the step, and keeps no claim. What DeepSec prints is used to name
+the reason, never to decide the status, because text an agent's output can reach must not be able
+to turn a failure into a success; a full run reads it only beside an exit 1. A PR review, or a full
+run whose ``process`` exited 1, that was stopped by an exhausted quota, with an errored batch, or
+with a changed path DeepSec could not list (above) is ``partial`` when some file still reached a
+verdict and an ``error`` when none did, and its bundles are unresolved; a full run that exited 0
+stays ``partial`` either way. "Nothing to process" is a
 completed empty review only with exit 0, no file record, no changed path DeepSec could not list,
 and DeepSec's own statement that it found nothing to do; the same silence without that statement
 is an error.
@@ -186,9 +199,10 @@ CAPTURE_KEYS = ("model_requests", "model_responses", "tool_calls", "context_sele
                 "finding_filtered")
 THINKING_LEVELS = ("minimal", "low", "medium", "high", "xhigh")
 AGENTS = ("claude", "codex", "pi")
-# What DeepSec 2.3.10's direct-mode ``process`` prints when a run ends (process.ts and quota-message.ts
-# in its bundle). It colors its output whether or not stdout is a terminal, so the escape sequences
-# come off before anything is matched.
+# What DeepSec 2.3.10's ``process`` prints when a run ends (process.ts and quota-message.ts in its
+# bundle): both modes print the same summary and quota lines, and only direct mode says it had nothing
+# to process. It colors its output whether or not stdout is a terminal, so the escape sequences come
+# off before anything is matched.
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 NOTHING_TO_PROCESS = re.compile("^Nothing to process \u2014 exit 0\\.$", re.MULTILINE)
 QUOTA_STOPPED = re.compile("^\u2718 Stopped: (.+) exhausted$", re.MULTILINE)
@@ -198,6 +212,10 @@ PROCESS_ERRORED_BATCHES = re.compile(r"^ *Errored batches: ([0-9]+)$", re.MULTIL
 PROCESS_OUTPUT_TAIL = 16384
 # Direct mode's exit for findings, an errored batch and an exhausted quota, and for a runtime failure.
 DIRECT_MODE_EXIT = 1
+# Standard mode's exit for an errored batch and an exhausted quota, never for findings, and for a
+# runtime failure (processCommand in 2.3.10). It prints the reason on stdout, after every record is
+# written.
+STANDARD_MODE_EXIT = 1
 # DeepSec 2.3.10's exportCommand applies these exclusions unless --include-resolved is
 # passed. This adapter deliberately preserves the producer's defaults and passes no such flag.
 DEFAULT_EXPORT_RESOLVED_VERDICTS = ("fixed", "false-positive", "accepted-risk", "duplicate")
@@ -752,12 +770,18 @@ class RecordStatuses(NamedTuple):
     does not have. That is not a state to interpret: this adapter cannot say whether the file
     was finished, so it says so, and the run is partial with its bundles unresolved rather than
     guessing in the direction that earns credit.
+
+    ``held`` is the subset of ``unfinished`` in ``processing``. Standard-mode ``process`` claims
+    every record it selected as ``processing`` before its first batch, so one still held after
+    the run is a run that ended while working on it; a ``pending`` record is one it never
+    selected (the manifest or ``--limit`` left it out) or put back after a quota stop.
     """
 
     finished: int
     unfinished: tuple[str, ...]
     errored: tuple[str, ...]
     invalid: tuple[tuple[str, str], ...]
+    held: tuple[str, ...] = ()
 
     @property
     def incomplete(self) -> int:
@@ -771,12 +795,15 @@ def record_statuses(files: tuple[tuple[str, dict], ...]) -> RecordStatuses:
     unfinished: list[str] = []
     errored: list[str] = []
     invalid: list[tuple[str, str]] = []
+    held: list[str] = []
     for name, record in files:
         status = record.get("status") if isinstance(record, dict) else None
         if status == FINISHED_STATUS:
             finished += 1
         elif status in UNFINISHED_STATUSES:
             unfinished.append(f"{name} ({status})")
+            if status == "processing":
+                held.append(name)
         elif status == "error":
             errored.append(name)
         elif status is None:
@@ -787,7 +814,7 @@ def record_statuses(files: tuple[tuple[str, dict], ...]) -> RecordStatuses:
             invalid.append((name, f"the status {status!r} is not one DeepSec declares "
                                   f"({', '.join(RECORD_STATUSES)})"))
     return RecordStatuses(finished, tuple(sorted(unfinished)), tuple(sorted(errored)),
-                          tuple(sorted(invalid)))
+                          tuple(sorted(invalid)), tuple(sorted(held)))
 
 
 class Records(NamedTuple):
@@ -2414,7 +2441,7 @@ def failed_batch_count(agent: str, records: Records, statuses: RecordStatuses, o
 
 
 class ProcessOutput(NamedTuple):
-    """What DeepSec printed at the end of one direct-mode ``process`` run, and nothing more.
+    """What DeepSec printed at the end of one ``process`` run, in either mode, and nothing more.
 
     Every field is absent unless DeepSec's own summary line for it is there. This is advisory by
     construction: stdout is text an agent's output can reach, so nothing here decides a status.
@@ -2430,7 +2457,7 @@ class ProcessOutput(NamedTuple):
 
 
 def read_process_output(text: str) -> ProcessOutput:
-    """The summary of one direct-mode ``process`` run, read from the end of its stdout.
+    """The summary of one ``process`` run, read from the end of its stdout.
 
     The last match of each line wins, since a summary is printed once and after everything else.
     An empty or unreadable stdout is a :class:`ProcessOutput` with nothing in it, never an error:
@@ -2779,7 +2806,9 @@ class DeepsecAdapter(Adapter):
     name = "deepsec"
     # 1.2.0 honors config.process_manifest_by_tree; an earlier adapter ignores the key and runs unscoped.
     # An experiment frozen against 1.1.0 is refused as adapter version drift until it is frozen again.
-    adapter_version = "1.2.0"
+    # 1.2.1 reads a full run's standard-mode process exit 1 from the records instead of ending the run
+    # with no claims, so the records of a failed batch written before and after can be told apart.
+    adapter_version = "1.2.1"
     requires_git = False
     supported_languages = frozenset({"python", "javascript", "typescript", "go", "rust"})
     scan_modes = frozenset({"full", "pr"})
@@ -2844,6 +2873,8 @@ class DeepsecAdapter(Adapter):
         the partial stdout and stderr of every step kept as raw artifacts. A step that exits
         non-zero ends it as an error naming that step, because a stage that failed did not
         produce the records the next stage reads and the result must not read as a quiet scan.
+        The exception is ``process``'s exit 1, DeepSec's own signal that a run ended short: the run
+        goes on to export and is classified from the records, in a full run as in a PR review.
 
         A PR request (``request["input"]["mode"] == "pr"``) runs two steps instead: ``process
         --diff <base>..<head>``, DeepSec's direct mode, and ``export``. It is refused before
@@ -2948,6 +2979,8 @@ class DeepsecAdapter(Adapter):
         remaining = float(timeout_seconds)
         results: dict[str, Any] = {}
         timed_out_step = None
+        # The exit ``process`` uses for a run that ended short, which is classified from the records.
+        process_exit = DIRECT_MODE_EXIT if pr is not None else STANDARD_MODE_EXIT
         steps = ((("scan", scan_argv),) if pr is None else ()) + (("process", process_argv), ("export", export_argv))
         for step, argv in steps:
             stdout = Path(raw_dir) / f"deepsec-{step}.stdout.txt"
@@ -2967,10 +3000,11 @@ class DeepsecAdapter(Adapter):
                 timed_out_step = step
                 break
             if result.exit_code != 0:
-                if pr is not None and step == "process" and result.exit_code == DIRECT_MODE_EXIT:
-                    # Direct mode's own exit for findings, an errored batch and an exhausted quota.
-                    # It also exits 1 for a runtime failure, so what it means is decided below, from
-                    # the records; the run goes on to export either way.
+                if step == "process" and result.exit_code == process_exit:
+                    # DeepSec's own exit for a run that ended short: an errored batch or an exhausted
+                    # quota in either mode, and findings too in direct mode. It also exits 1 for a
+                    # runtime failure, so what it means is decided below, from the records; the run
+                    # goes on to export either way, since every verdict is on disk before it exits.
                     continue
                 break
 
@@ -3127,19 +3161,32 @@ class DeepsecAdapter(Adapter):
                 manifest_changed = ("the process manifest's bytes after the run differ from the bytes written "
                                     "before DeepSec started")
 
-        # A PR review's own facts. ``output`` is what DeepSec printed and is advisory only: what an
-        # exit 1 means is read from the records it left, which is where each of its three causes
-        # (findings, an errored batch, an exhausted quota) is written down as it happens.
+        # ``output`` is what DeepSec printed and is advisory only: what an exit 1 means is read from
+        # the records it left, which is where each of its causes (an errored batch, an exhausted
+        # quota, and in direct mode findings) is written down as it happens. A full run reads it
+        # only beside the exit 1 it is printed with, so text an agent's output can reach says
+        # nothing about a full run that exited 0.
         output = ProcessOutput()
-        process_result = results.get("process") if pr is not None else None
-        if process_result is not None:
+        process_result = results.get("process")
+        process_exited_short = (process_result is not None and not process_result.timed_out
+                                and process_result.exit_code == process_exit)
+        if process_result is not None and (pr is not None or process_exited_short):
             process_stdout = Path(raw_dir) / "deepsec-process.stdout.txt"
             output = read_process_output(bounded_tail(process_stdout, enclosure.write(process_stdout),
                                                       PROCESS_OUTPUT_TAIL))
         finding_records = sum(len(record["findings"]) for _name, record in records.files
                               if isinstance(record.get("findings"), list))
-        exit_one_explained = bool(finding_records or imported.claims or statuses.errored or statuses.unfinished
-                                  or records.debug)
+        if pr is not None:
+            exit_one_explained = bool(finding_records or imported.claims or statuses.errored or statuses.unfinished
+                                      or records.debug)
+        else:
+            # 2.3.10's standard mode exits 1 for an errored batch or an exhausted quota, and either one
+            # leaves every file of the batch that failed in ``error``; it puts back to ``pending`` only
+            # what it never started. A ``pending`` record is what the manifest or ``--limit`` left out,
+            # so it explains nothing, and neither does a finding or a parse-failure dump on its own (a
+            # batch that drops an invalid field writes one and finishes). A record still
+            # ``processing`` is one a run that died was holding, which is an incomplete AI stage.
+            exit_one_explained = bool(statuses.errored or statuses.held)
 
         trace_path = (trace_dir / "events.jsonl") if trace_dir is not None else None
         capture_state: dict | None = None
@@ -3264,25 +3311,46 @@ class DeepsecAdapter(Adapter):
         ] + notes + list(imported.notes) + finding_import_notes
         if scope is not None:
             left_out = len(scope.unselected) + scope.external
+            # A listed path's missing record is DeepSec's triage only when its scan ran to the end; a
+            # scan that failed or was killed leaves a record list that says nothing about any path.
+            scan_result = results.get("scan")
+            scan_unfinished = ("never ran" if scan_result is None
+                               else "ran out of the shared time budget" if scan_result.timed_out
+                               else f"exited {scan_result.exit_code}" if scan_result.exit_code != 0
+                               else None)
+            if scan_unfinished is None:
+                scope_account = (
+                    f"Its regex scan left {len(records.files)} file record(s); {len(scope.selected)} are on a listed "
+                    "path, which are the only ones standard-mode process could assign to an AI batch, and "
+                    f"{left_out} regex candidate file(s) were assigned no AI batch"
+                    + (f" ({_listed(scope.unselected)})" if scope.unselected else "")
+                    + (f", {scope.external} of them under a record name outside the tree" if scope.external else "")
+                    + ". Their records stay as DeepSec wrote them, and a partial run that carries claims lists "
+                    "their paths as omitted. Batch assignment does not restrict repository access: the agent still "
+                    "sees the whole repository and may have read unlisted files, so an omitted path is a candidate "
+                    "with no assigned verdict, not evidence that it was never read. "
+                    f"{len(scope.listed_without_record)} listed path(s) got no file record"
+                    + (f" ({_listed(scope.listed_without_record)})" if scope.listed_without_record else "")
+                    + ": DeepSec's scan found no regex candidate there or its ignore filter skipped them, so no AI "
+                    "batch ran on them; that is native triage, not a model's miss"
+                    + (f", unless the record is one of the {len(records.failures)} DeepSec record(s) this run could "
+                       "not read" if records.failures else "")
+                    + ". ")
+            else:
+                scope_account = (
+                    f"Its regex scan {scan_unfinished} before it finished, so no AI batch was assigned and the "
+                    f"{len(records.files)} file record(s) it left are not a full list of its candidates. "
+                    f"{len(scope.listed_without_record)} listed path(s) have no file record"
+                    + (f" ({_listed(scope.listed_without_record)})" if scope.listed_without_record else "")
+                    + ", which says nothing about DeepSec's triage of them, since no scan completed. ")
             notes.append(
                 f"Curated diagnostic, not a blind full-repository benchmark: config.process_manifest_by_tree chose "
                 f"{len(scope.manifest)} repository-relative path(s) for input tree {tree_hash} before the run. The "
                 "manifest holds those paths only, with no case identifier, label, weakness class, expected result "
                 "or reason for the selection. "
-                f"Its regex scan left {len(records.files)} file record(s); {len(scope.selected)} are on a listed "
-                "path, which are the only ones standard-mode process could assign to an AI batch, and "
-                f"{left_out} regex candidate file(s) were assigned no AI batch"
-                + (f" ({_listed(scope.unselected)})" if scope.unselected else "")
-                + (f", {scope.external} of them under a record name outside the tree" if scope.external else "")
-                + ". Their records stay as DeepSec wrote them, and a run that carries claims lists their paths "
-                "as omitted. Batch assignment does not restrict repository access: the agent still sees the "
-                "whole repository and may have read unlisted files, so an omitted path is a candidate with no "
-                "assigned verdict, not evidence that it was never read. "
-                f"{len(scope.listed_without_record)} listed path(s) got no file record"
-                + (f" ({_listed(scope.listed_without_record)})" if scope.listed_without_record else "")
-                + ": DeepSec's scan found no regex candidate there or its ignore filter skipped them, so no AI "
-                "batch ran on them; that is native triage, not a model's miss. A curated run is never a success "
-                "and its bundles are unresolved, so it completes no control and earns no quiet credit.")
+                + scope_account
+                + "A curated run is never a success and its bundles are unresolved, so it completes no control "
+                "and earns no quiet credit.")
             if scope.unexpected or scope.out_of_scope_claims:
                 notes.append(
                     f"{len(scope.unexpected)} file record(s) the manifest does not list are not in the state a "
@@ -3293,20 +3361,30 @@ class DeepsecAdapter(Adapter):
                     "verdicts outside the declared AI-batch assignment.")
             if manifest_changed:
                 notes.append(f"Process manifest integrity: {manifest_changed}.")
+        exit_one_note = None
+        if process_exited_short and exit_one_explained:
+            said = ([f"{output.quota} exhausted"] if output.quota else []) + (
+                [f"{output.errored_batches} errored batch(es)"] if output.errored_batches else []) + (
+                [f"{output.findings} finding(s)"] if output.findings else [])
+            exit_one_note = (
+                "deepsec process exited 1 and the run went on to export: "
+                + ("in direct mode DeepSec exits 1 for findings, for an errored batch and for an exhausted quota, "
+                   f"and its records show {finding_records} finding(s), {len(statuses.errored)} file(s) in status "
+                   f"'error' and {unfinished_files} unfinished file(s)"
+                   if pr is not None else
+                   "in standard mode DeepSec exits 1 for an errored batch and for an exhausted quota, never for "
+                   f"findings, and its records show {len(statuses.errored)} file(s) in status 'error' and "
+                   f"{len(statuses.held)} still 'processing' when the run ended")
+                + ". What the exit meant was read from those records"
+                + (f"; DeepSec's own summary said {', '.join(said)}." if said else "."))
+        if pr is None and exit_one_note:
+            notes.append(exit_one_note)
         if pr is not None:
             if config.limit is not None:
                 notes.append(f"config.limit ({config.limit}) was not passed to DeepSec: its direct mode never applies "
                              "--limit, so it would have had no effect on which files were investigated.")
-            if process_result is not None and process_result.exit_code == DIRECT_MODE_EXIT and exit_one_explained:
-                said = ([f"{output.quota} exhausted"] if output.quota else []) + (
-                    [f"{output.errored_batches} errored batch(es)"] if output.errored_batches else []) + (
-                    [f"{output.findings} finding(s)"] if output.findings else [])
-                notes.append(
-                    "deepsec process exited 1 and the run went on to export: in direct mode DeepSec exits 1 for "
-                    "findings, for an errored batch and for an exhausted quota, and its records show "
-                    f"{finding_records} finding(s), {len(statuses.errored)} file(s) in status 'error' and "
-                    f"{unfinished_files} unfinished file(s). This run was classified from those records"
-                    + (f"; DeepSec's own summary said {', '.join(said)}." if said else "."))
+            if exit_one_note:
+                notes.append(exit_one_note)
             if selected is not None:
                 present = {change.path for change in changes if change.present}
                 excluded = sorted(present - selected)
@@ -3354,8 +3432,10 @@ class DeepsecAdapter(Adapter):
                    if process_manifest is not None else "never reached them, which is what ")
                 + "config.limit"
                 + (f" ({config.limit})" if config.limit is not None else "")
-                + " does, or was still holding them when the run ended. No model reached a "
-                "verdict on those files, so silence about them is not a negative result.")
+                + " does, or was still holding them when the run ended"
+                + (", or put them back unstarted when the run stopped short (process exited 1, which is how an "
+                   "exhausted quota ends it)" if process_exited_short else "")
+                + ". No model reached a verdict on those files, so silence about them is not a negative result.")
         if statuses.invalid:
             notes.append(
                 f"{len(statuses.invalid)} file record(s) carry a status this adapter cannot "
@@ -3382,11 +3462,15 @@ class DeepsecAdapter(Adapter):
                     # the run goes on, so the claims of the batches that finished are all there is.
                     # So is a changed path DeepSec never listed: the claims about the rest are a
                     # part delivered, and a budget read off a part reads as one read off the whole.
+                    # A full run whose process exited 1 with a file in ``error`` is the same case:
+                    # standard mode exits 1 for exactly that and the run goes on. A full run that
+                    # exited 0 with one (a batch whose results left a file out) keeps its bundles.
                     bundles_resolved=(findings_lost == 0 and identity_gaps == 0
                                       and native_validation_failures == 0
                                       and native_status_validation_failures == 0
                                       and not records.failures and statuses.incomplete == 0
-                                      and (pr is None or not (statuses.errored or omitted))
+                                      and (pr is None or not omitted)
+                                      and not (statuses.errored and (pr is not None or process_exited_short))
                                       # Claims over a curated scope are a part chosen before the run.
                                       and process_manifest is None))
         exit_code = None
@@ -3396,8 +3480,8 @@ class DeepsecAdapter(Adapter):
                 exit_code = result.exit_code
                 break
 
-        def tail(step: str) -> str:
-            """The tail of one step's stderr, read the way a scanner-owned path must be.
+        def tail(step: str, stream: str = "stderr") -> str:
+            """The tail of one step's stderr, or its stdout, read the way a scanner-owned path must be.
 
             DeepSec can replace this file after its own descriptor closed, so it is read
             through :func:`bounded_tail`: contained in this run's raw output, no symbolic link
@@ -3405,7 +3489,7 @@ class DeepsecAdapter(Adapter):
             whole file. An unreadable one costs the quoted tail and not the failure being
             reported.
             """
-            path = Path(raw_dir) / f"deepsec-{step}.stderr.txt"
+            path = Path(raw_dir) / f"deepsec-{step}.{stream}.txt"
             return bounded_tail(path, enclosure.write(path))
 
         if timed_out_step is not None:
@@ -3421,17 +3505,25 @@ class DeepsecAdapter(Adapter):
                                             "message": f"deepsec {step} never ran; an earlier step "
                                                        "ended the invocation"}, **base)
             if result.exit_code != 0:
-                direct_exit = pr is not None and step == "process" and result.exit_code == DIRECT_MODE_EXIT
-                if direct_exit and exit_one_explained:
-                    # Direct mode's exit 1 for findings, an errored batch or an exhausted quota, and
-                    # its records say which one it was; the status below is made from them.
+                short = step == "process" and result.exit_code == process_exit
+                if short and exit_one_explained:
+                    # DeepSec's exit 1 for a run that ended short, and its records say how; the
+                    # status below is made from them.
                     continue
                 message = f"deepsec {step} exited {result.exit_code}; stderr: {tail(step)}"
-                if direct_exit:
+                if short and pr is not None:
                     message = ("deepsec process exited 1 and left no finding, no file in status 'error' or "
                                "unfinished and no parse-failure dump, which is what an exit 1 means in direct "
                                "mode; it also exits 1 for a runtime failure such as an unresolvable range; "
                                f"stderr: {tail(step)}")
+                elif short:
+                    # Standard mode prints its reason on stdout, so both are quoted, stderr first, each
+                    # bounded so that neither can push the other out of the message.
+                    printed = ANSI_ESCAPE.sub("", tail(step, "stdout")).strip()[-500:]
+                    message = ("deepsec process exited 1 and left no file in status 'error' and none still "
+                               "'processing', which is what an exit 1 means in standard mode (an errored batch or "
+                               "an exhausted quota leaves its batch's files in 'error'); it also exits 1 for a "
+                               f"runtime failure; stderr: {tail(step)[-1000:]}; stdout: {printed}")
                 return NativeOutcome(status="error", exit_code=result.exit_code, claims=[],
                                      error={"code": f"{step}_exit_{result.exit_code}",
                                             "message": message[:2000]}, **base)
@@ -3446,19 +3538,21 @@ class DeepsecAdapter(Adapter):
             """The outcome of a run that reached no verdict on part of what it was given.
 
             ``partial``, carrying the claims DeepSec did produce, in every mode. The one refinement
-            is a PR review in which no file reached a verdict at all: with nothing analyzed there is
-            no partial observation to report, so it is an ``error`` with no claims.
+            is a PR review, or a full run whose ``process`` exited 1, in which no file reached a
+            verdict at all: with nothing analyzed there is no partial observation to report, so it is
+            an ``error`` with no claims. A full run that exited 0 keeps its ``partial``, as it always
+            did.
             """
-            if pr is not None:
+            if pr is not None or process_exited_short:
                 # What DeepSec wrote to stderr says why a run that stopped short stopped, when it
                 # crashed instead of running out of quota, and costs nothing when it is empty.
-                if process_result is not None and process_result.exit_code == DIRECT_MODE_EXIT:
+                if process_exited_short:
                     detail = tail("process").strip()
                     message = f"{message}; deepsec process stderr: {detail}" if detail else message
                 if statuses.finished == 0:
                     return NativeOutcome(status="error", exit_code=exit_code, claims=[],
                                          error={"code": code, "message": (f"{message}; no file reached a verdict, so "
-                                                                          "none of the change was observed")[:2000]},
+                                                                          f"none of the {subject} was observed")[:2000]},
                                          **base)
                 message = message[:2000]
             return NativeOutcome(status="partial", exit_code=exit_code, claims=imported.claims,
@@ -3486,16 +3580,18 @@ class DeepsecAdapter(Adapter):
                                                     f"additive losses: {detail}")[:2000]},
                                  omitted_paths=unexamined, examined_nothing=nothing_examined, **base)
 
-        if pr is not None and output.quota and (statuses.errored or statuses.unfinished):
+        subject = "input" if pr is None else "change"
+        # Which of two failures the records already show is named from what DeepSec printed; a full run
+        # reads that only beside the exit it prints it with, since standard mode exits 1 on a quota.
+        if (pr is not None or process_exited_short) and output.quota and (statuses.errored or statuses.unfinished):
             return stopped("quota_exhausted",
                            f"deepsec process stopped: {output.quota} exhausted, in DeepSec's own words. "
                            f"{statuses.finished} of {len(records.files)} file record(s) reached a verdict, "
                            f"{len(statuses.errored)} were left in status 'error' and {unfinished_files} were never "
-                           "finished, so the rest of the change was not reviewed")
-        subject = "input" if pr is None else "change"
+                           f"finished, so the rest of the {subject} was not reviewed")
         if batches_failed:
             counted = (f"; DeepSec itself counted {output.errored_batches} errored batch(es)"
-                       if pr is not None and output.errored_batches else "")
+                       if output.errored_batches else "")
             # The cause, when the sessions' own transcripts recorded one as how they ended. Named by
             # closed code only; a refusal a session recovered from is not a cause of anything here.
             caused = ("; the Claude Code CLI recorded the provider refusing a request that ended "
@@ -3526,8 +3622,11 @@ class DeepsecAdapter(Adapter):
             # The AI stage never finished with these files. A ``success`` here would let the
             # scoring contract treat every assigned control as completed and grant quiet credit
             # for a file no model reached a verdict on, which is the one thing this adapter's
-            # notes say the run does not establish. The status now says it too.
-            limit = f" under config.limit {config.limit}" if config.limit is not None and pr is None else ""
+            # notes say the run does not establish. The status now says it too. A run whose process
+            # exited 1 was still holding some of them when it died, which its stderr names, so the
+            # limit is not offered as the cause.
+            limit = (f" under config.limit {config.limit}"
+                     if config.limit is not None and pr is None and not process_exited_short else "")
             return stopped("scope_incomplete",
                            f"{unfinished_files} of {len(records.files)} file "
                            f"record(s) were left unfinished{limit} "

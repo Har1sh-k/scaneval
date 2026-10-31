@@ -44,7 +44,7 @@ The upstream proposal is tracked by [securevibes-agent issue #205](https://githu
 
 **Corrective action:** Require native `scan -> process -> export` completion for a successful full run, or the scanner's documented native PR path followed by export. Preserve findings when a batch fails, but mark the run partial/error according to observed coverage. Record regex candidates separately from model-selected or curated intersections. Treat “no candidate, therefore no AI batch” as a triage outcome, not a failed AI call.
 
-**Regression/acceptance check:** Fixtures cover each stage failing or timing out, mixed successful/failed batches, unreadable exports, no-candidate runs, and findings plus failure. Assert stage receipts, population counts, conservation, preserved findings, and truthful status. A zero-finding toy file establishes only that invocation's output; it does not measure accuracy, prove a false negative, or validate an open-context condition.
+**Regression/acceptance check:** Fixtures cover each stage failing or timing out, mixed successful/failed batches, unreadable exports, no-candidate runs, and findings plus failure. The fake must exit exactly as the pinned binary does in each of those cases: 2.3.10's standard-mode `process` exits 1 for an errored batch or an exhausted quota after writing every record, and a fake that exited 0 there hid a full-run path that discarded every finished batch's claims. Assert stage receipts, population counts, conservation, preserved findings, and truthful status. A zero-finding toy file establishes only that invocation's output; it does not measure accuracy, prove a false negative, or validate an open-context condition.
 
 ## Reconstructing identity from a lossy native export
 
