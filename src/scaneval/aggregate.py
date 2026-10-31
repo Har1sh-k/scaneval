@@ -59,8 +59,9 @@ one input's control in more than one way warns, naming the input, the controls, 
 put them, and the runs, and saying either that their quiet assessments are not credited under one
 rule, when a result of that input lists an omitted path or says it examined nothing, or that no credit
 depends on it, when none does. Only in the first case does :func:`compare` refuse two systems whose
-bundles place a control of that input differently, counting how many of each system's bundles place it
-each way, because a difference in its credit may then be the plans', not the systems'.
+bundles place a control of that input differently, weighing each system's bundles that place it each
+way as the metrics weigh them, a bundle of a run of k repetitions at 1/k, because a difference in its
+credit may then be the plans', not the systems'.
 
 Pairs. A vulnerable/fixed pair is scored on whole canonical items, not on the one record it names:
 its vulnerable side is the whole canonical target, and its fixed state the whole canonical control
@@ -1879,10 +1880,10 @@ def _placements(corpus: _Corpus, mode: str, profile: str, system_ids: Iterable[s
 
     Keyed by (input id, control id): each placement, the paths a plan gives the control or ``None`` for
     none, maps to the (run id, system id, repetition) of every bundle whose plan gave it, so that the
-    bundles placing a control one way can be counted, not only named. Only read bundles of *system_ids*
-    count; a failure has no plan and says nothing about where a control is. An input whose schedule froze
-    no plan takes no part in any control metric, so where its bundles place a control changes no credit
-    and is not collected.
+    bundles placing a control one way can be weighed by their runs' repetitions, not only named. Only read
+    bundles of *system_ids* count; a failure has no plan and says nothing about where a control is. An
+    input whose schedule froze no plan takes no part in any control metric, so where its bundles place a
+    control changes no credit and is not collected.
 
     The second value holds the ids of the inputs one of whose collected bundles has a result that lists
     an omitted path or says ``examined_nothing`` (``_Observation.omitting``), whichever system's it is.
@@ -2191,26 +2192,53 @@ def _contract_gap(baseline: dict, candidate: dict, names: tuple[str, str]) -> st
     return "their frozen vulnerable/fixed pairs differ"
 
 
-def _counted(counts: Counter) -> str:
-    """How many bundles place a control each way, in words: ``nowhere in 2 and on app.py in 1``."""
-    return " and ".join(f"{_placed(paths)} in {counts[paths]}" for paths in sorted(counts, key=_placement_order))
+def _placement_weights(seen: dict[Placement, set[tuple[str, str, int]]], system_id: str,
+                       repetitions: Callable[[str], int]) -> dict[Placement, Fraction]:
+    """What one system's read bundles that place a control each way weigh in its control metrics.
+
+    :func:`_mean_per_item` weighs each outcome on a control's positive input by one over its run's declared
+    repetitions, so a bundle of a run of k_m repetitions weighs 1/k_m here, *repetitions* giving k_m by run
+    id as :meth:`_Corpus.repetitions` gives it to the metrics, never the number of bundles read. A
+    placement weighs the sum over the bundles that give it: one for a run whose every bundle was read and
+    places the control that way, whatever its repetitions. Nothing is normalized: a failure reads no plan
+    and weighs nothing here, as it adds nothing to a mass.
+    """
+    weights: dict[Placement, Fraction] = defaultdict(Fraction)
+    for paths, where in seen.items():
+        for run_id, system, _repetition in where:
+            if system == system_id:
+                weights[paths] += Fraction(1, repetitions(run_id))
+    return dict(weights)
 
 
-def _placement_gap(placements: Placements, omitting: set[str], names: tuple[str, str]) -> str | None:
+def _weighed(weights: dict[Placement, Fraction]) -> str:
+    """What a system's bundles weigh each way, in words: ``nowhere with weight 2 and on app.py with weight 1/2``."""
+    return " and ".join(f"{_placed(paths)} with weight {weights[paths]}"
+                        for paths in sorted(weights, key=_placement_order))
+
+
+def _placement_gap(placements: Placements, omitting: set[str], names: tuple[str, str],
+                   repetitions: Callable[[str], int]) -> str | None:
     """The first input whose bundles place a control in one mix for one system and another for the other, in words.
 
     The frozen contract cannot show this: a schedule freezes which controls an input carries, never where
     they are, and the bundle plans say that (see :func:`_placements`). A system's placements of a control
-    are counted over its own read bundles of every run that scheduled it: how many place it nowhere and how
-    many on each set of paths. Two systems with the same counts were scored under the same mix of plans. A
-    set of placements cannot show that: a system whose bundles place a control nowhere twice and by its
-    paths once, and one whose bundles do so once and twice, share the set {nowhere, placed} and still score
-    the same evidence under different mixes of plans, so a difference in their control rates could be the
-    mixes'. A failure reads no plan, so a system with fewer read bundles than the other differs only when
-    its placements are mixed: two systems whose every read bundle places the control one way, the same way,
-    were scored under one plan whatever their counts. A system with no read bundle of the input has nothing
-    to compare and differs in nothing, and placements that are mixed alike for both systems are not a
-    difference (the view's warnings name them).
+    are weighed over its own read bundles of every run that scheduled it as the metrics weigh them: a
+    bundle of a run of k_m repetitions weighs 1/k_m, and each placement, nowhere or on a set of paths, the
+    sum over the bundles that give it (:func:`_placement_weights`, *repetitions* giving k_m by run id). The
+    metrics also divide by the number of the control's positive inputs, which the frozen contract, checked
+    first by :func:`compare`, makes the same for both systems, as it makes each input's repetitions; so two
+    systems whose placements weigh the same were scored under the same mix of plans. Neither the set of
+    placements nor a count of bundles shows that. A system whose bundles place a control nowhere twice and
+    by its paths once, and one whose bundles do so once and twice, share the set {nowhere, placed}. A
+    system whose plans place a control nowhere in its runs of one and two repetitions and by its paths in
+    its run of three, and one whose plans do the reverse, each have three bundles each way, yet two of the
+    first's three runs place it nowhere and one of the second's: over the same evidence on a scanned file,
+    the first earns the control half the quiet credit the second does. A failure reads no plan, so a system
+    with fewer read bundles than the other differs only when its placements are mixed: two systems whose
+    every read bundle places the control one way, the same way, were scored under one plan whatever their
+    weights. A system with no read bundle of the input has nothing to compare and differs in nothing, and
+    placements that are mixed alike for both systems are not a difference (the view's warnings name them).
 
     Only an input in *omitting* can differ: one with a result, of either system, that lists an omitted
     path or says ``examined_nothing``. The scorer withholds quiet credit for what a scan did not examine
@@ -2222,16 +2250,16 @@ def _placement_gap(placements: Placements, omitting: set[str], names: tuple[str,
     for (input_id, control_id), seen in sorted(placements.items()):
         if input_id not in omitting:
             continue
-        sides = [Counter(paths for paths, where in seen.items() for _run, system, _ in where if system == name)
-                 for name in names]
+        sides = [_placement_weights(seen, name, repetitions) for name in names]
         one_plan = len(sides[0]) == len(sides[1]) == 1 and sides[0].keys() == sides[1].keys()
         if all(sides) and sides[0] != sides[1] and not one_plan:
-            differing[input_id].append(f"{control_id} {_counted(sides[0])} of the bundles of {names[0]}, and "
-                                       f"{_counted(sides[1])} of those of {names[1]}")
+            differing[input_id].append(f"{control_id} {_weighed(sides[0])} among the bundles of {names[0]}, and "
+                                       f"{_weighed(sides[1])} among those of {names[1]}")
     if not differing:
         return None
     input_id = min(differing)
-    return f"input {input_id} places {'; '.join(differing[input_id])}"
+    return (f"input {input_id} places {'; '.join(differing[input_id])}, each bundle weighing one over its run's "
+            "repetitions as the metrics weigh it")
 
 
 def _path_segment(key: str) -> str:
@@ -2348,19 +2376,20 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
     gate policy must name them to measure them, and a curated system's caveat is in every view.
 
     Where a result of one input, of either system, lists an omitted path or says ``examined_nothing``, the
-    two systems' bundles must also place every control of that input alike: as many bundles of each
-    placing it each way, or, since a failure reads no plan, every bundle of both placing it the same one
-    way. The frozen contract cannot show this (see :func:`_placement_gap`), and two that do not are
-    refused before a metric is computed ("the systems were not scored against one plan"). A
-    baseline run before full plans placed controls and a candidate run since, over the same evidence,
-    would otherwise credit the candidate's quiet controls on scanned files and withhold the baseline's,
-    and show the plans' difference as an improvement; so would two systems that each have runs from
-    both sides of that change in different numbers. Only such a result has quiet credit withheld for
-    what its scan did not examine, so where no result of an input lists an omitted path or says it
-    examined nothing, every placement of its controls earns the same credit: such a difference is not
-    refused, and each view's warnings name the input and the controls whose placement differs and say
-    that no credit depends on it. Bundles that place a control in several ways, as many of each system's
-    bundles each way, are not refused either; each view's warnings name them, as :func:`aggregate` does.
+    two systems' bundles must also place every control of that input alike: each way with the same weight
+    for both, a bundle weighing one over its run's repetitions as in the metrics, or, since a failure reads
+    no plan, every bundle of both placing it the same one way. The frozen contract cannot show this (see
+    :func:`_placement_gap`), and two that do not are refused before a metric is computed ("the systems
+    were not scored against one plan"). A baseline run before full plans placed controls and a candidate
+    run since, over the same evidence, would otherwise credit the candidate's quiet controls on scanned
+    files and withhold the baseline's, and show the plans' difference as an improvement; so would two
+    systems that each have runs from both sides of that change in different numbers, or in runs of
+    different repetitions. Only such a result has quiet credit withheld for what its scan did not examine,
+    so where no result of an input lists an omitted path or says it examined nothing, every placement of
+    its controls earns the same credit: such a difference is not refused, and each view's warnings name the
+    input and the controls whose placement differs and say that no credit depends on it. Bundles that
+    place a control in several ways, with the same weight for each system each way, are not refused either;
+    each view's warnings name them, as :func:`aggregate` does.
     """
     if baseline == candidate:
         raise ContractError("the baseline and the candidate are one system; name two systems to compare")
@@ -2376,7 +2405,7 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
         raise ContractError(f"the systems do not share the frozen evaluation contract: {gap}")
     placements = {view: _placements(corpus, *view, (baseline, candidate)) for view in _view_keys(corpus, (baseline,))}
     for found, omitting in placements.values():
-        gap = _placement_gap(found, omitting, (baseline, candidate))
+        gap = _placement_gap(found, omitting, (baseline, candidate), corpus.repetitions)
         if gap is not None:
             raise ContractError(
                 f"the systems were not scored against one plan: {gap}, and a result of that input lists an omitted "

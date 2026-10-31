@@ -1861,25 +1861,35 @@ PLACEMENT_WARNING = PLACED_TWO_WAYS + (
 NO_CREDIT_DEPENDS = PLACED_TWO_WAYS + (
     "and no result of that input lists an omitted path or says it examined nothing, so no credit depends on where "
     "they are placed")
+WEIGHED = ", each bundle weighing one over its run's repetitions as the metrics weigh it"
+# The refusal of a baseline whose plans place each control nowhere with weight 2 and by its paths with weight 1, and
+# a candidate whose plans do the reverse.
+MIXED_TWO_TO_ONE = (
+    "the systems were not scored against one plan: input widget places C-omitted nowhere with weight 2 and on "
+    "vendor/helper.py with weight 1 among the bundles of baseline, and nowhere with weight 1 and on vendor/helper.py "
+    "with weight 2 among those of candidate; C-scanned nowhere with weight 2 and on app.py with weight 1 among the "
+    "bundles of baseline, and nowhere with weight 1 and on app.py with weight 2 among those of candidate")
 OMITTING = ", and a result of that input lists an omitted path or says it examined nothing; "
 SCANNED_EVERYTHING = {"omitted": [], "examined_nothing": False}
 
 
-def placement_run(root: Path, run_id: str, systems: tuple[str, ...], *, placed: bool,
+def placement_run(root: Path, run_id: str, systems: tuple[str, ...], *, placed: bool, repetitions: int = 1,
                   omitted=("README.md", "vendor/helper.py"), examined_nothing=None) -> Path:
-    """One input with two safe controls, scanned once per system, each result omitting README.md and vendor/helper.py.
+    """One input with two safe controls, each system's scans of it omitting README.md and vendor/helper.py.
 
-    Every control is assessed quiet. ``placed`` has each bundle's plan place C-scanned on app.py and C-omitted on
-    vendor/helper.py, as a plan written today does; without it the plans place nothing, as a standard input's plan
-    written before full plans placed controls did. ``omitted`` and ``examined_nothing`` say what else each result
-    says its scan left out (``None`` leaves the field out): an empty list and ``False`` say a scan that examined
-    every path, as a Semgrep full scan that showed every file scanned does.
+    Each system scans it *repetitions* times, once by default, and every control is assessed quiet. ``placed`` has
+    each bundle's plan place C-scanned on app.py and C-omitted on vendor/helper.py, as a plan written today does;
+    without it the plans place nothing, as a standard input's plan written before full plans placed controls did.
+    ``omitted`` and ``examined_nothing`` say what else each result says its scan left out (``None`` leaves the field
+    out): an empty list and ``False`` say a scan that examined every path, as a Semgrep full scan that showed every
+    file scanned does.
     """
     inputs = [planned("widget", controls=[control("C-scanned"), control("C-omitted")])]
     spec = scan(omitted=None if omitted is None else list(omitted), examined_nothing=examined_nothing,
                 paths=PLACED if placed else None)
-    return write_run(root, run_id, inputs, systems=systems,
-                     outcomes={("widget", system_id, 1): spec for system_id in systems})
+    return write_run(root, run_id, inputs, systems=systems, repetitions=repetitions,
+                     outcomes={("widget", system_id, repetition): spec
+                               for system_id in systems for repetition in range(1, repetitions + 1)})
 
 
 def test_a_view_names_an_input_whose_bundle_plans_place_its_controls_in_two_ways(tmp_path):
@@ -1917,11 +1927,11 @@ def test_a_comparison_whose_systems_bundles_place_a_control_differently_is_refus
         aggregate.compare([run_a, run_b], baseline="baseline", candidate="candidate", policy=policy())
 
     assert str(refused.value).startswith(
-        "the systems were not scored against one plan: input widget places C-omitted nowhere in 1 of the bundles of "
-        "baseline, and on vendor/helper.py in 1 of those of candidate; C-scanned nowhere in 1 of the bundles of "
-        "baseline, and on app.py in 1 of those of candidate" + OMITTING
-        + "a control placed nowhere earns no quiet credit once its result lists any omitted path, so a difference "
-          "in its credit may be the plans', not the systems'")
+        "the systems were not scored against one plan: input widget places C-omitted nowhere with weight 1 among the "
+        "bundles of baseline, and on vendor/helper.py with weight 1 among those of candidate; C-scanned nowhere with "
+        "weight 1 among the bundles of baseline, and on app.py with weight 1 among those of candidate" + WEIGHED
+        + OMITTING + "a control placed nowhere earns no quiet credit once its result lists any omitted path, so a "
+                     "difference in its credit may be the plans', not the systems'")
 
 
 
@@ -1995,19 +2005,76 @@ def test_a_comparison_whose_systems_bundles_place_a_control_both_ways_in_differe
     with pytest.raises(ContractError) as refused:
         aggregate.compare(runs, baseline="baseline", candidate="candidate", policy=policy())
 
-    assert str(refused.value).startswith(
-        "the systems were not scored against one plan: input widget places C-omitted nowhere in 2 and on "
-        "vendor/helper.py in 1 of the bundles of baseline, and nowhere in 1 and on vendor/helper.py in 2 of those of "
-        "candidate; C-scanned nowhere in 2 and on app.py in 1 of the bundles of baseline, and nowhere in 1 and on "
-        "app.py in 2 of those of candidate" + OMITTING)
+    assert str(refused.value).startswith(MIXED_TWO_TO_ONE + WEIGHED + OMITTING)
+
+
+def test_a_comparison_whose_systems_bundles_place_a_control_alike_in_number_but_not_in_weight_is_refused(tmp_path):
+    """Each system has runs of one, two, and three repetitions of the input, over the same evidence.
+
+    The baseline's plans place nothing in its runs of one and two repetitions and place each control in its run of
+    three; the candidate's do the reverse. Each system's bundles place each control nowhere three times and by its
+    paths three times, so their counts agree, but the metrics do not count bundles: each run of the input weighs one
+    and its repetitions share it, so the baseline's plans place each control nowhere with weight 2 and by its paths
+    with weight 1, and the candidate's the reverse. C-scanned, quiet on a file every scan read, is resolved in three
+    bundles of each system, yet in a third of the baseline's weight and two thirds of the candidate's: averaged with
+    C-omitted, which no scan credits, the capability_safe assessable masses are 1/6 and 1/3, a difference of the
+    plans alone.
+    """
+    runs = [placement_run(tmp_path, f"run-{system_id}-{repetitions}", (system_id,), repetitions=repetitions,
+                          placed=repetitions == 3 if system_id == "baseline" else repetitions != 3)
+            for system_id in ("baseline", "candidate") for repetitions in (1, 2, 3)]
+    report = aggregate.aggregate(runs, policy=policy())
+    safe = {system_id: slice_of(system(view(report), system_id))["controls"]["capability_safe"]
+            for system_id in ("baseline", "candidate")}
+    assert {system_id: block["resolved"] for system_id, block in safe.items()} == {"baseline": 3, "candidate": 3}
+    assert {system_id: block["assessable_mass"] for system_id, block in safe.items()} == {
+        "baseline": 1 / 6, "candidate": 1 / 3}, "the same quiet evidence, weighed under two mixes of plans"
+
+    with pytest.raises(ContractError) as refused:
+        aggregate.compare(runs, baseline="baseline", candidate="candidate", policy=policy())
+
+    assert str(refused.value).startswith(MIXED_TWO_TO_ONE + WEIGHED + OMITTING)
+
+
+@pytest.mark.parametrize("repetitions", [(1, 3), (2, 2)],
+                         ids=["runs-of-one-and-three-repetitions", "runs-of-two-repetitions-each"])
+def test_systems_whose_bundles_place_a_control_each_way_with_the_same_weight_compare(tmp_path, repetitions):
+    """Each system has two runs of the input, its plans placing nothing in one and each control in the other, swapped.
+
+    The baseline's plans place nothing in its first run and each control in its second; the candidate's do the
+    reverse. Each run of the input weighs one and its repetitions share it, so both systems' plans place each control
+    nowhere with weight 1 and by its paths with weight 1. Over the same evidence C-scanned is credited in half of
+    each system's weight, so both capability_safe assessable masses are 1/4, averaged with C-omitted, and the
+    comparison stands with no difference in any control figure; its view names both placements. With runs of one and
+    three repetitions the counts differ, one bundle of the baseline placing nothing against three of the candidate,
+    and are not what the metrics weigh.
+    """
+    first, second = repetitions
+    runs = [placement_run(tmp_path, "run-baseline-1", ("baseline",), placed=False, repetitions=first),
+            placement_run(tmp_path, "run-baseline-2", ("baseline",), placed=True, repetitions=second),
+            placement_run(tmp_path, "run-candidate-1", ("candidate",), placed=True, repetitions=first),
+            placement_run(tmp_path, "run-candidate-2", ("candidate",), placed=False, repetitions=second)]
+
+    comparison = aggregate.compare(runs, baseline="baseline", candidate="candidate", policy=policy())
+
+    assert [slice_of(view(comparison)["systems"][side])["controls"]["capability_safe"]["assessable_mass"]
+            for side in ("baseline", "candidate")] == [0.25, 0.25]
+    difference = next(item for item in view(comparison)["differences"] if item["slice"]["dimension"] == "all")
+    safe = difference["controls"]["capability_safe"]
+    assert (safe["assessable_mass"], safe["completed_upper"]["value"], safe["resolved_rate"]["value"]) == (0.0, 0.0, 0.0)
+    nowhere, placed = "run-baseline-1, run-candidate-2", "run-baseline-2, run-candidate-1"
+    assert view(comparison)["warnings"] == [
+        f"input widget: its bundle plans place C-omitted nowhere in {nowhere} and on vendor/helper.py in {placed}; "
+        f"C-scanned nowhere in {nowhere} and on app.py in {placed}, so their quiet assessments are not credited under "
+        "one rule: a control placed nowhere earns none once its result lists any omitted path"]
 
 
 def test_systems_whose_every_bundle_places_a_control_one_way_compare_though_one_read_fewer_bundles(tmp_path):
     """Both systems' plans place each control, and one of the candidate's two scans left no bundle.
 
-    The baseline's bundles place C-scanned on app.py twice and the candidate's once. A failure reads no plan, and
-    every bundle either system has was planned alike, so the counts differ by the failure alone: the comparison
-    stands, and nothing is said about placement.
+    The baseline's bundles place C-scanned on app.py twice, with weight 1, and the candidate's once, with weight 1/2.
+    A failure reads no plan, and every bundle either system has was planned alike, so the weights differ by the
+    failure alone: the comparison stands, and nothing is said about placement.
     """
     inputs = [planned("widget", controls=[control("C-scanned"), control("C-omitted")])]
     spec = scan(omitted=["README.md", "vendor/helper.py"], paths=PLACED)
