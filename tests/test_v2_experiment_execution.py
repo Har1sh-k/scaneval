@@ -506,27 +506,44 @@ def test_a_matrix_frozen_before_full_plans_placed_controls_validates_and_loads_w
             experiment.validate_frozen(drifted)
 
 
-@pytest.mark.parametrize("before_placement", [True, False], ids=["executed-before", "executed-since"])
-def test_a_matrix_frozen_before_full_plans_placed_controls_executes_and_reports_without_drift(
-        tmp_path, monkeypatch, before_placement):
-    """Execution and report accept the matrix, and each saved plan is the plan of its input.
+PLACED = ("2.1", [("C-fixture-safe", ["app.py"])])
 
-    Executed before full plans placed controls, the closed-book cell saved the pathless 2.0 plan the matrix froze;
-    executed since, it saves today's plan, which places the control on app.py. The identity-reduced cell's plan is
-    2.1 and placed the control either way. No observation is ineligible as drift.
+
+def test_an_experiment_executed_before_full_plans_placed_controls_reports_without_drift(tmp_path, monkeypatch):
+    """The matrix and the bundles an execution of it saved then, reported as they were saved.
+
+    The closed-book cell saved the pathless 2.0 plan the matrix froze, and the identity-reduced cell the 2.1 plan,
+    which placed the control then as now. Each is the frozen form of its input's plan, so no observation is
+    ineligible as drift.
     """
     adapter = Scanning()
     root, frozen = located_control_matrix(tmp_path, monkeypatch, adapter)
     output, manifest = execute_matrix(root, matrix_before_control_paths(frozen), adapter, monkeypatch,
-                                      before_placement=before_placement)
+                                      before_placement=True)
 
-    placed = ("2.1", [("C-fixture-safe", ["app.py"])])
-    assert saved_plans(output) == {
-        "closed_book_standard": ("2.0", [("C-fixture-safe", None)]) if before_placement else placed,
-        "identity_reduced": placed}
+    assert saved_plans(output) == {"closed_book_standard": ("2.0", [("C-fixture-safe", None)]),
+                                   "identity_reduced": PLACED}
     report = experiment.report(output)
     scanned_cells(manifest, report)
     assert [row["reasons"] for row in report["observations"] if DRIFT in row["reasons"]] == []
+
+
+def test_a_matrix_frozen_before_full_plans_placed_controls_reports_a_placed_standard_plan_as_drift(
+        tmp_path, monkeypatch):
+    """A matrix frozen with the pathless plans accepts them alone: a standard cell that saved today's plan is drift.
+
+    The closed-book cell's bundle holds the plan that places the control on app.py, which is not the plan the matrix
+    froze for its input, so it is ineligible like any other plan the frozen contract does not give. The
+    identity-reduced cell's plan placed the control under either rule and is its frozen form.
+    """
+    adapter = Scanning()
+    root, frozen = located_control_matrix(tmp_path, monkeypatch, adapter)
+    output, manifest = execute_matrix(root, matrix_before_control_paths(frozen), adapter, monkeypatch)
+
+    assert saved_plans(output) == {"closed_book_standard": PLACED, "identity_reduced": PLACED}
+    rows = scanned_cells(manifest, experiment.report(output))
+    assert DRIFT in rows["closed_book_standard"]["reasons"]
+    assert DRIFT not in rows["identity_reduced"]["reasons"], "its plan placed the control under either rule"
 
 
 def test_a_matrix_frozen_since_full_plans_placed_controls_reports_a_pathless_standard_plan_as_drift(

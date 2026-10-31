@@ -107,11 +107,11 @@ a digest alone cannot waive the frozen declaration. The one difference it forgiv
 plans place controls. A full plan now gives each control the pack locates its `paths`, and a
 standard input's plan gave none before, so a matrix frozen then, whose population plans a located
 control, holds the pathless 2.0 plans of that time. They remain its frozen plans: validation
-accepts them when nothing else differs, and the report accepts a standard cell's saved plan in
-that form, saved by an execution before the change, or in today's, saved by one since, which
-places the control. A matrix frozen since accepts today's plans only. Runtime preflight also
-checks actual staged configuration, cache, workspace, and default temporary paths before any cell
-consumes a budget.
+accepts them when nothing else differs, and the report accepts a standard cell's saved plan only
+in that form, the one an execution before the change saved, so a cell whose saved plan places the
+control is ineligible as `frozen_plan_eligibility_or_label_drift`. A matrix frozen since accepts
+today's plans only. Runtime preflight also checks actual staged configuration, cache, workspace,
+and default temporary paths before any cell consumes a budget.
 
 Execution writes the complete matrix, all assignments, every cell config, pack, and map before the
 first scanner starts. It checks staged files immediately before each cell, then reconciles each
