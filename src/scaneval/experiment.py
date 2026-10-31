@@ -203,7 +203,13 @@ def _system_spec(row: dict) -> dict:
     return {key: deepcopy(value) for key, value in row.items() if key != "inference"}
 
 
-def _population(pack: dict, document: dict) -> list[dict]:
+def _population(pack: dict, document: dict, *, legacy_placement: bool = False) -> list[dict]:
+    """The population the declaration *document* freezes over *pack*: each source, its full plan, its schedule plan.
+
+    ``legacy_placement`` builds each full plan as :func:`scaneval.cases.build_plan` did before full
+    plans placed controls; only :func:`frozen_before_control_paths` asks for it. The schedule plan
+    carries no ``paths`` under either placement.
+    """
     population = []
     target_ids, control_ids = set(), set()
     for snapshot_id in document["population"]["snapshot_ids"]:
@@ -211,7 +217,8 @@ def _population(pack: dict, document: dict) -> list[dict]:
         planned = schedule._frozen_plan(pack, snapshot, "full")
         if planned["state"] != "frozen":
             raise ContractError(f"cannot freeze population for {snapshot_id}: {planned['reason']}")
-        plan, _notes = cases.build_plan(pack, snapshot_id, snapshot["tree_hash"], mode="full")
+        plan, _notes = cases.build_plan(pack, snapshot_id, snapshot["tree_hash"], mode="full",
+                                        legacy_placement=legacy_placement)
         target_ids.update(row["canonical_id"] for row in planned["targets"])
         control_ids.update(row["canonical_id"] for row in planned["controls"])
         population.append({"snapshot_id": snapshot_id, "source_tree_hash": snapshot["tree_hash"],
@@ -224,6 +231,30 @@ def _population(pack: dict, document: dict) -> list[dict]:
     if "diagnostic" in scopes and len(scopes) > 1:
         raise ContractError("diagnostic fixtures cannot be pooled with real draft or reviewed label populations")
     return population
+
+
+def frozen_before_control_paths(document: dict) -> bool:
+    """Whether a frozen matrix holds the pathless plans built before full plans placed controls.
+
+    The population embeds each source's full plan, and every load rebuilds it from the embedded pack
+    and declaration and requires the two to agree, so that changing a digest cannot waive a label,
+    an accepted location, an eligibility, or a source property. Full plans now give each control the
+    pack locates its ``paths``, and a standard input's plan carried none before (see
+    :func:`scaneval.cases.build_plan`), so a matrix frozen then, whose population plans a located
+    control, differs from today's rebuild in that alone. A frozen matrix is a frozen contract and its
+    plans are not rebuilt under it: a population equal to the rebuild under the earlier placement is
+    that matrix, and this returns ``True``; one equal to today's rebuild returns ``False``. A
+    population that plans no located control is the same under both and is today's.
+
+    Refused, with the message drift always had: a population equal to neither, whatever else changed.
+    Placement is the only difference forgiven, and only as a whole: one source planned each way is
+    neither.
+    """
+    if document["population"] == _population(document["pack"], document["declaration"]):
+        return False
+    if document["population"] == _population(document["pack"], document["declaration"], legacy_placement=True):
+        return True
+    raise ContractError("frozen source property, labels, accepted locations, or target population differ from the common pack")
 
 
 def _validate_cell_config(config: dict) -> None:
@@ -391,8 +422,9 @@ def validate_frozen(document: dict) -> dict:
         cases.snapshot_by_id(document["pack"], exclusion["snapshot_id"])
     if document["bindings"]["population_sha256"] != canonical_sha256(document["population"]):
         raise ContractError("frozen target population binding differs")
-    if document["population"] != _population(document["pack"], document["declaration"]):
-        raise ContractError("frozen source property, labels, accepted locations, or target population differ from the common pack")
+    # Refuses a population the planner builds under neither placement; a matrix frozen before full
+    # plans placed controls keeps the pathless plans it froze.
+    frozen_before_control_paths(document)
     for key, value in (("adjudication_sha256", document["declaration"]["adjudication"]),
                        ("aggregation_policy_sha256", resolve_aggregation_policy(document["declaration"]["aggregation_policy"])),
                        ("run_order_algorithm_sha256", ALGORITHM)):
