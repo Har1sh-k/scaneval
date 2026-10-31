@@ -3751,6 +3751,46 @@ def test_the_collectors_bound_decides_which_transcripts_are_moved_and_a_moved_on
                                  f"{len(data) - 1}, so it is not the file discovery read to its end).")
 
 
+def test_a_move_that_fails_in_a_way_no_check_names_is_refused_and_the_scan_keeps_its_claims(tmp_path, monkeypatch):
+    """Any exception out of a move is a refusal with a note, never a failure of the scan.
+
+    The move caught :class:`OSError` alone, so the :class:`MemoryError` a transcript read whole
+    could raise went on out of the move and the scan, and a run that had finished with its claims
+    was recorded as an adapter failure with none. It is raised here where the copy is verified,
+    after the copy exists, so the refusal has to remove the copy as well.
+    """
+    import fcntl
+
+    root = fake_deepsec_root(tmp_path, session_ids=["session-aaaa"])
+    stub_collector(monkeypatch, tmp_path)
+    main = transcript_fixture(tmp_path)
+    original = main.read_bytes()
+    baseline, _ = documents(invoke(tmp_path / "baseline", root))
+    preserve = deepsec_module.preserve_transcripts
+    real_fstat = os.fstat
+
+    def exhausted_when_written(descriptor):
+        if fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY:
+            raise MemoryError
+        return real_fstat(descriptor)
+
+    def failing_part_way(*arguments):
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "fstat", exhausted_when_written)
+            return preserve(*arguments)
+
+    monkeypatch.setattr(deepsec_module, "preserve_transcripts", failing_part_way)
+    bundle = invoke(tmp_path, root, capture_claude_sessions=True)
+    result, execution = documents(bundle)
+
+    assert outcome_of(result) == outcome_of(baseline) and len(result["claims"]) == 2
+    assert main.read_bytes() == original, "the original stays where it was"
+    assert not any(artifact["id"].startswith("claude-session/") for artifact in execution["raw_artifacts"])
+    assert list((bundle / "raw" / "claude-sessions" / "session-aaaa").iterdir()) == [], "the copy is removed"
+    assert capture_note(execution).endswith("1 transcript(s) could not be moved and were left in place: "
+                                            "session-aaaa/session-aaaa.jsonl (the move failed with MemoryError).")
+
+
 def test_the_bound_a_moved_transcript_is_held_to_is_the_collectors_own_number(monkeypatch):
     """The collector's constant when it is installed, and the same number spelled here when it is not."""
     from scaneval.collectors import claude_code

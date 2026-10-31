@@ -2175,6 +2175,13 @@ def move_transcript(source: Path, target: Path, enclosure: Enclosure) -> str | N
     copy of it stays in ``raw/claude-sessions``. An original already gone by the time it is
     removed costs nothing: the verified copy holds it.
 
+    Nothing is raised, whatever fails. The refusals above are the failures this function names,
+    and any other exception is a refusal too, naming only its type, because the move used to catch
+    :class:`OSError` alone and the :class:`MemoryError` of a whole-file read went on out of
+    :meth:`DeepsecAdapter.scan`. The rule is the import's: a transcript is evidence about how the
+    run went, so failing to keep one costs that evidence, never the scan's status or its claims.
+    The descriptors are closed and an unkept copy removed on every way out.
+
     What is not verified, named so it is not mistaken for an oversight: the copy's content. Nothing
     holds a digest of the file to check it against, because the collector hashes the spans it
     delivers and never the file. A hash here could only compare the copy with the bytes this move
@@ -2247,6 +2254,8 @@ def move_transcript(source: Path, target: Path, enclosure: Enclosure) -> str | N
             return f"the original could not be removed ({exc.strerror or exc}), so the copy was discarded"
         created = False
         return None
+    except Exception as exc:  # noqa: BLE001 - same rule: the move, not the scan
+        return f"the move failed with {type(exc).__name__}"
     finally:
         for descriptor in (reader, writer):
             if descriptor is not None:
