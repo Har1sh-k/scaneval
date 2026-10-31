@@ -110,7 +110,11 @@ selected, there was no candidate, or the intersection was empty. Such a run is
 `partial` with `scope_incomplete`. Every curated run has
 `bundles_resolved: false`, so no claim budget or random-order expectation is
 read from a selection made before the run. Claims are kept in every `partial`
-outcome, so target detection stays visible.
+outcome, so target detection stays visible. A standard-mode `process` exit 1,
+which 2.3.10 gives an errored batch or an exhausted quota once every record is
+written, does not stop the run before export. It is read from the records like
+the rest: a failed selected batch keeps the claims of the batches that finished,
+and a run in which no file reached a verdict is an `error`.
 
 `examined_nothing` is not set. The regex scan examined the tree. The notes say
 when no AI batch ran, and `partial` already withholds every quiet credit.
@@ -130,5 +134,6 @@ when no AI batch ran, and `partial` already withholds every quiet credit.
 - The adapter cannot see DeepSec's ignore filter. A listed path with no record is
   reported as "no candidate or ignored", without saying which.
 - A file whose name begins or ends with whitespace cannot be listed.
-- The tests use a fake CLI that mirrors the 2.3.10 selection code. No live
-  DeepSec, model, or provider has been run with this mode.
+- The tests use a fake CLI that mirrors the 2.3.10 selection code and its
+  standard-mode exit codes. No live DeepSec, model, or provider has been run with
+  this mode.
