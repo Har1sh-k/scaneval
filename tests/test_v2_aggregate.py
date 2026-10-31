@@ -21,7 +21,7 @@ import subprocess
 import pytest
 
 from scaneval import aggregate, cases, review, schedule
-from scaneval.adapters.base import Adapter, NativeOutcome
+from scaneval.adapters.base import Adapter, AdapterError, NativeOutcome
 from scaneval.cli import main
 from scaneval.contracts import ContractError, canonical_json, canonical_sha256, load_document, validate_document
 from scaneval.resampling import Stream, resample_with_replacement
@@ -2105,7 +2105,7 @@ def test_timeout_identity_normalizes_equivalent_numbers(tmp_path):
     config = {"timeout_seconds": 60, "network_policy": "none", "systems": [
         {"system_id": "same", "adapter": "fake", "config": {}}]}
     schedule = {"systems": [{"system_id": "same"}]}
-    manifest = {"systems": []}
+    manifest = {"systems": [], "invocations": []}
     first = _Run("first", tmp_path, manifest, schedule, config)
     second = _Run("second", tmp_path, manifest, schedule, {**config, "timeout_seconds": 60.0})
     assert _configuration(first, 'same') == _configuration(second, 'same')
@@ -2192,11 +2192,73 @@ def test_a_run_that_recorded_no_adapter_version_ran_nothing_and_pools_with_any_v
     failures = system(view(report))["observations"]["failures"]
     assert (failures["skipped_system"], failures["missing_row"]) == (1, 1)
     assert slice_of(system(view(report)))["completion"]["value"] == 1 / 3
-    assert ("sys-a: run(s) run-b, run-c record no adapter version for it, because it ran nothing there; its "
-            "adapter_version 1.2.0 is the one the other runs recorded") in view(report)["warnings"]
+    assert ("sys-a: run(s) run-b, run-c ran nothing for it, every assignment skipped or never started, so they "
+            "pool with any adapter version, whatever they recorded, and add only failures; its adapter_version "
+            "1.2.0 is the one the runs that ran it recorded") in view(report)["warnings"]
     alone = aggregate.aggregate([skipped], policy=policy())
     assert alone["systems"][0]["adapter_version"] is None
-    assert not any("record no adapter version" in warning for warning in view(alone)["warnings"])
+    assert not any("ran nothing for it" in warning for warning in view(alone)["warnings"])
+
+
+def test_a_run_that_ran_nothing_for_a_system_pools_whatever_adapter_version_it_recorded(tmp_path):
+    """Whether a run ran a system is read from its invocation rows, never from the version its manifest recorded.
+
+    run-a skipped sys-a after resolving its adapter, as the runner does when a DeepSec prepare() fails, so its
+    manifest records 1.2.0. run-c prepared sys-a under 1.1.0 and stopped before its first invocation, so it has no
+    invocation row. Neither ran anything, so both pool with run-b, which ran sys-a under 1.2.1: the system is 1.2.1,
+    both failures stay in every denominator, and the view names both runs.
+    """
+    inputs = [planned("p1", targets=[target("T-p1")])]
+    skipped = write_run(tmp_path / "a", "run-a", inputs, skipped_systems=("sys-a",), versions={"sys-a": "1.2.0"})
+    ran = write_run(tmp_path / "b", "run-b", inputs, outcomes={("p1", "sys-a", 1): scan(hits={"T-p1": 1})},
+                    versions={"sys-a": "1.2.1"})
+    stopped = write_run(tmp_path / "c", "run-c", inputs, outcomes={("p1", "sys-a", 1): "missing_row"},
+                        versions={"sys-a": "1.1.0"})
+    manifest = json.loads((stopped / "run-manifest.json").read_text(encoding="utf-8"))
+    manifest.update(status="failed", failure={"type": "KeyboardInterrupt", "message": ""})
+    validate_document("run-manifest", manifest)
+    (stopped / "run-manifest.json").write_text(canonical_json(manifest) + "\n", encoding="utf-8")
+
+    report = aggregate.aggregate([stopped, ran, skipped], policy=policy())
+
+    assert [(row["system_id"], row["adapter_version"], row["runs"]) for row in report["systems"]] == [
+        ("sys-a", "1.2.1", ["run-a", "run-b", "run-c"])]
+    failures = system(view(report))["observations"]["failures"]
+    assert (failures["skipped_system"], failures["missing_row"]) == (1, 1)
+    assert slice_of(system(view(report)))["completion"]["value"] == 1 / 3
+    assert ("sys-a: run(s) run-a, run-c ran nothing for it, every assignment skipped or never started, so they pool "
+            "with any adapter version, whatever they recorded, and add only failures; its adapter_version 1.2.1 is "
+            "the one the runs that ran it recorded") in view(report)["warnings"]
+
+
+def test_a_version_only_a_run_that_ran_nothing_recorded_is_not_read(tmp_path):
+    """A curated configuration whose one run skipped it under adapter 1.1.0 never ran unscoped, because nothing ran.
+
+    The system therefore has no adapter version, its processing is taken as configured, and no view says the key
+    was ignored.
+    """
+    inputs = [planned("p1", targets=[target("T-p1")])]
+    skipped = write_run(tmp_path, "run-a", inputs, systems=("deepsec-x",), configs={"deepsec-x": DEEPSEC_CURATED},
+                        skipped_systems=("deepsec-x",), versions={"deepsec-x": "1.1.0"})
+
+    report = aggregate.aggregate([skipped], policy=policy())
+
+    assert [(row["adapter_version"], row["processing"]) for row in report["systems"]] == [(None, "curated")]
+    assert [warning for warning in view(report)["warnings"] if "processing" in warning] == [
+        f"deepsec-x: {CURATED_CAVEAT}"]
+    assert not any("ran unscoped" in warning for warning in view(report)["warnings"])
+
+
+def test_a_run_that_ran_a_system_but_records_no_adapter_version_for_it_is_refused(tmp_path):
+    """scaneval run skips a system whose adapter declares no usable version, so a manifest that records invocations of
+    one under no version cannot say what ran, and it is refused rather than pooled as if it had run nothing."""
+    inputs = [planned("p1", targets=[target("T-p1")])]
+    unknown = write_run(tmp_path, "run-a", inputs, versions={"sys-a": None})
+
+    with pytest.raises(ContractError, match="run run-a records invocations of system sys-a but no adapter version for "
+                                            "it; a system that ran must record the adapter it ran with to be "
+                                            "aggregated"):
+        aggregate.aggregate([unknown], policy=policy())
 
 
 def test_adapter_versions_are_in_every_system_row_and_a_difference_a_gate_policy_must_name(tmp_path):
@@ -2298,9 +2360,17 @@ class FakeAdapterUnversioned(FakeAdapter):
     adapter_version = 1.1
 
 
+class FakeAdapterUnprepared(FakeAdapterNext):
+    # A usable version and a failed preparation, as a DeepSec whose executable is missing: the runner skips the
+    # system and its manifest records the version anyway.
+    def prepare(self, spec, cache_root):
+        raise AdapterError("fixture scanner executable not found")
+
+
 def test_the_versions_the_runner_records_decide_whether_its_runs_pool(tmp_path, upstream):
     """Real manifests: one configuration run by fake 1.0.0 and by fake 1.1.0 is refused, and a run that skipped
-    the system for an adapter declaring no usable version pools with the 1.0.0 run, its version unknown."""
+    the system pools with the 1.0.0 run, whether its adapter declared no usable version or declared 1.1.0 and
+    failed to prepare: the runner wrote no invocation of it, so nothing in that run ran under either version."""
     repo, commit = upstream
     pack = cases.new_pack("test", "aggregate-versions", "Local fixture pack for the adapter version tests.")
     cases.add_snapshot(pack, {
@@ -2327,10 +2397,11 @@ def test_the_versions_the_runner_records_decide_whether_its_runs_pool(tmp_path, 
         return tmp_path / run_id
 
     first, second = run("run-first", FakeAdapter()), run("run-second", FakeAdapterNext())
-    skipped = run("run-skipped", FakeAdapterUnversioned())
-    assert [row["adapter_version"] for run_dir in (first, second, skipped)
+    skipped, unprepared = run("run-skipped", FakeAdapterUnversioned()), run("run-unprepared", FakeAdapterUnprepared())
+    assert [(row["adapter_version"], row["skipped_reason"] is not None)
+            for run_dir in (first, second, skipped, unprepared)
             for row in json.loads((run_dir / "run-manifest.json").read_text(encoding="utf-8"))["systems"]] == [
-        "1.0.0", "1.1.0", None]
+        ("1.0.0", False), ("1.1.0", False), (None, True), ("1.1.0", True)]
 
     with pytest.raises(ContractError, match="recorded as adapter fake 1.0.0 in run run-first and as fake 1.1.0 in "
                                             "run run-second"):
@@ -2339,6 +2410,13 @@ def test_the_versions_the_runner_records_decide_whether_its_runs_pool(tmp_path, 
     assert [(row["adapter_version"], row["runs"]) for row in report["systems"]] == [
         ("1.0.0", ["run-first", "run-skipped"])]
     assert system(view(report), "fake-a")["observations"]["failures"]["skipped_system"] == 1
+    report = aggregate.aggregate([first, unprepared], policy=policy())
+    assert [(row["adapter_version"], row["runs"]) for row in report["systems"]] == [
+        ("1.0.0", ["run-first", "run-unprepared"])]
+    assert system(view(report), "fake-a")["observations"]["failures"]["skipped_system"] == 1
+    assert slice_of(system(view(report), "fake-a"))["completion"]["value"] == 1 / 2
+    assert any(warning.startswith("fake-a: run(s) run-unprepared ran nothing for it")
+               for warning in view(report)["warnings"])
 
 
 @pytest.mark.parametrize("configured, version, recorded, derived", [

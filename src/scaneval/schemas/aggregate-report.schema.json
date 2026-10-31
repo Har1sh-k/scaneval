@@ -1936,7 +1936,7 @@
             "null"
           ],
           "minLength": 1,
-          "description": "The adapter version the run manifests record for this system, the same in every run that records one; null when no run resolved its adapter. Two versions under one system id are refused. Reports written before it was recorded omit it."
+          "description": "The adapter version the run manifests record for this system, the same in every run that ran it; null when no run ran it. A run whose invocation rows show it ran nothing for the system, every assignment skipped or never started, pools whatever version it recorded. Two versions under one system id are refused. Reports written before it was recorded omit it."
         },
         "processing": {
           "enum": [

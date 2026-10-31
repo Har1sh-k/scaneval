@@ -23,8 +23,9 @@ too.
 Which system is which. A system is what its runs configured (adapter, adapter configuration, model,
 network policy, execution backend, and deadline), the adapter version their manifests record, and the
 processing those two make of it, ``full`` or ``curated`` (:func:`system_processing`). One system id is
-one of each in every run it is aggregated from, or the runs are refused; a run that records no adapter
-version for a system ran nothing for it and pools with any version. A result written since the marker
+one of each in every run it is aggregated from, or the runs are refused; a run whose own invocation rows
+show it ran nothing for a system, every assignment skipped or never started, pools with any version,
+whatever version it recorded. A result written since the marker
 existed records its system's processing itself; it must be the one the configuration and the version
 give, or the runs are refused, and a result that records none is read by that derivation. System rows
 report the version and the processing, a comparison lists both among its configuration differences,
@@ -469,38 +470,51 @@ def _systems(runs: list[_Run]) -> dict[str, dict]:
     """Every scheduled system, refusing one system id configured or recorded differently in two runs.
 
     A system is what its run configured (:func:`_configuration`) and the adapter its run manifest records it
-    resolved to, by name and ``adapter_version``. Two runs recording different names or versions for one
-    system id are refused as two configurations are, because a version can change what one configuration
-    does: DeepSec 1.1.0 ignores ``config.process_manifest_by_tree`` and 1.2.0 honors it. Every manifest the
-    contract accepts carries the field, so a run records no version only for a system it ran nothing for:
-    ``null`` for one whose adapter could not be resolved and was skipped, and no row at all for one a failed
-    run never prepared. Such a run pools with runs of any version and adds none, because no observation in
-    it depends on one, and refusing it would push its failures out of the denominators they belong in. The
-    system's ``adapter_version`` is the one the other runs recorded, or ``None`` when no run recorded one,
-    and ``unversioned_runs`` names the runs that recorded none. ``processing`` and its ``caveat`` follow
-    from the configuration and that version (:func:`system_processing`), and every marker a bundle of the
-    system records must be that ``processing`` (:func:`_check_processing`).
+    resolved to, by name and ``adapter_version``. Two runs that ran one system id and record different names
+    or versions for it are refused as two configurations are, because a version can change what one
+    configuration does: DeepSec 1.1.0 ignores ``config.process_manifest_by_tree`` and 1.2.0 honors it.
+
+    Whether a run ran a system is read from the run's own invocation rows, never from the version it
+    recorded. A run ran nothing for a system when every assignment of it is ``skipped`` (its input was never
+    prepared, or the system itself was skipped) or has no row at all (the run stopped before starting it),
+    so no observation of it in that run depends on any adapter version. Such a run pools with runs of any
+    version, whatever version its manifest recorded, because refusing it would push its failures out of the
+    denominators they belong in; that covers a DeepSec system whose ``prepare`` failed, which the runner
+    records with its adapter's version. It adds no version, and ``idle_runs`` names it. A run that ran the
+    system binds the name and version its manifest records, and one that ran it but records no version is
+    refused, because what ran is then unknown. The system's ``adapter_version`` is the one the runs that ran
+    it recorded, or ``None`` when no run ran it; a version only an idle run recorded is never read, so it
+    says nothing about how the system ran. ``processing`` and its ``caveat`` follow from the configuration
+    and that version (:func:`system_processing`), and every marker a bundle of the system records must be
+    that ``processing`` (:func:`_check_processing`).
     """
     systems: dict[str, dict] = {}
     for run in runs:
         recorded = {row["system_id"]: row for row in run.manifest["systems"]}
+        # The systems this run invoked at least once. Every row that is not skipped names a bundle (the
+        # manifest contract), whether or not that bundle can still be read, and so a scan of that system.
+        ran = {row["system_id"] for row in run.manifest["invocations"] if row["status"] != "skipped"}
         for row in run.schedule["systems"]:
             system_id = row["system_id"]
             configuration = _configuration(run, system_id)
-            resolved = recorded.get(system_id)
-            adapter = (None if resolved is None or resolved["adapter_version"] is None
-                       else (resolved["adapter"], resolved["adapter_version"]))
             known = systems.get(system_id)
             if known is None:
                 known = systems[system_id] = {"row": row, "configuration": configuration, "runs": [],
-                                              "adapter": None, "adapter_run": None, "unversioned_runs": []}
+                                              "adapter": None, "adapter_run": None, "idle_runs": []}
             elif (canonical_json(known["configuration"]) != canonical_json(configuration)
                     or canonical_json(known["row"]) != canonical_json(row)):
                 raise ContractError(
                     f"system {system_id} is configured differently in runs {known['runs'][0]} and "
                     f"{run.run_id}; one system id must name one configuration to be aggregated")
-            if adapter is None:
-                known["unversioned_runs"].append(run.run_id)
+            resolved = recorded.get(system_id)
+            adapter = (None if resolved is None or resolved["adapter_version"] is None
+                       else (resolved["adapter"], resolved["adapter_version"]))
+            if system_id not in ran:
+                known["idle_runs"].append(run.run_id)
+            elif adapter is None:
+                raise ContractError(
+                    f"run {run.run_id} records invocations of system {system_id} but no adapter version for it; "
+                    "a system that ran must record the adapter it ran with to be aggregated")
             elif known["adapter"] is None:
                 known["adapter"], known["adapter_run"] = adapter, run.run_id
             elif known["adapter"] != adapter:
@@ -548,10 +562,11 @@ def _identity(info: dict) -> dict:
 def _system_warnings(system_id: str, info: dict) -> list[str]:
     """What a reader of any figure of one system must not miss about which system it is."""
     warnings = [f"{system_id}: {info['caveat']}"] if info["caveat"] is not None else []
-    if info["adapter_version"] is not None and info["unversioned_runs"]:
-        warnings.append(f"{system_id}: run(s) {', '.join(info['unversioned_runs'])} record no adapter version "
-                        "for it, because it ran nothing there; its adapter_version "
-                        f"{info['adapter_version']} is the one the other runs recorded")
+    if info["adapter_version"] is not None and info["idle_runs"]:
+        warnings.append(f"{system_id}: run(s) {', '.join(info['idle_runs'])} ran nothing for it, every assignment "
+                        "skipped or never started, so they pool with any adapter version, whatever they recorded, "
+                        f"and add only failures; its adapter_version {info['adapter_version']} is the one the runs "
+                        "that ran it recorded")
     return warnings
 
 

@@ -53,7 +53,8 @@ written before and after that change carry different versions.
 
 Reports read the same facts from what each run recorded. A run manifest
 records every system's adapter version, so `scaneval aggregate` and `scaneval
-compare` refuse to pool one system id across two versions. A curated system is
+compare` refuse to pool one system id across two versions it ran with; a run that
+ran nothing for it pools whatever version it recorded. A curated system is
 marked `processing: curated` in their system rows and in the benchmark score's,
 with a caveat in every view and in the score's `limits`: its figures describe the
 chosen paths and are not a detection rate. Comparing it with a full system lists
