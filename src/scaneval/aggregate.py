@@ -229,9 +229,9 @@ class _Observation:
     result written before the marker existed, or one the runner recorded in place of the adapter's.
     ``placement`` says where the bundle's plan places each of its controls, as ``(control_id, paths)``
     pairs in control id order, ``paths`` being ``None`` for a control it places nowhere; a failure has no
-    plan, and ``None`` here. ``sensitive`` holds the ids of the controls whose observation here depends
-    on where the plan places them (:func:`_sensitive_controls`): only for those can a placement change
-    the credit this bundle earns.
+    plan, and ``None`` here. ``sensitive`` holds the ids of the controls whose observation here can
+    depend on where the plan places them (:func:`_sensitive_controls`): only for those can a placement
+    change the credit this bundle earns.
     """
 
     run_id: str
@@ -352,7 +352,7 @@ def _timing(bundle: Path, run: _Run, assignment: dict, result: dict) -> tuple | 
 
 
 def _sensitive_controls(observed: dict, result: dict) -> frozenset[str]:
-    """The ids of the controls whose observation in one saved scan depends on where its plan places them.
+    """The ids of the controls whose observation in one saved scan can depend on where its plan places them.
 
     This mirrors :func:`scaneval.scoring._control_observations`, reading what the scorer read: *observed*
     is :func:`scaneval.scoring.observe` of the scan, which gives each control's completion and decision
@@ -362,11 +362,15 @@ def _sensitive_controls(observed: dict, result: dict) -> frozenset[str]:
     (:func:`scaneval.scoring._unexamined_controls`). A result that says ``examined_nothing`` leaves every
     control unexamined wherever it is placed and one that lists no omitted path leaves none unexamined, so
     only a result that lists one and does not say ``examined_nothing`` makes a control unexamined by where
-    it is: when the plan places it nowhere or on a listed path. A control's observation therefore depends
-    on its placement exactly when the scan completed (``success``), its bundles are resolved, its review
-    assessed the control quiet, and its result lists an omitted path and does not say
-    ``examined_nothing``. Placing it nowhere and placing it on a listed path withhold it alike, so this
-    says where a placement can change the observation, not that every change of placement does.
+    it is: when the plan places it nowhere or on a listed path. A control's observation can therefore
+    depend on its placement exactly when the scan completed (``success``), its bundles are resolved, its
+    review assessed the control quiet, and its result lists an omitted path and does not say
+    ``examined_nothing``. Placing it nowhere and placing it on a listed path withhold it alike, and placing
+    it on two paths the result does not list credits it alike, so this says where a placement can change
+    the observation, not that every change of placement does. Nor does every change of the observation
+    change a figure, which reads the canonical control (:func:`_control_outcome`): another record of it
+    that the review leaves unresolved or confirms a false allegation about, or that the plan lacks,
+    settles it however this one is placed.
     """
     if not observed["bundles_resolved"] or not result.get("omitted_paths") or result.get("examined_nothing") is True:
         return frozenset()
@@ -1907,7 +1911,7 @@ def _placements(corpus: _Corpus, mode: str, profile: str, system_ids: Iterable[s
     did not freeze, which the bundle's plan adds and :func:`_observe` counts as unregistered: :func:`_frame`
     does not score it, so where a plan places it changes no credit either.
 
-    The second value is the same map over only the bundles whose observation of the control depends on
+    The second value is the same map over only the bundles whose observation of the control can depend on
     where their plans place it (``_Observation.sensitive``, see :func:`_sensitive_controls`), whichever
     system's they are. Every other bundle observes the control alike wherever its plan places it, so when
     these place it one way, or there are none, every observation of it is what it would be were every plan
@@ -1963,13 +1967,14 @@ def _placement_warnings(placements: Placements, sensitive: Placements) -> list[s
     A plan written before full plans placed controls places a standard input's controls nowhere, and one
     written since places each the pack locates, so two runs of one input made either side of that change
     disagree. Whether that changes any credit is read from *sensitive*, the placements of the bundles
-    whose observation of a control depends on where it is placed (see :func:`_placements`). When those
-    place a control in more than one way, its quiet assessments are not credited under one rule, and the
-    warning says so; :func:`compare` refuses two systems then. When they all place it alike, every
-    observation of it is what that one placement would give, and when there are none, no bundle's credit
-    for it depends on where it is placed: either way it is credited under one rule, and the warning names
-    it and says which holds. An input has a warning for each of these three that holds of one of its
-    controls, in that order. A control every plan places alike, nowhere included, is not named.
+    whose observation of a control can depend on where it is placed (see :func:`_placements`). When those
+    place a control in more than one way, its quiet assessments may not be credited under one rule, and
+    the warning says they are not; :func:`compare` refuses two systems then (see :func:`_placement_gap`).
+    When they all place it alike, every observation of it is what that one placement would give, and when
+    there are none, no bundle's credit for it depends on where it is placed: either way it is credited
+    under one rule, and the warning names it and says which holds. An input has a warning for each of
+    these three that holds of one of its controls, in that order. A control every plan places alike,
+    nowhere included, is not named.
     """
     differing: dict[tuple[str, int], list[str]] = defaultdict(list)
     for (input_id, control_id), seen in sorted(placements.items()):
@@ -2231,26 +2236,31 @@ def _contract_gap(baseline: dict, candidate: dict, names: tuple[str, str]) -> st
 
 
 def _placement_gap(sensitive: Placements, names: tuple[str, str]) -> str | None:
-    """The first input whose bundles place a control in more than one way where its credit depends on it, in words.
+    """The first input whose bundles place a control in more than one way where its credit can depend on it, in words.
 
     The frozen contract cannot show this: a schedule freezes which controls an input carries, never where
     they are, and the bundle plans say that (see :func:`_placements`). *sensitive* holds where the two
-    systems' read bundles place each control, counting only the bundles whose observation of it depends
-    on where their plans place it: those of a scan that completed with its bundles resolved, whose review
-    assessed the control quiet, and whose result lists an omitted path and does not say
+    systems' read bundles place each control, counting only the bundles whose observation of it can
+    depend on where their plans place it: those of a scan that completed with its bundles resolved, whose
+    review assessed the control quiet, and whose result lists an omitted path and does not say
     ``examined_nothing`` (:func:`_sensitive_controls`). Every other bundle observes the control alike
     wherever its plan places it. So when these place a control one way, or there are none, every
     observation of it, either system's, is what it would be were every plan to place it that way, and both
     systems are scored under that one rule whatever the other bundles' plans say. When they place it in
-    more than one way, the bundles of one system or of both, its credit depends on which plan each bundle
-    had, and so may a difference between the systems, even where each system has as many bundles planned
-    each way as the other. A baseline whose quiet scan under a pathless plan completes and whose scan under
-    a placed plan ends partial, and a candidate whose scans do the reverse, each list ``README.md`` as
-    omitted and are quiet on a control on a file they read: the plans alone credit the candidate's quiet
-    assessment and withhold the baseline's. Such a control is named, with where each system's such bundles
-    place it and in which runs. The check errs toward refusing where a bundle's plan places the control on
-    a path its result lists: that withholds the control's quiet credit as placing it nowhere does, yet
-    counts as another way. ``None`` when no input differs.
+    more than one way, the bundles of one system or of both, its credit can depend on which plan each
+    bundle had, and so can a difference between the systems, even where each system has as many bundles
+    planned each way as the other. A baseline whose quiet scan under a pathless plan completes and whose
+    scan under a placed plan ends partial, and a candidate whose scans do the reverse, each list
+    ``README.md`` as omitted and are quiet on a control on a file they read: the plans alone credit the
+    candidate's quiet assessment and withhold the baseline's. Such a control is named, with where each
+    system's such bundles place it and in which runs. Every such bundle counts, whether or not its
+    placement changes a figure, so the check refuses some mixes that change none. For example, a plan that
+    places the control on a path its result lists withholds its quiet credit as a plan placing it nowhere
+    does, yet the two count as two ways. So do two plans placing it on different paths that no result
+    lists, which credit it alike, and a record counts even where another record of its canonical control
+    settles the control in that bundle however the first is placed: one the review leaves unresolved or
+    confirms a false allegation about, or one the plan lacks (:func:`_control_outcome`). ``None`` when no
+    input differs.
     """
     differing: dict[str, list[str]] = defaultdict(list)
     for (input_id, control_id), seen in sorted(sensitive.items()):
