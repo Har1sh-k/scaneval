@@ -300,6 +300,70 @@ def test_one_system_whose_saved_receipts_record_two_adapter_versions_is_not_scor
         benchmark.score(output)
 
 
+@pytest.mark.parametrize("version, recorded", [("1.2.0", "curated"), ("1.2.0", "full"), ("1.1.0", "curated")],
+                         ids=["agrees", "curated-recorded-full", "ignored-key-recorded-curated"])
+def test_a_deepsec_system_s_saved_results_must_record_the_processing_its_receipts_and_plan_give(
+        environment, tmp_path, monkeypatch, version, recorded):
+    """The marker a scan records on its result is what the score reports, and only when the plan and receipts agree.
+
+    The DeepSec-named system's scanner records *recorded* on every result. With adapter 1.2.0 and the key configured
+    it is curated, so curated is scored exactly as the unrecorded marker was, and full is refused; adapter 1.1.0
+    ignored the key, so a result recording curated is refused.
+    """
+    class Recording(FixtureScanner):
+        adapter_version = version
+
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            outcome.processing = recorded
+            return outcome
+
+    monkeypatch.setattr(benchmark, "get_adapter", lambda name: Recording() if name == "deepsec" else FixtureScanner())
+    dataset = cve_dataset(environment)
+    systems = [{"system_id": "fixture-system", "adapter": "fixture", "config": {}},
+               {"system_id": "deepsec-system", "adapter": "deepsec",
+                "config": {"process_manifest_by_tree": {"sha256:" + "1" * 64: ["app.py"]}}}]
+    plan = benchmark.build_plan(dataset, systems, run_id="fixture-run", repetitions=1)
+    output = tmp_path / "run"
+    benchmark.run(plan, dataset, output, tmp_path / "cache", progress=lambda _: None)
+    saved = {read_json(path)["processing"] for path in (output / "invocations").glob("*deepsec-system*/result.json")}
+    assert saved == {recorded}
+    judgments = judgments_for(output)
+
+    if (version, recorded) != ("1.2.0", "curated"):
+        derived = "curated" if version == "1.2.0" else "full"
+        with pytest.raises(ContractError, match=f"saved results of system deepsec-system record processing "
+                                                f"{recorded}, but its configuration and adapter version make it "
+                                                f"{derived}"):
+            benchmark.score(output, judgments)
+        return
+    score = benchmark.score(output, judgments)
+    rows = {row["system_id"]: row for row in score["systems"]}
+    assert (rows["deepsec-system"]["adapter_version"], rows["deepsec-system"]["processing"]) == ("1.2.0", "curated")
+    figures = {name: {key: value for key, value in row.items()
+                      if key not in ("system_id", "adapter_version", "processing", "runtime_seconds")}
+               for name, row in rows.items()}
+    assert figures["deepsec-system"] == figures["fixture-system"]
+
+
+def test_a_saved_result_edited_to_record_a_processing_its_system_did_not_run_with_is_not_scored(environment,
+                                                                                               tmp_path):
+    """An edit that rehashes the run record still leaves a marker the plan's configuration contradicts."""
+    output = run_fixture(environment, tmp_path)
+    path = output / "benchmark-run.json"
+    record = read_json(path)
+    row = next(row for row in record["invocations"] if "result_sha256" in row)
+    result_path = output / "invocations" / row["invocation_id"] / "result.json"
+    result = read_json(result_path)
+    result.update(schema_version="2.1", processing="curated")
+    result_path.write_text(json.dumps(result))
+    row["result_sha256"] = canonical_sha256(result)
+    path.write_text(json.dumps(record))
+    with pytest.raises(ContractError, match="saved results of system fixture-system record processing curated, but "
+                                            "its configuration and adapter version make it full"):
+        benchmark.score(output)
+
+
 def test_negative_comment_is_not_a_safe_control(environment, tmp_path):
     environment["tasks"][0]["annotations"][0]["label"] = "negative"
     output = run_fixture(environment, tmp_path)

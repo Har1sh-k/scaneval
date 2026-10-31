@@ -381,6 +381,16 @@ def score(directory: Path, judgments: dict | None = None) -> dict:
                                      f"adapter versions: {', '.join(sorted(versions))}")
         version = next(iter(versions), None)
         processing, caveat = system_processing(system["adapter"], system.get("config", {}), version)
+        # A result saved since the marker existed records its system's processing, as the adapter said it, and
+        # every one that does must be the processing just derived: a marker the configuration and the version
+        # contradict was edited after the run, or comes from an adapter whose curation rule is not known here,
+        # and the run is not scored under it. A result that records none, saved before the marker existed or
+        # recorded by the runner in the adapter's place, is read by the derivation alone.
+        recorded = sorted({row["result"]["processing"] for row in observations
+                           if row["system_id"] == system["system_id"] and "processing" in row.get("result", {})})
+        _require(recorded in ([], [processing]),
+                 f"saved results of system {system['system_id']} record processing {', '.join(recorded)}, but its "
+                 f"configuration and adapter version make it {processing}")
         if caveat is not None:
             caveats.append(f"{system['system_id']}: {caveat}")
         totals = Counter()
