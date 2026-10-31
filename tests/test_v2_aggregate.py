@@ -1893,6 +1893,41 @@ def test_a_view_names_an_input_whose_bundle_plans_place_its_controls_in_two_ways
         assert not [warning for warning in warnings if "bundle plans place" in warning]
 
 
+def test_a_comparison_whose_systems_bundles_place_a_control_differently_is_refused(tmp_path):
+    """A baseline run before full plans placed controls and a candidate run since, over the same evidence.
+
+    Their frozen work is the same, so the frozen contract cannot tell them apart. Compared, the candidate would gain
+    the quiet credit of C-scanned that the baseline's plan withheld, an improvement of the plans and not the system.
+    """
+    run_a = placement_run(tmp_path / "a", "run-a", ("baseline",), placed=False)
+    run_b = placement_run(tmp_path / "b", "run-b", ("candidate",), placed=True)
+
+    with pytest.raises(ContractError) as refused:
+        aggregate.compare([run_a, run_b], baseline="baseline", candidate="candidate", policy=policy())
+
+    assert str(refused.value).startswith(
+        "the systems were not scored against one plan: input widget places C-omitted nowhere in the bundles of "
+        "baseline and on vendor/helper.py in those of candidate; C-scanned nowhere in the bundles of baseline and "
+        "on app.py in those of candidate; ")
+
+
+def test_systems_whose_bundles_place_controls_alike_compare_and_a_view_names_each_way_they_do(tmp_path):
+    """Both systems in run-a, whose plans place nothing, and both in run-b, whose plans place each control.
+
+    Each system's bundles place the controls the same two ways, so both were scored under the same plans and the
+    comparison stands; its view names the two placements as an aggregate view does. Plans that agree throughout
+    compare with no such warning.
+    """
+    run_a = placement_run(tmp_path / "a", "run-a", ("baseline", "candidate"), placed=False)
+    run_b = placement_run(tmp_path / "b", "run-b", ("baseline", "candidate"), placed=True)
+
+    report = aggregate.compare([run_a, run_b], baseline="baseline", candidate="candidate", policy=policy())
+
+    assert view(report)["warnings"] == [PLACEMENT_WARNING]
+    alike = aggregate.compare([run_b], baseline="baseline", candidate="candidate", policy=policy())
+    assert not [warning for warning in view(alike)["warnings"] if "bundle plans place" in warning]
+
+
 # --- a run directory written by the runner ------------------------------------------------------
 
 
@@ -2085,6 +2120,7 @@ def test_cli_help_describes_both_commands(capsys):
     text = " ".join(capsys.readouterr().out.split())
     assert "Every scheduled assignment is an observation; a failed one stays in every denominator." in text
     assert "Refused unless both were assigned exactly the same frozen work" in text
+    assert "and their bundles place each input's controls alike" in text
     assert "--baseline BASELINE" in text and "--policy POLICY" in text
 
 

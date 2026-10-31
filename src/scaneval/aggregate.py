@@ -54,7 +54,9 @@ credit from a control the plan places nowhere once the result lists any omitted 
 before full plans placed controls gives a standard input's controls none, so the same evidence is
 credited file by file under a plan written since and not at all under one written before. A view
 whose bundle plans place one input's control in more than one way warns, naming the input, the
-controls, where each run's plans put them, and the runs.
+controls, where each run's plans put them, and the runs; :func:`compare` refuses two systems whose
+bundles place a control of one input differently, because a difference in its credit would then be the
+plans', not the systems'.
 
 Pairs. A vulnerable/fixed pair is scored on whole canonical items, not on the one record it names:
 its vulnerable side is the whole canonical target, and its fixed state the whole canonical control
@@ -2159,6 +2161,31 @@ def _contract_gap(baseline: dict, candidate: dict, names: tuple[str, str]) -> st
     return "their frozen vulnerable/fixed pairs differ"
 
 
+def _placement_gap(placements: Placements, names: tuple[str, str]) -> str | None:
+    """The first input whose bundles place a control one way for one system and another for the other, in words.
+
+    The frozen contract cannot show this: a schedule freezes which controls an input carries, never where
+    they are, and the bundle plans say that (see :func:`_placements`). A system's placements of a control
+    are those its own read bundles' plans give it over every run that scheduled it, compared as a set, as
+    :func:`_contract_gap` compares the entries of every run. A system with no read bundle of the input
+    has nothing to compare and differs in nothing, and two systems whose bundles place the control alike
+    are one plan however many ways each does (the view's warnings then name them). ``None`` when no
+    input differs.
+    """
+    differing: dict[str, list[str]] = defaultdict(list)
+    for (input_id, control_id), seen in sorted(placements.items()):
+        sides = [sorted({paths for paths, where in seen.items() if any(system == name for _run, system in where)},
+                        key=_placement_order) for name in names]
+        if all(sides) and sides[0] != sides[1]:
+            differing[input_id].append(
+                f"{control_id} {' and '.join(map(_placed, sides[0]))} in the bundles of {names[0]} and "
+                f"{' and '.join(map(_placed, sides[1]))} in those of {names[1]}")
+    if not differing:
+        return None
+    input_id = min(differing)
+    return f"input {input_id} places {'; '.join(differing[input_id])}"
+
+
 def _path_segment(key: str) -> str:
     """Escape keys while preserving ordinary dotted policy paths."""
     return key.replace("\\", "\\\\").replace(".", "\\.") if key else "\\e"
@@ -2271,6 +2298,14 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
     replicate. Two systems of different adapter versions or processing are compared, not refused: both
     are listed among the configuration differences, as ``adapter_version`` and ``processing``, where a
     gate policy must name them to measure them, and a curated system's caveat is in every view.
+
+    The two systems' bundles must also place every control of one input alike, which the frozen contract
+    cannot show (see :func:`_placement_gap`); two that do not are refused before a metric is computed
+    ("the systems were not scored against one plan"). A baseline run before full plans placed controls
+    and a candidate run since, over the same evidence, would otherwise credit the candidate's quiet
+    controls on scanned files and withhold the baseline's, and show the plans' difference as an
+    improvement. Bundles that place a control in several ways alike for both systems are not refused;
+    each view's warnings name them, as :func:`aggregate` does.
     """
     if baseline == candidate:
         raise ContractError("the baseline and the candidate are one system; name two systems to compare")
@@ -2284,6 +2319,15 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
     gap = _contract_gap(contracts[baseline], contracts[candidate], (baseline, candidate))
     if gap is not None:
         raise ContractError(f"the systems do not share the frozen evaluation contract: {gap}")
+    placements = {view: _placements(corpus, *view, (baseline, candidate)) for view in _view_keys(corpus, (baseline,))}
+    for found in placements.values():
+        gap = _placement_gap(found, (baseline, candidate))
+        if gap is not None:
+            raise ContractError(
+                f"the systems were not scored against one plan: {gap}; a control placed nowhere earns no quiet "
+                "credit once its result lists any omitted path, so a difference in its credit would be the plans', "
+                "not the systems'. A plan written before full plans placed controls places none: run the older "
+                "side again so both are planned alike")
     views = []
     for mode, profile in _view_keys(corpus, (baseline,)):
         facts = _view_facts(corpus, mode, profile, (baseline,))
@@ -2299,8 +2343,7 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
             "systems": {"baseline": left.block, "candidate": right.block},
             "differences": [_difference(context, mine, theirs)
                             for mine, theirs in zip(left.slices, right.slices)],
-            "warnings": _view_warnings(facts, (left, right), corpus.systems,
-                                       _placements(corpus, mode, profile, (baseline, candidate)))})
+            "warnings": _view_warnings(facts, (left, right), corpus.systems, placements[(mode, profile)])})
     structure = contracts[baseline]
     report = {
         "schema_version": SCHEMA_VERSION, "evaluator_version": __version__,
