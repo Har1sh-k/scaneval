@@ -95,7 +95,7 @@
     },
     "configuration_differences": {
       "type": "array",
-      "description": "Every configuration value that differs between the two systems, as a dotted key over adapter, config, model_id, model_revision, network_policy, and execution.",
+      "description": "Every configuration value that differs between the two systems, as a dotted key over adapter, adapter_version, config, model_id, model_revision, network_policy, execution, processing, and timeout_seconds. A gate policy's allowed_differences covers a key it names and the keys beneath it at a dot, so naming adapter does not cover adapter_version, and naming config does not cover processing.",
       "items": {
         "type": "object",
         "additionalProperties": false,

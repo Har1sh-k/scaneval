@@ -2475,3 +2475,24 @@ def test_results_that_record_their_system_s_processing_pool_with_results_written
         f"deepsec-x: {CURATED_CAVEAT}"]
     assert slice_of(system(view(report), "deepsec-x"))["completion"]["value"] == 1
     assert recall(report, system_id="deepsec-x") == 0.5
+
+
+def test_the_comparison_schema_and_the_aggregation_doc_name_every_key_a_configuration_difference_starts_with(
+        tmp_path):
+    """A gate policy measures a configuration difference only by naming its key, and its author reads which keys a
+    comparison can list from the comparison schema or from docs/AGGREGATION.md, so both name every top-level key
+    compare reads a system's identity by, and no other."""
+    run = write_run(tmp_path, "run-a", [planned("p1", targets=[target("T-p1")])])
+    compared = set(aggregate._identity(aggregate._load_corpus([run]).systems["sys-a"]))
+    root = Path(__file__).resolve().parents[1]
+    schema = json.loads((root / "src" / "scaneval" / "schemas" / "comparison-report.schema.json")
+                        .read_text(encoding="utf-8"))
+    texts = {"comparison-report schema": schema["properties"]["configuration_differences"]["description"],
+             "docs/AGGREGATION.md": (root / "docs" / "AGGREGATION.md").read_text(encoding="utf-8")}
+
+    assert compared == {"adapter", "adapter_version", "config", "execution", "model_id", "model_revision",
+                        "network_policy", "processing", "timeout_seconds"}
+    for where, text in texts.items():
+        listed = text.split("as a dotted key over ", 1)[1].split(".", 1)[0]
+        names = {name.strip("` ").removeprefix("and ").strip("` ") for name in listed.split(",")}
+        assert names == compared, where
