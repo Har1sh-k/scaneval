@@ -1313,7 +1313,8 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
                input_id: str | None = None, input_hash: str | None = None,
                profile: str | None = None, blinding: dict | None = None,
                change_set_id: str | None = None, base_tree_hash: str | None = None,
-               head_tree_hash: str | None = None, diff_sha256: str | None = None) -> tuple[dict, list[str]]:
+               head_tree_hash: str | None = None, diff_sha256: str | None = None,
+               legacy_placement: bool = False) -> tuple[dict, list[str]]:
     """Targets and controls for one materialized input, with every exclusion stated in the notes.
 
     *tree_hash* is always the export of *snapshot_id* that the labels and the mechanical checks
@@ -1371,6 +1372,14 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
     set (above) for a standard input: a 2.1 plan in ``pr`` mode states the change it reviews in
     ``provenance.pr``, and this one reviews none, so it stays the 2.0 plan it always was, and a
     result that lists any omission earns none of its controls quiet credit.
+
+    ``legacy_placement=True`` builds the plan as this function did before full plans placed
+    controls: only a 2.1 plan, one for an input that is not the plain export of its snapshot or a
+    PR plan, gives its controls ``paths``, so the plan of a standard full input is the pathless 2.0
+    plan. Nothing plans an input with it. It exists to recognize plans saved before then and still
+    bound by a frozen contract: the population a matrix froze, and the plans of the bundles an
+    experiment executed from it (see :func:`scaneval.experiment.frozen_before_control_paths`), so
+    such a matrix is neither refused as drifted nor checked against plans it never froze.
 
     A case is planned only when its disposition is not ``exclude``, no check set failed after
     approval, the latest admission decision covering its content is not ``rejected``, the pack
@@ -1455,8 +1464,9 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
                   or change_set_id is not None)
     # Where each control is, for every plan whose version can say it: a 2.1 plan, and a full plan,
     # which becomes 2.1 for it below. A standard plan in pr mode names no change set, and a 2.1 plan
-    # in pr mode must name one, so it stays the 2.0 plan and places nothing.
-    placed = identified or mode == "full"
+    # in pr mode must name one, so it stays the 2.0 plan and places nothing. The legacy placement is
+    # the rule before full plans placed controls, under which only a 2.1 plan did.
+    placed = identified or (mode == "full" and not legacy_placement)
     require_loadable(pack, "no plan can be built from it")
     _check_snapshot_export(pack, snapshot_id, tree_hash)
     change_set = None

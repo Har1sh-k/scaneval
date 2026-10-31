@@ -134,6 +134,30 @@ def test_a_snapshot_input_that_places_no_control_keeps_the_2_0_plan_byte_for_byt
     assert all("paths" not in control for control in plain["controls"])
 
 
+def test_the_legacy_placement_is_the_pathless_2_0_plan_of_a_standard_input_and_changes_no_other_plan(tmp_path):
+    """The plan as a build before full plans placed controls wrote it, rebuilt only to recognize one saved then.
+
+    A matrix frozen then embeds it, and an experiment executed from that matrix saved it in its bundles. A standard
+    plan loses its paths and its 2.1 and nothing else; a renamed or blinded input's plan was 2.1 and placed its
+    controls then as now, so it is unchanged.
+    """
+    pack = checked_pack(tmp_path)
+    plain, notes = cases.build_plan(pack, "widget-abc", HASH)
+    blinded = {"input_id": "widget-abc.blinded", "input_hash": TRANSFORMED, "profile": "metadata_blinded",
+               "blinding": {**MAP_IDENTITY, "original_tree_hash": HASH}}
+
+    legacy, legacy_notes = cases.build_plan(pack, "widget-abc", HASH, legacy_placement=True)
+
+    assert legacy_notes == notes
+    assert canonical_json(legacy) == canonical_json(
+        {**plain, "schema_version": "2.0",
+         "controls": [{k: v for k, v in c.items() if k != "paths"} for c in plain["controls"]]})
+    assert validate_document("evaluation-plan", legacy) is legacy
+    for identity in ({"input_id": "widget-main"}, blinded):
+        assert canonical_json(cases.build_plan(pack, "widget-abc", HASH, legacy_placement=True, **identity)[0]) \
+            == canonical_json(cases.build_plan(pack, "widget-abc", HASH, **identity)[0])
+
+
 def test_a_blinded_input_plans_at_2_1_bound_to_the_transformed_tree(tmp_path):
     pack = checked_pack(tmp_path)
     plain, _ = cases.build_plan(pack, "widget-abc", HASH)
