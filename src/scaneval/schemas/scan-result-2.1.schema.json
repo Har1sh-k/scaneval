@@ -132,6 +132,13 @@
     "examined_nothing": {
       "type": "boolean",
       "description": "True says the adapter can show no part of the input to have been examined by the scanner: in a PR review, that every path the change touches is one the scanner is not shown to have read. Such a scan reached no control, wherever the plan places it, so no control earns quiet credit from it, including one on a file the change leaves alone. False says the adapter saw some of the input examined, and the paths it lists in omitted_paths then apply as they do without this field. Absent means the adapter does not report it, which says nothing about whether anything was examined."
+    },
+    "processing": {
+      "enum": [
+        "full",
+        "curated"
+      ],
+      "description": "The system's selection marker, as the adapter that ran it recorded it. curated says the system's configuration chose, before the run, which paths of the input are assigned the scanner's analysis (DeepSec config.process_manifest_by_tree), so the result is a diagnostic of those paths and not a detection rate; full says the configuration chose none. It changes no status, claim, or quiet credit. Absent means the adapter does not report it, as no result written before the marker existed does; aggregation and the benchmark score then derive it from the configuration and the adapter version, and refuse a recorded marker that derivation contradicts."
     }
   },
   "$defs": {

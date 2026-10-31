@@ -169,6 +169,26 @@ def test_a_result_that_says_examined_nothing_with_anything_but_a_boolean_is_refu
         validate_document("scan-result", {**scan_result("2.1"), "examined_nothing": value})
 
 
+@pytest.mark.parametrize("processing", ["curated", "full"])
+def test_a_2_1_result_records_its_system_s_processing_and_a_2_0_result_cannot(processing):
+    """Both values are a statement about the system's configuration; neither needs any other field beside it."""
+    said = {**scan_result("2.1"), "processing": processing}
+    assert validate_document("scan-result", said) is said
+    curated_run = {**scan_result("2.1"), "status": "partial", "bundles_resolved": False,
+                   "error": {"code": "scope_incomplete", "message": "a curated diagnostic"},
+                   "omitted_paths": ["src/db.js"], "processing": processing}
+    assert validate_document("scan-result", curated_run) is curated_run
+    with pytest.raises(ContractError, match="Additional properties are not allowed"):
+        validate_document("scan-result", {**scan_result("2.0"), "processing": processing})
+
+
+@pytest.mark.parametrize("value", [None, "", "Curated", "partial", "unscoped", True, ["curated"]],
+                         ids=["null", "empty", "capitalized", "status-word", "other-word", "boolean", "list"])
+def test_a_result_that_records_processing_outside_its_two_values_is_refused(value):
+    with pytest.raises(ContractError, match="is not one of"):
+        validate_document("scan-result", {**scan_result("2.1"), "processing": value})
+
+
 def plan(mode: str = "full", **provenance) -> dict:
     return {"schema_version": "2.1", "input_hash": HASH, "scope": "draft",
             "targets": [{"target_id": "T1", "description": "d", "validation_level": "L1"}],

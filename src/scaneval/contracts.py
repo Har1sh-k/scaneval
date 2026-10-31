@@ -1119,6 +1119,12 @@ def _validate_scan_result(document: dict[str, Any]) -> None:
     to have been examined. The schema makes it a boolean, and nothing here checks it against
     ``omitted_paths``, ``claims`` or ``status``: each is the adapter's own account of one thing,
     and the scorer reads each for what it says.
+
+    And it may say ``processing``, ``curated`` or ``full``: whether the system's configuration chose
+    before the run which paths of the input get the scanner's analysis. The schema allows only those
+    two values, and nothing here checks it against the configuration, which a result does not carry:
+    :mod:`scaneval.aggregate` and :mod:`scaneval.benchmark` do, where the configuration and the
+    adapter version are read. The scorer does not read it.
     """
     claims = document["claims"]
     _unique([claim["claim_id"] for claim in claims], "claim_id")
