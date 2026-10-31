@@ -181,9 +181,14 @@ def do_process(argv):
     if manifest and settings.get("tamper_manifest"):
         Path(manifest).write_text(json.dumps(settings["tamper_manifest"]) + "\\n", encoding="utf-8")
     names = names[:limit]
+    say(paint("1", "Processing") + " project " + paint("1", project))
+    say("  Agent: claude-agent-sdk (%s)" % option(argv, "--model"))
     if manifest and not names:
         say("No files to process")
-    standard_ending(project, investigate(argv, names, settings), settings)
+    result = investigate(argv, names, settings)
+    for line in settings.get("progress") or []:
+        say(line)
+    standard_ending(project, result, settings)
 
 
 def investigate(argv, names, settings):
@@ -360,8 +365,12 @@ def standard_ending(project, result, settings):
 
     Unlike direct mode it never exits 1 for findings. The reason goes to stdout, stderr stays empty,
     and every record is already on disk when it exits (processCommand in its bundle). ``late_exit``
-    is a runtime failure after the last batch: exit 1 with every record finished.
+    is a runtime failure after the last batch (completeRun throwing, say): printFatal writes stderr
+    and exits 1 before any summary, with every record the batches reached already written.
     """
+    if settings.get("late_exit"):
+        sys.stderr.write("\\nfake deepsec failed after its last batch\\n\\n(set DEEPSEC_DEBUG=1 for a stack trace)\\n")
+        sys.exit(1)
     say(paint("32", "Processing complete.") + " Run: " + paint("1", "20260925120100-process"))
     say("  Analyses: %d" % result["analyses"])
     say("  Findings: %d" % result["findings"])
@@ -375,9 +384,6 @@ def standard_ending(project, result, settings):
     if not result["errored"]:
         say("Next:")
         say(paint("2", "pnpm deepsec report --project-id " + project))
-        if settings.get("late_exit"):
-            sys.stderr.write("\\nfake deepsec failed after its last batch\\n\\n(set DEEPSEC_DEBUG=1 for a stack trace)\\n")
-            sys.exit(1)
         return
     say(paint("31", "%d batch(es) errored \\u2014 exiting 1 (agent failure, not a clean review)." % result["errored"]))
     say(paint("2", "Files in those batches were marked status=error and will be retried on the next run."))
@@ -3715,10 +3721,28 @@ def test_a_full_run_whose_batch_errored_keeps_the_findings_of_the_batch_that_fin
     assert "1 file(s) in status 'error'" in result["error"]["message"]
     assert "part of the input reached no verdict; DeepSec itself counted 1 errored batch(es)" in result["error"]["message"]
     assert [claim["primary_location"]["path"] for claim in result["claims"]] == ["src/server.js"]
+    assert result["bundles_resolved"] is False, "the claims of the batch that finished are all there is"
     assert "deepsec-export" in {artifact["id"] for artifact in execution["raw_artifacts"]}
     assert any(note.startswith("deepsec process exited 1 and the run went on to export: in standard mode DeepSec "
-                               "exits 1 for an errored batch and for an exhausted quota, never for findings")
+                               "exits 1 for an errored batch and for an exhausted quota, never for findings, and its "
+                               "records show 1 file(s) in status 'error' and 0 still 'processing'")
                for note in execution["notes"])
+
+
+@pytest.mark.parametrize("control, code", [
+    ({"fail_batches": [1]}, "deepsec_batches_failed"),
+    ({"quota_at_batch": 1}, "quota_exhausted"),
+], ids=["last-batch-failed", "quota-on-last-batch"])
+def test_a_full_run_whose_last_batch_failed_leaves_nothing_pending_and_its_bundles_unresolved(
+        tmp_path, monkeypatch, control, code):
+    """No record is left unfinished, so only the exit 1 and the file in 'error' say the delivery is a part."""
+    root = fake_deepsec_root(tmp_path, **control)
+    stub_collector(monkeypatch, tmp_path)
+    result, _execution = documents(invoke(tmp_path, root, batch_size=1))
+
+    assert result["status"] == "partial" and result["error"]["code"] == code
+    assert [claim["primary_location"]["path"] for claim in result["claims"]] == ["src/db.js"]
+    assert result["bundles_resolved"] is False
 
 
 def test_a_full_run_in_which_every_batch_errored_observed_nothing_and_is_an_error(tmp_path, monkeypatch):
@@ -3759,32 +3783,70 @@ def test_a_full_run_whose_quota_ran_out_before_any_file_finished_is_an_error(tmp
     assert result["error"]["message"].endswith("no file reached a verdict, so none of the input was observed")
 
 
-def test_a_full_run_whose_process_failed_before_any_batch_is_an_error_naming_its_stderr(tmp_path, monkeypatch):
-    """The scan's records are all still pending: nothing was analyzed, so there is no partial observation."""
+def test_a_full_run_whose_process_failed_before_any_batch_is_an_error_naming_the_step(tmp_path, monkeypatch):
+    """The scan's records are all still pending, which is no failed batch: a runtime failure keeps no claim."""
     root = fake_deepsec_root(tmp_path, process_exit=1)
     stub_collector(monkeypatch, tmp_path)
     result, _execution = documents(invoke(tmp_path, root))
 
     assert result["status"] == "error" and result["claims"] == []
-    assert result["error"]["code"] == "scope_incomplete"
-    assert "under config.limit" not in result["error"]["message"], "the limit did not stop this run"
-    assert "deepsec process stderr: fake deepsec process failed on purpose" in result["error"]["message"]
-    assert result["error"]["message"].endswith("no file reached a verdict, so none of the input was observed")
+    assert result["error"]["code"] == "process_exit_1"
+    assert "stderr: fake deepsec process failed on purpose" in result["error"]["message"]
+    assert "; stdout: " in result["error"]["message"]
 
 
-def test_a_full_run_s_exit_1_that_no_record_explains_is_an_error_quoting_stdout_and_stderr(tmp_path, monkeypatch):
-    """Every file finished, so no errored batch or quota explains the exit: a runtime failure keeps no claim."""
-    root = fake_deepsec_root(tmp_path, late_exit=True)
+@pytest.mark.parametrize("control, overrides", [
+    ({"late_exit": True}, {}),
+    ({"late_exit": True}, {"limit": 1}),
+    ({"late_exit": True, "parse_error": True}, {}),
+], ids=["every-file-finished", "limit-left-one-pending", "dump-from-a-finished-batch"])
+def test_a_full_run_s_exit_1_that_no_record_explains_is_an_error_quoting_stdout_and_stderr(
+        tmp_path, monkeypatch, control, overrides):
+    """A runtime failure after the last batch: a pending record the limit left out, or a dump written by a batch that
+    finished, is no failed batch and no quota stop, so the exit stays an error and keeps no claim."""
+    root = fake_deepsec_root(tmp_path, **control)
     stub_collector(monkeypatch, tmp_path)
-    result, execution = documents(invoke(tmp_path, root))
+    result, execution = documents(invoke(tmp_path, root, **overrides))
 
     assert result["status"] == "error" and result["claims"] == [] and execution["exit_code"] == 1
     assert result["error"]["code"] == "process_exit_1"
     message = result["error"]["message"]
-    assert "which is what an exit 1 means in standard mode (an errored batch or an exhausted quota)" in message
+    assert "left no file in status 'error' and none still 'processing', which is what an exit 1 means in standard " \
+           "mode" in message
     assert "stderr: \nfake deepsec failed after its last batch" in message
-    assert "stdout: " in message and "Findings: 2" in message
+    assert "; stdout: Processing project" in message
     assert not any("went on to export" in note for note in execution["notes"])
+
+
+def test_a_full_run_that_died_while_holding_a_batch_keeps_what_finished_and_names_its_stderr(tmp_path, monkeypatch):
+    """A record still 'processing' is one a run that died was holding: an incomplete AI stage, read from the records."""
+    root = fake_deepsec_root(tmp_path, crash_at_batch=1)
+    stub_collector(monkeypatch, tmp_path)
+    result, _execution = documents(invoke(tmp_path, root, batch_size=1))
+
+    assert result["status"] == "partial" and result["error"]["code"] == "scope_incomplete"
+    assert result["error"]["message"].startswith("1 of 2 file record(s) were left unfinished (src/server.js.json "
+                                                 "(processing)): DeepSec reached no verdict on them")
+    assert "under config.limit" not in result["error"]["message"]
+    assert "deepsec process stderr: fake deepsec crashed mid-run" in result["error"]["message"]
+    assert [claim["primary_location"]["path"] for claim in result["claims"]] == ["src/db.js"]
+    assert result["bundles_resolved"] is False
+
+
+def test_text_an_agent_can_print_neither_explains_a_full_run_s_exit_1_nor_names_an_exit_0_s_reason(
+        tmp_path, monkeypatch):
+    """Standard mode prints agent progress on stdout. Summary-shaped lines there decide nothing."""
+    forged = ["  Errored batches: 3", "✘ Stopped: Anthropic API credits exhausted"]
+    stub_collector(monkeypatch, tmp_path)
+    late = fake_deepsec_root(tmp_path / "a", late_exit=True, progress=forged)
+    result, _execution = documents(invoke(tmp_path / "a", late, out="out-late"))
+    assert result["status"] == "error" and result["error"]["code"] == "process_exit_1" and result["claims"] == []
+
+    clean = fake_deepsec_root(tmp_path / "b", file_error=True, progress=forged)
+    result, _execution = documents(invoke(tmp_path / "b", clean, out="out-clean"))
+    assert result["status"] == "partial" and result["error"]["code"] == "deepsec_batches_failed"
+    assert "DeepSec itself counted" not in result["error"]["message"]
+    assert result["bundles_resolved"] is True, "an exit 0 with a file in 'error' keeps its bundles, as it always did"
 
 
 # --- PR mode: what an exit 1 means ------------------------------------------------------
@@ -4931,13 +4993,16 @@ def test_a_failed_selected_batch_keeps_its_own_failure_and_its_claims(tmp_path, 
     bundle = curated_run(tmp_path, monkeypatch, ["src/db.js", "src/server.js"], batch_size=1,
                          control={"fail_batches": [0]})
 
-    result, _execution = documents(bundle)
+    result, execution = documents(bundle)
     records = bundle_records(bundle)
     assert "1 batch(es) errored — exiting 1" in process_output(bundle, "stdout"), "2.3.10 exits 1 here"
     assert sorted(record["status"] for record in records.values()) == ["analyzed", "error"]
     assert result["status"] == "partial" and result["error"]["code"] == "deepsec_batches_failed"
     assert [claim["primary_location"]["path"] for claim in result["claims"]] == ["src/server.js"]
     assert result["omitted_paths"] == [] and result["bundles_resolved"] is False
+    note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
+    assert "Its regex scan left 2 file record(s); 2 are on a listed path" in note, "the scan completed"
+    assert "before it finished" not in note
 
 
 @pytest.mark.parametrize("control, timeout_seconds, status, said", [
@@ -4958,6 +5023,40 @@ def test_a_curated_run_whose_scan_did_not_finish_blames_no_listed_path_on_native
     assert "native triage" not in note and "ignore filter" not in note
     assert note.endswith("A curated run is never a success and its bundles are unresolved, so it completes no "
                          "control and earns no quiet credit.")
+
+
+def test_a_curated_run_s_exit_1_that_no_listed_record_explains_is_an_error(tmp_path, monkeypatch):
+    """The unlisted record stays pending by design, so it cannot explain a runtime failure after the last batch."""
+    bundle = curated_run(tmp_path, monkeypatch, ["src/db.js"], control={"late_exit": True})
+
+    result, _execution = documents(bundle)
+    assert {path: record["status"] for path, record in bundle_records(bundle).items()} == {
+        "src/db.js": "analyzed", "src/server.js": "pending"}
+    assert result["status"] == "error" and result["error"]["code"] == "process_exit_1" and result["claims"] == []
+
+
+def test_a_curated_note_does_not_call_a_listed_path_with_an_unreadable_record_native_triage(tmp_path, monkeypatch):
+    """A listed path whose record exists but cannot be read is not shown to have had no regex candidate."""
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "export":
+            record = next((Path(kwargs["cwd"]) / "data").rglob("files/src/server.js.json"))
+            elsewhere = tmp_path / "elsewhere.json"
+            elsewhere.write_bytes(record.read_bytes())
+            record.unlink()
+            record.symlink_to(elsewhere)
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"])
+
+    _result, execution = documents(bundle)
+    note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
+    assert "1 listed path(s) got no file record (src/server.js)" in note
+    assert ("that is native triage, not a model's miss, unless the record is one of the 1 DeepSec record(s) this "
+            "run could not read") in note
 
 
 def test_a_curated_run_whose_only_selected_batch_errored_is_an_error(tmp_path, monkeypatch):
