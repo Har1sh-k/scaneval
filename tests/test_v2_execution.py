@@ -393,9 +393,12 @@ def _with(outcome: NativeOutcome, **fields) -> NativeOutcome:
         (lambda outcome: _with(outcome, omitted_paths=[None]), "omitted_paths[0] must be a string, not NoneType"),
         (lambda outcome: _with(outcome, examined_nothing="yes"), "examined_nothing must be a bool or None, not str"),
         (lambda outcome: _with(outcome, examined_nothing=1), "examined_nothing must be a bool or None, not int"),
+        (lambda outcome: _with(outcome, processing=True), "processing must be a string or None, not bool"),
+        (lambda outcome: _with(outcome, processing=["curated"]), "processing must be a string or None, not list"),
     ],
     ids=["float-version", "path-in-command", "dict-outcome", "artifact-id", "usage-string", "note-object",
-         "omitted-string", "omitted-number", "omitted-none", "examined-text", "examined-number"],
+         "omitted-string", "omitted-number", "omitted-none", "examined-text", "examined-number",
+         "processing-bool", "processing-list"],
 )
 def test_an_outcome_that_breaks_the_adapter_contract_is_a_recorded_error(tmp_path, mutate, fragment):
     """An outcome this module cannot read is an error bundle, never a success with fields dropped."""
@@ -3075,6 +3078,40 @@ def test_a_result_the_contract_refused_carries_neither_the_list_nor_the_flag(tmp
 
     assert result["status"] == "error" and result["error"]["code"] == "import_contract_violation"
     assert "omitted_paths" not in result and "examined_nothing" not in result
+
+
+def test_a_result_records_no_processing_unless_the_adapter_reported_it(tmp_path):
+    """An adapter that does not report it leaves a standard full input's result the 2.0 document it always was."""
+    result = load_document(run(tmp_path, FakeAdapter()) / "result.json", "scan-result")
+
+    assert result["schema_version"] == "2.0" and "processing" not in result
+
+
+@pytest.mark.parametrize("processing", ["curated", "full"])
+def test_an_adapter_that_reports_its_system_s_processing_has_it_written_in_a_2_1_result(tmp_path, processing):
+    """The marker is the adapter's account of the system it ran: the version moves for it, and nothing else does."""
+    adapter = OutcomeAdapter(lambda outcome: _with(outcome, processing=processing))
+
+    bundle = run(tmp_path, adapter)
+
+    result = load_document(bundle / "result.json", "scan-result")
+    plain = load_document(run(tmp_path / "plain", FakeAdapter()) / "result.json", "scan-result")
+    assert result["schema_version"] == "2.1" and result["processing"] == processing
+    assert "location_basis" not in result and "omitted_paths" not in result and "examined_nothing" not in result
+    assert result["status"] == "success" and result["bundles_resolved"] is True
+    assert result["claims"] == plain["claims"], "it changes no claim"
+
+
+def test_a_processing_value_the_contract_refuses_is_a_recorded_import_failure_and_the_error_carries_none(tmp_path):
+    adapter = OutcomeAdapter(lambda outcome: _with(outcome, processing="unscoped"))
+
+    bundle = run(tmp_path, adapter)
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "error" and result["error"]["code"] == "import_contract_violation"
+    assert "processing" in execution["import_error"]
+    assert "processing" not in result, "the result recorded in place of a refused one carries nothing the adapter said"
 
 
 def test_the_workspace_git_diff_between_the_synthetic_commits_is_the_recorded_diff(tmp_path):
