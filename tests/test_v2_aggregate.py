@@ -1906,17 +1906,65 @@ def test_a_comparison_whose_systems_bundles_place_a_control_differently_is_refus
         aggregate.compare([run_a, run_b], baseline="baseline", candidate="candidate", policy=policy())
 
     assert str(refused.value).startswith(
-        "the systems were not scored against one plan: input widget places C-omitted nowhere in the bundles of "
-        "baseline and on vendor/helper.py in those of candidate; C-scanned nowhere in the bundles of baseline and "
-        "on app.py in those of candidate; ")
+        "the systems were not scored against one plan: input widget places C-omitted nowhere in 1 of the bundles of "
+        "baseline, and on vendor/helper.py in 1 of those of candidate; C-scanned nowhere in 1 of the bundles of "
+        "baseline, and on app.py in 1 of those of candidate; ")
+
+
+def test_a_comparison_whose_systems_bundles_place_a_control_both_ways_in_different_numbers_is_refused(tmp_path):
+    """Each system has runs from both sides of the change, in different numbers, over the same evidence.
+
+    run-1, made before full plans placed controls, and run-2, made since, scan the input for both systems; run-3,
+    made before, scans it for the baseline alone, and run-4, made since, for the candidate alone. Each system's frozen
+    work is three scans of the input, and each system's bundles place the controls both ways, so the two share a
+    set of placements. They do not share a mix: two of the baseline's three bundles place nothing and two of the
+    candidate's place each control, so the candidate's quiet control on a scanned file is credited in two scans and
+    the baseline's in one, over the same evidence.
+    """
+    runs = [placement_run(tmp_path / "1", "run-1", ("baseline", "candidate"), placed=False),
+            placement_run(tmp_path / "2", "run-2", ("baseline", "candidate"), placed=True),
+            placement_run(tmp_path / "3", "run-3", ("baseline",), placed=False),
+            placement_run(tmp_path / "4", "run-4", ("candidate",), placed=True)]
+    report = aggregate.aggregate(runs, policy=policy())
+    resolved = {system_id: slice_of(system(view(report), system_id))["controls"]["capability_safe"]["resolved"]
+                for system_id in ("baseline", "candidate")}
+    assert resolved == {"baseline": 1, "candidate": 2}, "the same quiet evidence, credited under two mixes of plans"
+
+    with pytest.raises(ContractError) as refused:
+        aggregate.compare(runs, baseline="baseline", candidate="candidate", policy=policy())
+
+    assert str(refused.value).startswith(
+        "the systems were not scored against one plan: input widget places C-omitted nowhere in 2 and on "
+        "vendor/helper.py in 1 of the bundles of baseline, and nowhere in 1 and on vendor/helper.py in 2 of those of "
+        "candidate; C-scanned nowhere in 2 and on app.py in 1 of the bundles of baseline, and nowhere in 1 and on "
+        "app.py in 2 of those of candidate; ")
+
+
+def test_systems_whose_every_bundle_places_a_control_one_way_compare_though_one_read_fewer_bundles(tmp_path):
+    """Both systems' plans place each control, and one of the candidate's two scans left no bundle.
+
+    The baseline's bundles place C-scanned on app.py twice and the candidate's once. A failure reads no plan, and
+    every bundle either system has was planned alike, so the counts differ by the failure alone: the comparison
+    stands, and nothing is said about placement.
+    """
+    inputs = [planned("widget", controls=[control("C-scanned"), control("C-omitted")])]
+    spec = scan(omitted=["README.md", "vendor/helper.py"], paths=PLACED)
+    outcomes = {("widget", system_id, repetition): spec
+                for system_id in ("baseline", "candidate") for repetition in (1, 2)}
+    outcomes[("widget", "candidate", 2)] = "missing_bundle"
+    run = write_run(tmp_path, "run-b", inputs, systems=("baseline", "candidate"), repetitions=2, outcomes=outcomes)
+
+    report = aggregate.compare([run], baseline="baseline", candidate="candidate", policy=policy())
+
+    assert not [warning for warning in view(report)["warnings"] if "bundle plans place" in warning]
 
 
 def test_systems_whose_bundles_place_controls_alike_compare_and_a_view_names_each_way_they_do(tmp_path):
     """Both systems in run-a, whose plans place nothing, and both in run-b, whose plans place each control.
 
-    Each system's bundles place the controls the same two ways, so both were scored under the same plans and the
-    comparison stands; its view names the two placements as an aggregate view does. Plans that agree throughout
-    compare with no such warning.
+    Each system's bundles place the controls the same two ways, one bundle each, so both were scored under the same
+    mix of plans and the comparison stands; its view names the two placements as an aggregate view does. Plans that
+    agree throughout compare with no such warning.
     """
     run_a = placement_run(tmp_path / "a", "run-a", ("baseline", "candidate"), placed=False)
     run_b = placement_run(tmp_path / "b", "run-b", ("baseline", "candidate"), placed=True)

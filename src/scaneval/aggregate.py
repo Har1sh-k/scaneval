@@ -55,8 +55,8 @@ before full plans placed controls gives a standard input's controls none, so the
 credited file by file under a plan written since and not at all under one written before. A view
 whose bundle plans place one input's control in more than one way warns, naming the input, the
 controls, where each run's plans put them, and the runs; :func:`compare` refuses two systems whose
-bundles place a control of one input differently, because a difference in its credit would then be the
-plans', not the systems'.
+bundles place a control of one input differently, counting how many of each system's bundles place it
+each way, because a difference in its credit would then be the plans', not the systems'.
 
 Pairs. A vulnerable/fixed pair is scored on whole canonical items, not on the one record it names:
 its vulnerable side is the whole canonical target, and its fixed state the whole canonical control
@@ -1859,28 +1859,29 @@ def _view_facts(corpus: _Corpus, mode: str, profile: str, system_ids: Iterable[s
 
 # Where one bundle's plan places a control: the paths it gives it, or None for none.
 Placement = tuple[str, ...] | None
-# Per (input id, control id), each placement and the (run id, system id) of the bundles that gave it.
-Placements = dict[tuple[str, str], dict[Placement, set[tuple[str, str]]]]
+# Per (input id, control id), each placement and the bundles whose plans gave it, as (run id, system id, repetition).
+Placements = dict[tuple[str, str], dict[Placement, set[tuple[str, str, int]]]]
 
 
 def _placements(corpus: _Corpus, mode: str, profile: str, system_ids: Iterable[str]) -> Placements:
-    """Where the bundle plans of one view place each control of each input, and whose bundles say so.
+    """Where the bundle plans of one view place each control of each input, and which bundles say so.
 
     Keyed by (input id, control id): each placement, the paths a plan gives the control or ``None`` for
-    none, maps to the (run id, system id) of every bundle whose plan gave it. Only read bundles of
-    *system_ids* count; a failure has no plan and says nothing about where a control is. An input whose
-    schedule froze no plan takes no part in any control metric, so where its bundles place a control
-    changes no credit and is not collected.
+    none, maps to the (run id, system id, repetition) of every bundle whose plan gave it, so that the
+    bundles placing a control one way can be counted, not only named. Only read bundles of *system_ids*
+    count; a failure has no plan and says nothing about where a control is. An input whose schedule froze
+    no plan takes no part in any control metric, so where its bundles place a control changes no credit
+    and is not collected.
     """
     wanted = set(system_ids)
     found: Placements = defaultdict(lambda: defaultdict(set))
-    for (run_id, input_id, system_id, _repetition), observation in sorted(corpus.observations.items()):
+    for (run_id, input_id, system_id, repetition), observation in sorted(corpus.observations.items()):
         row = corpus.inputs[(run_id, input_id)]
         if (system_id not in wanted or observation.placement is None or row["plan"]["state"] != "frozen"
                 or (row["mode"], row["profile"]) != (mode, profile)):
             continue
         for control_id, paths in observation.placement:
-            found[(input_id, control_id)][paths].add((run_id, system_id))
+            found[(input_id, control_id)][paths].add((run_id, system_id, repetition))
     return found
 
 
@@ -1906,7 +1907,7 @@ def _placement_warnings(placements: Placements) -> list[str]:
     differing: dict[str, list[str]] = defaultdict(list)
     for (input_id, control_id), seen in sorted(placements.items()):
         if len(seen) > 1:
-            ways = " and ".join(f"{_placed(paths)} in {', '.join(sorted({run for run, _system in seen[paths]}))}"
+            ways = " and ".join(f"{_placed(paths)} in {', '.join(sorted({run for run, _system, _ in seen[paths]}))}"
                                 for paths in sorted(seen, key=_placement_order))
             differing[input_id].append(f"{control_id} {ways}")
     return [f"input {input_id}: its bundle plans place {'; '.join(controls)}, so their quiet assessments are not "
@@ -2163,25 +2164,35 @@ def _contract_gap(baseline: dict, candidate: dict, names: tuple[str, str]) -> st
     return "their frozen vulnerable/fixed pairs differ"
 
 
+def _counted(counts: Counter) -> str:
+    """How many bundles place a control each way, in words: ``nowhere in 2 and on app.py in 1``."""
+    return " and ".join(f"{_placed(paths)} in {counts[paths]}" for paths in sorted(counts, key=_placement_order))
+
+
 def _placement_gap(placements: Placements, names: tuple[str, str]) -> str | None:
-    """The first input whose bundles place a control one way for one system and another for the other, in words.
+    """The first input whose bundles place a control in one mix for one system and another for the other, in words.
 
     The frozen contract cannot show this: a schedule freezes which controls an input carries, never where
     they are, and the bundle plans say that (see :func:`_placements`). A system's placements of a control
-    are those its own read bundles' plans give it over every run that scheduled it, compared as a set, as
-    :func:`_contract_gap` compares the entries of every run. A system with no read bundle of the input
-    has nothing to compare and differs in nothing, and two systems whose bundles place the control alike
-    are one plan however many ways each does (the view's warnings then name them). ``None`` when no
-    input differs.
+    are counted over its own read bundles of every run that scheduled it: how many place it nowhere and how
+    many on each set of paths. Two systems with the same counts were scored under the same mix of plans. A
+    set of placements cannot show that: a system whose bundles place a control nowhere twice and by its
+    paths once, and one whose bundles do so once and twice, share the set {nowhere, placed} and still score
+    the same evidence under different mixes of plans, so a difference in their control rates could be the
+    mixes'. A failure reads no plan, so a system with fewer read bundles than the other differs only when
+    its placements are mixed: two systems whose every read bundle places the control one way, the same way,
+    were scored under one plan whatever their counts. A system with no read bundle of the input has nothing
+    to compare and differs in nothing, and placements that are mixed alike for both systems are not a
+    difference (the view's warnings name them). ``None`` when no input differs.
     """
     differing: dict[str, list[str]] = defaultdict(list)
     for (input_id, control_id), seen in sorted(placements.items()):
-        sides = [sorted({paths for paths, where in seen.items() if any(system == name for _run, system in where)},
-                        key=_placement_order) for name in names]
-        if all(sides) and sides[0] != sides[1]:
-            differing[input_id].append(
-                f"{control_id} {' and '.join(map(_placed, sides[0]))} in the bundles of {names[0]} and "
-                f"{' and '.join(map(_placed, sides[1]))} in those of {names[1]}")
+        sides = [Counter(paths for paths, where in seen.items() for _run, system, _ in where if system == name)
+                 for name in names]
+        one_plan = len(sides[0]) == len(sides[1]) == 1 and sides[0].keys() == sides[1].keys()
+        if all(sides) and sides[0] != sides[1] and not one_plan:
+            differing[input_id].append(f"{control_id} {_counted(sides[0])} of the bundles of {names[0]}, and "
+                                       f"{_counted(sides[1])} of those of {names[1]}")
     if not differing:
         return None
     input_id = min(differing)
@@ -2301,13 +2312,16 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
     are listed among the configuration differences, as ``adapter_version`` and ``processing``, where a
     gate policy must name them to measure them, and a curated system's caveat is in every view.
 
-    The two systems' bundles must also place every control of one input alike, which the frozen contract
-    cannot show (see :func:`_placement_gap`); two that do not are refused before a metric is computed
-    ("the systems were not scored against one plan"). A baseline run before full plans placed controls
-    and a candidate run since, over the same evidence, would otherwise credit the candidate's quiet
-    controls on scanned files and withhold the baseline's, and show the plans' difference as an
-    improvement. Bundles that place a control in several ways alike for both systems are not refused;
-    each view's warnings name them, as :func:`aggregate` does.
+    The two systems' bundles must also place every control of one input alike: as many bundles of each
+    placing it each way, or, since a failure reads no plan, every bundle of both placing it the same one
+    way. The frozen contract cannot show this (see :func:`_placement_gap`), and two that do not are
+    refused before a metric is computed ("the systems were not scored against one plan"). A
+    baseline run before full plans placed controls and a candidate run since, over the same evidence,
+    would otherwise credit the candidate's quiet controls on scanned files and withhold the baseline's,
+    and show the plans' difference as an improvement; so would two systems that each have runs from
+    both sides of that change in different numbers. Bundles that place a control in several ways, as
+    many of each system's bundles each way, are not refused; each view's warnings name them, as
+    :func:`aggregate` does.
     """
     if baseline == candidate:
         raise ContractError("the baseline and the candidate are one system; name two systems to compare")
@@ -2328,8 +2342,8 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
             raise ContractError(
                 f"the systems were not scored against one plan: {gap}; a control placed nowhere earns no quiet "
                 "credit once its result lists any omitted path, so a difference in its credit would be the plans', "
-                "not the systems'. A plan written before full plans placed controls places none: run the older "
-                "side again so both are planned alike")
+                "not the systems'. A plan written before full plans placed controls places none: run again what "
+                "was planned before then, so that both systems are planned alike")
     views = []
     for mode, profile in _view_keys(corpus, (baseline,)):
         facts = _view_facts(corpus, mode, profile, (baseline,))
