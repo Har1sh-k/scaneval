@@ -58,7 +58,7 @@ resolved, its review assessed the control quiet, and its result lists an omitted
 ``examined_nothing`` (:func:`_sensitive_controls`); every other observation of it is the same wherever
 it is placed. A view whose bundle plans place one input's control in more than one way warns, naming
 the input, the controls, where each run's plans put them, and the runs, and saying either that their
-quiet assessments are not credited under one rule, when the bundles whose credit for the control can
+quiet assessments may not be credited under one rule, when the bundles whose credit for the control can
 depend on where it is placed place it in more than one way, or that it is credited under one rule, when
 they all place it alike or there are none. Only in the first case does :func:`compare` refuse two
 systems, because a difference in its credit may then be the plans', not the systems'.
@@ -1963,7 +1963,7 @@ def _placed_in(seen: dict[Placement, set[tuple[str, str, int]]]) -> str:
 # What a view's warning says of the controls of one input whose bundle plans place them in more than one way, by
 # how many ways the bundles whose credit for one can depend on where it is placed place it: two or more, one, none.
 _PLACEMENT_RULES = (
-    "so their quiet assessments are not credited under one rule: a control placed nowhere earns none once its "
+    "so their quiet assessments may not be credited under one rule: a control placed nowhere earns none once its "
     "result lists any omitted path",
     "and every bundle whose credit for them can depend on where they are placed places them alike, so they are "
     "credited under one rule",

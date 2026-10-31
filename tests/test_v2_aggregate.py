@@ -1858,7 +1858,7 @@ PLACED = {"C-scanned": ["app.py"], "C-omitted": ["vendor/helper.py"]}
 PLACED_TWO_WAYS = ("input widget: its bundle plans place C-omitted nowhere in run-a and on vendor/helper.py in run-b; "
                    "C-scanned nowhere in run-a and on app.py in run-b, ")
 PLACEMENT_WARNING = PLACED_TWO_WAYS + (
-    "so their quiet assessments are not credited under one rule: a control placed nowhere earns none once its "
+    "so their quiet assessments may not be credited under one rule: a control placed nowhere earns none once its "
     "result lists any omitted path")
 PLACED_ALIKE_WHERE_CREDIT_DEPENDS = PLACED_TWO_WAYS + (
     "and every bundle whose credit for them can depend on where they are placed places them alike, so they are "
@@ -2169,7 +2169,7 @@ def test_a_comparison_whose_systems_swap_the_plans_of_their_runs_is_refused(tmp_
     rule: had one system's scans ended partial in its run planned one way and the other's in its run planned the
     other way, the plans alone would credit one system's quiet assessments and withhold the other's. Every bundle's
     credit can depend on where its plan places the controls, and they place them two ways, so the comparison is
-    refused, and an aggregate view says the quiet assessments are not credited under one rule.
+    refused, and an aggregate view says the quiet assessments may not be credited under one rule.
     """
     first, second = repetitions
     runs = [placement_run(tmp_path, "run-baseline-1", ("baseline",), placed=False, repetitions=first),
@@ -2189,8 +2189,8 @@ def test_a_comparison_whose_systems_swap_the_plans_of_their_runs_is_refused(tmp_
     nowhere, placed = "run-baseline-1, run-candidate-2", "run-baseline-2, run-candidate-1"
     assert view(aggregate.aggregate(runs, policy=policy()))["warnings"] == [
         f"input widget: its bundle plans place C-omitted nowhere in {nowhere} and on vendor/helper.py in {placed}; "
-        f"C-scanned nowhere in {nowhere} and on app.py in {placed}, so their quiet assessments are not credited under "
-        "one rule: a control placed nowhere earns none once its result lists any omitted path"]
+        f"C-scanned nowhere in {nowhere} and on app.py in {placed}, so their quiet assessments may not be credited "
+        "under one rule: a control placed nowhere earns none once its result lists any omitted path"]
 
 
 def test_systems_whose_every_bundle_places_a_control_one_way_compare_though_one_read_fewer_bundles(tmp_path):
@@ -2448,7 +2448,7 @@ def test_a_frozen_control_placed_differently_is_refused_and_named_apart_from_one
     warnings = view(aggregate.aggregate(runs, policy=policy()))["warnings"]
     assert [warning for warning in warnings if "bundle plans place" in warning] == [
         "input widget: its bundle plans place C-scanned nowhere in run-a and on app.py in run-b, so their quiet "
-        "assessments are not credited under one rule: a control placed nowhere earns none once its result lists any "
+        "assessments may not be credited under one rule: a control placed nowhere earns none once its result lists any "
         "omitted path"]
 
 
@@ -2487,7 +2487,7 @@ def test_a_by_condition_report_notes_each_view_whose_bundle_plans_place_a_contro
     new = quiet_run(tmp_path / "new", "run-new", ("candidate",), placed=True)
     placed = quiet_run(tmp_path / "placed", "run-placed", ("baseline",), placed=True)
     warning = ("input widget: its bundle plans place C-scanned nowhere in run-old and on app.py in run-new, so their "
-               "quiet assessments are not credited under one rule: a control placed nowhere earns none once its result "
+               "quiet assessments may not be credited under one rule: a control placed nowhere earns none once its result "
                "lists any omitted path")
     notes = [
         "Separate descriptive condition/status/policy strata; no pooled weighted recall or confidence interval.",
