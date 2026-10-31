@@ -2130,6 +2130,82 @@ def test_an_input_whose_schedule_froze_no_plan_is_not_named_for_where_its_bundle
         assert not [warning for warning in warnings if "bundle plans place" in warning]
 
 
+def freeze_controls(run: Path, control_ids: tuple[str, ...]) -> None:
+    """Rewrite *run*'s schedule so that its input froze only *control_ids*: each bundle's plan adds the others."""
+    path = run / "evaluator" / "schedule.json"
+    document = json.loads(path.read_text())
+    plan = document["inputs"][0]["plan"]
+    plan["controls"] = [item for item in plan["controls"] if item["control_id"] in control_ids]
+    path.write_text(canonical_json(validate_document("evaluation-schedule", document)) + "\n")
+
+
+def test_controls_no_schedule_froze_are_neither_compared_nor_named_for_where_bundle_plans_place_them(tmp_path):
+    """The two runs of the first comparison above, with each schedule saying the input froze no control.
+
+    The bundle plans still carry both controls, placed nowhere in run-a and by their paths in run-b, and every result
+    lists omitted paths. A control a bundle's plan adds is ignored, as every metric ignores it, so where the plan
+    places it changes no credit: the comparison stands, and neither its view nor an aggregate view names the
+    placements. Each says only that the items the plans add are ignored.
+    """
+    runs = [placement_run(tmp_path / "a", "run-a", ("baseline",), placed=False),
+            placement_run(tmp_path / "b", "run-b", ("candidate",), placed=True)]
+    for run in runs:
+        freeze_controls(run, ())
+
+    report = aggregate.aggregate(runs, policy=policy())
+    comparison = aggregate.compare(runs, baseline="baseline", candidate="candidate", policy=policy())
+
+    for warnings in (view(report)["warnings"], view(comparison)["warnings"]):
+        assert warnings == [f"{system_id}: 2 item(s) a bundle's plan adds beyond the frozen schedule are ignored"
+                            for system_id in ("baseline", "candidate")]
+
+
+def test_a_frozen_control_placed_differently_is_refused_and_named_apart_from_one_no_schedule_froze(tmp_path):
+    """The same two runs with each schedule freezing C-scanned alone; the bundle plans also carry C-omitted.
+
+    C-scanned is placed nowhere in run-a and on app.py in run-b, and the results list omitted paths, so the comparison
+    is still refused. The refusal and the aggregate view's warning name C-scanned and not C-omitted, which no metric
+    reads.
+    """
+    runs = [placement_run(tmp_path / "a", "run-a", ("baseline",), placed=False),
+            placement_run(tmp_path / "b", "run-b", ("candidate",), placed=True)]
+    for run in runs:
+        freeze_controls(run, ("C-scanned",))
+
+    with pytest.raises(ContractError) as refused:
+        aggregate.compare(runs, baseline="baseline", candidate="candidate", policy=policy())
+
+    assert str(refused.value).startswith(
+        "the systems were not scored against one plan: input widget places C-scanned nowhere with weight 1 among the "
+        "bundles of baseline, and on app.py with weight 1 among those of candidate" + WEIGHED + OMITTING)
+    warnings = view(aggregate.aggregate(runs, policy=policy()))["warnings"]
+    assert [warning for warning in warnings if "bundle plans place" in warning] == [
+        "input widget: its bundle plans place C-scanned nowhere in run-a and on app.py in run-b, so their quiet "
+        "assessments are not credited under one rule: a control placed nowhere earns none once its result lists any "
+        "omitted path"]
+
+
+def test_an_omission_listed_only_where_the_run_froze_no_control_leaves_a_placement_difference_compared(tmp_path):
+    """The no-omission comparison above, with a third run of both systems whose schedule froze no control of the input.
+
+    run-a and run-b froze both controls and place them two ways, and both scans examined every path, so no credit
+    depends on where they are placed. run-c's bundle plans carry the controls too and its results list omitted
+    paths, but no metric reads a control its schedule did not freeze, so what those results omit changes no
+    control's credit: the comparison stands, and both views say that no credit depends on where the controls are
+    placed.
+    """
+    runs = [placement_run(tmp_path / "a", "run-a", ("baseline",), placed=False, **SCANNED_EVERYTHING),
+            placement_run(tmp_path / "b", "run-b", ("candidate",), placed=True, **SCANNED_EVERYTHING),
+            placement_run(tmp_path / "c", "run-c", ("baseline", "candidate"), placed=True)]
+    freeze_controls(runs[2], ())
+
+    comparison = aggregate.compare(runs, baseline="baseline", candidate="candidate", policy=policy())
+    report = aggregate.aggregate(runs, policy=policy())
+
+    for warnings in (view(comparison)["warnings"], view(report)["warnings"]):
+        assert [warning for warning in warnings if "bundle plans place" in warning] == [NO_CREDIT_DEPENDS]
+
+
 # --- a run directory written by the runner ------------------------------------------------------
 
 

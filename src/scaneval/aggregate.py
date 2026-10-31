@@ -1883,13 +1883,17 @@ def _placements(corpus: _Corpus, mode: str, profile: str, system_ids: Iterable[s
     bundles placing a control one way can be weighed by their runs' repetitions, not only named. Only read
     bundles of *system_ids* count; a failure has no plan and says nothing about where a control is. An
     input whose schedule froze no plan takes no part in any control metric, so where its bundles place a
-    control changes no credit and is not collected.
+    control changes no credit and is not collected. Nor is a control the schedule row of the bundle's run
+    and input did not freeze, which the bundle's plan adds and :func:`_observe` counts as unregistered, or
+    one frozen as a type no control class admits (:data:`CONTROL_CLASSES`): :func:`_frame` scores neither,
+    so where a plan places one changes no credit either.
 
     The second value holds the ids of the inputs one of whose collected bundles has a result that lists
-    an omitted path or says ``examined_nothing`` (``_Observation.omitting``), whichever system's it is.
-    Only from such a result does the scorer withhold quiet credit for what the scan did not examine, so
-    only for those inputs can where a plan places a control, or that it places it nowhere, change its
-    credit; for every other input, every placement earns the same.
+    an omitted path or says ``examined_nothing`` (``_Observation.omitting``), whichever system's it is; a
+    bundle none of whose placements is collected is not one, since what its result omits changes no
+    control's credit. Only from such a result does the scorer withhold quiet credit for what the scan did
+    not examine, so only for those inputs can where a plan places a control, or that it places it nowhere,
+    change its credit; for every other input, every placement earns the same.
     """
     wanted = set(system_ids)
     found: Placements = defaultdict(lambda: defaultdict(set))
@@ -1899,9 +1903,12 @@ def _placements(corpus: _Corpus, mode: str, profile: str, system_ids: Iterable[s
         if (system_id not in wanted or observation.placement is None or row["plan"]["state"] != "frozen"
                 or (row["mode"], row["profile"]) != (mode, profile)):
             continue
-        if observation.omitting:
+        scored = {control["control_id"] for control in row["plan"]["controls"]
+                  if any(control["type"] in types for types in CONTROL_CLASSES.values())}
+        collected = [(control_id, paths) for control_id, paths in observation.placement if control_id in scored]
+        if collected and observation.omitting:
             omitting.add(input_id)
-        for control_id, paths in observation.placement:
+        for control_id, paths in collected:
             found[(input_id, control_id)][paths].add((run_id, system_id, repetition))
     return found, omitting
 
