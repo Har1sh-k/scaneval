@@ -51,6 +51,17 @@ Adapter 1.2.1 reads a standard-mode `process` exit 1 from DeepSec's records
 instead of ending the run with no claims (#120), so a failed batch's records
 written before and after that change carry different versions.
 
+Reports read the same facts from what each run already recorded. A run manifest
+records every system's adapter version, so `scaneval aggregate` and `scaneval
+compare` refuse to pool one system id across two versions. A curated system is
+marked `processing: curated` in their system rows and in the benchmark score's,
+with a caveat in every view and in the score's `limits`: its figures describe the
+chosen paths and are not a detection rate. Comparing it with a full system lists
+`processing` and the key among the configuration differences, so a gate passes
+the comparison only when its policy names both. A configuration naming the key
+with a recorded adapter before 1.2.0 is marked `full`, with a caveat that the key
+was ignored. No saved artifact is rewritten and no figure changes.
+
 ## What runs
 
 1. `deepsec scan` runs unchanged over the whole supported repository.

@@ -16,7 +16,7 @@ A run directory is read through its 2.1 run manifest, the `evaluator/schedule.js
 - a run with a 2.0 manifest, which predates frozen schedules;
 - a schedule or configuration that does not bind to its manifest, or a manifest that records an invocation its schedule never assigned;
 - one run given twice, or runs whose schedules froze different packs;
-- one system id configured two ways across runs;
+- one system id configured two ways across runs, or recorded there with two adapters or adapter versions (see **Systems** below);
 - a canonical target or control planned under two projects, workloads, or families;
 - a view mixing diagnostic fixtures with any other evidence.
 
@@ -33,6 +33,10 @@ An input is scored on the targets and controls its schedule froze before the run
 **Omitted paths.** A result may list `omitted_paths`, the paths of its input the adapter observed the scanner did not examine, and may say `examined_nothing` when the adapter can show no part of the input to have been examined (in a PR review, every path the change touches is a listed one). A plan control may carry `paths`, where the pack places it. A record whose control is on a listed path, or whose plan gives it no paths while the result lists any, earns no quiet credit, and when the result says `examined_nothing` no record does, wherever it is placed: `scoring.observe` reports it completed and unresolved, so on a completed scan it is in `C`, not in `A`, and counted as unresolved in the false-alarm bound, as a record the plan lacks is, and a confirmed false allegation about it still resolves it. Aggregation reads the same rows and has no rule of its own for this. Only PR results report omissions so far, and a scan that examined some of the change still credits a control on an unchanged `context` file, which the list never names.
 
 **Evidence scope.** An observation is `reviewed` when its bundle's plan is reviewed and its review record is `human_approved`. It is `diagnostic` when the plan is diagnostic, and `draft` otherwise. A failure takes the scope of its schedule's frozen plan. A system or view is `reviewed` only when every planned observation is. Reviewed mixed with draft reports `draft`.
+
+**Systems.** A system is what its runs configured (adapter, adapter configuration, model, network policy, execution backend, and deadline) and the adapter version their manifests record for it. Two runs that record two versions, or two adapter names, for one system id are refused like two configurations, because a version can change what one configuration does: DeepSec 1.1.0 ignores `config.process_manifest_by_tree` and 1.2.0 honors it. Every manifest that loads carries the field, so a run records no version only for a system it ran nothing for: `null` when the system's adapter could not be resolved and it was skipped, and no row when the run failed before preparing it. Such a run pools with runs of any version and adds none, so its failures stay in every denominator, and each view names the runs that recorded no version.
+
+Every system row reports that `adapter_version`, `null` when no run recorded one, and `processing`, the system's selection marker. It is `curated` when the configuration chose before the run which paths are assigned AI batches, which today is DeepSec's `config.process_manifest_by_tree`, and `full` otherwise. A recorded DeepSec version before 1.2.0 ignored the key and ran unscoped, so that system is `full`, and its view says the key was ignored; an unknown version is taken as configured. Both are read from what each run already recorded, so saved runs show them without being rewritten. Neither changes a figure: a curated system is scored like any other partial run, and every view it is in says its figures describe the chosen paths and are not a detection rate. Reports written before these fields existed omit them.
 
 ## Views, slices, and weights
 
@@ -136,7 +140,7 @@ The schedules fix these sets before any outcome, so a project with controls and 
 
 That check compares the two systems' schedules, so it cannot see a narrowing that applies to both, such as a run started with `--only-input` after its configuration was written: the configuration keeps every input, both systems are assigned the same shorter schedule, and inputs could be dropped after their results were seen. Each run row therefore records the manifest's `selection` and `configured_inputs` beside `inputs`, the inputs its schedule covers, in `aggregate` and `compare` alike. `compare` does not refuse such a run, and [the gate](GATE.md) leaves its shared-contract requirement unresolved.
 
-Differences are candidate minus baseline for each view, slice, and weighting. They cover recall, recall@B and its lower bound, pair correctness and availability, the control rates and masses, and completion. Recall, recall@B, pair correctness, and the control rates carry paired intervals. `configuration_differences` lists every differing value as a dotted key over `adapter`, `config`, `model_id`, `model_revision`, `network_policy`, and `execution`.
+Differences are candidate minus baseline for each view, slice, and weighting. They cover recall, recall@B and its lower bound, pair correctness and availability, the control rates and masses, and completion. Recall, recall@B, pair correctness, and the control rates carry paired intervals. `configuration_differences` lists every differing value as a dotted key over `adapter`, `adapter_version`, `config`, `model_id`, `model_revision`, `network_policy`, `execution`, `processing`, and `timeout_seconds`. Two systems of different adapter versions, or a curated system and a full one, are compared, not refused: the difference is listed there, where [a gate policy](GATE.md) must name it to measure it, and a curated system's caveat is in every view.
 
 ## What is not claimed
 
@@ -148,5 +152,5 @@ Differences are candidate minus baseline for each view, slice, and weighting. Th
 The effective global `timeout_seconds` is part of system configuration identity. A system id
  cannot aggregate different deadlines; comparisons expose deadline changes to the configuration
  allowlist. There is no per-system deadline override. Adapter config, model identity, effective
- network policy and execution backend also participate. Repetitions, profiles and frozen workload
+ network policy, execution backend, the recorded adapter version, and processing also participate. Repetitions, profiles and frozen workload
  follow the shared comparison contract; run timestamps, paths and observed execution timings may vary.

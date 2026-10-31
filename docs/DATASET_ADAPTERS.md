@@ -236,6 +236,14 @@ Unknown cost and runtime totals are `null`, with counts of invocations that
 reported each value. A runtime total with some missing invocations is the sum of
 known values only.
 
+Each system row also names the `adapter_version` its saved receipts record (`null`
+when none ran; receipts naming two versions of one system are refused) and its
+`processing`, `curated` or `full`, decided as in [aggregation](AGGREGATION.md): a
+DeepSec configuration naming `process_manifest_by_tree` is `curated` unless its
+receipts record an adapter before 1.2.0, which ignored the key. A curated system is
+scored like any other, and `limits` gains a line saying its figures describe the
+paths chosen before the run and are not a detection rate.
+
 The `scaneval-reference-coverage-2` protocol uses these rules:
 
 - Reference coverage is distinct positive annotations covered divided by all

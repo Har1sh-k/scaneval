@@ -22,7 +22,7 @@ A `gate-policy` states every threshold and is frozen before any result is read. 
 
 - its `view`, one (mode, profile) pair of the comparison, because views are never pooled;
 - the `primary` metric, full-output recall or recall@B in one weighting and slice, and the `min_improvement` it must make. A random-order expectation or any other diagnostic is refused when the policy is loaded;
-- `configuration.allowed_differences`, the dotted keys the comparison is meant to measure.
+- `configuration.allowed_differences`, the dotted keys the comparison is meant to measure. They include `adapter_version` and `processing`, so a comparison across adapter versions, or of a curated system with a full one, passes this requirement only when the policy names that key.
 
 Every other block (`regressions`, `precision`, `controls`, `completion`, `target_coverage`, `burden`, `cost`) is a requirement the policy makes only by writing it, and a block that is written must carry all of its tolerances. The decision lists which blocks were declared and which were not, and evaluates only the declared ones. `required_scope` is `reviewed` unless the policy says `draft`; the decision records the completed policy.
 
