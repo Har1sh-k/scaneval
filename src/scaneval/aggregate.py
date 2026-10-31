@@ -25,12 +25,11 @@ network policy, execution backend, and deadline), the adapter version their mani
 processing those two make of it, ``full`` or ``curated`` (:func:`system_processing`). One system id is
 one of each in every run it is aggregated from, or the runs are refused; a run whose own invocation rows
 show it ran nothing for a system, every assignment skipped or never started, pools with any version,
-whatever version it recorded. A result written since the marker
-existed records its system's processing itself; it must be the one the configuration and the version
-give, or the runs are refused, and a result that records none is read by that derivation. System rows
-report the version and the processing, a comparison lists both among its configuration differences,
-and every view states a curated system's caveat: its figures describe paths chosen before the run and
-are not a detection rate.
+whatever version it recorded. A result written since the marker existed records its system's
+processing itself; it must be the one the configuration and the version give, or the runs are refused,
+and a result that records none is read by that derivation. System rows report the version and the
+processing, a comparison lists both among its configuration differences, and every view states a
+curated system's caveat: its figures describe paths chosen before the run and are not a detection rate.
 
 What is scored against what. An input is scored on the targets and controls its schedule froze before
 the run. An item frozen there but absent from the bundle's plan is a miss (``unscored``): a target is
