@@ -272,8 +272,10 @@ def _load_rows(matrix: dict, directory: Path, execution_record: dict | None = No
     froze the pathless plans built before full plans placed controls (see
     :func:`scaneval.experiment.frozen_before_control_paths`), and its plans are then built as they
     were: a standard cell's bundle must hold the pathless plan an execution of it saved before then,
-    and one whose plan places a control is drift, as any plan other than its frozen form is. A
-    matrix frozen since accepts today's plan only, which places it.
+    and one whose plan places a control is drift, as any plan other than its frozen form is. No
+    execution saves one now, because execution refuses such a matrix
+    (:func:`scaneval.experiment_execution.execute`). A matrix frozen since accepts today's plan
+    only, which places it.
     """
     rows = []
     execution_record = execution_record or load_execution(directory, matrix)

@@ -39,8 +39,11 @@ def frozen_shell():
 def staged_executor(monkeypatch, matrix):
     # These tests isolate executor control flow. Complete freeze and actual three-condition
     # scanner execution are exercised after the identity/open-context dependency layers land.
+    # The shell freezes no population, so neither validation nor the placement its plans were
+    # frozen with is read.
     monkeypatch.setattr(execution, "load_matrix", lambda _path: matrix)
     monkeypatch.setattr(experiment, "validate_frozen", lambda value: value)
+    monkeypatch.setattr(experiment, "frozen_before_control_paths", lambda _value: False)
 
 
 def test_every_cell_and_assignment_is_on_disk_before_first_runner(tmp_path, monkeypatch):
@@ -337,9 +340,11 @@ def test_an_input_refused_before_checks_keeps_skipped_behavior_while_checked_cel
 # A full plan now gives each control the pack locates its paths. The plan of a standard input, which a matrix's
 # population embeds and its open-context and closed-book cells are scored against, gave none before: it was the 2.0
 # plan. A matrix frozen then, whose population plans a located control, holds those pathless plans as its frozen
-# contract, and an experiment executed from it saved them in its bundles. Nothing here runs the old code: the helpers
-# below write what it wrote, a standard plan with its paths taken out and its version put back to 2.0, which is all
-# it did differently. The scanner is a stand-in that finds nothing, under a recorded stand-in for the OCI backend;
+# contract, and an experiment executed from it saved them in its bundles. Such a matrix is still validated and
+# reported, but this build refuses to execute it. Nothing here runs the old code: the helpers below write what it
+# wrote, a standard plan with its paths taken out and its version put back to 2.0, which is all it did differently,
+# and execute as it did, without that refusal. The scanner is a stand-in that finds nothing, under a recorded
+# stand-in for the OCI backend;
 # the freeze, the runner, the plans, the bindings, and the report are the real ones. The open-context cell needs a
 # real OCI backend and fails here before any scan (the Docker matrix test runs it); the closed-book cell is planned
 # exactly as it is, a standard full input of the same snapshot, so it carries the standard plan for both.
@@ -418,11 +423,14 @@ def located_control_matrix(tmp_path, monkeypatch, adapter):
     return root, frozen
 
 
-def execute_matrix(root, frozen, adapter, monkeypatch, *, before_placement=False):
+def execute_matrix(root, frozen, adapter, monkeypatch, *, before_placement=False, unrefused=False):
     """Execute *frozen* through the actual runner; return the output directory and the execution manifest.
 
-    ``before_placement`` has the runner write each plan as a build before full plans placed controls did, so the
-    bundles are those an execution before then saved.
+    ``before_placement`` executes it as a build before full plans placed controls did: the runner writes each plan
+    as that build wrote it, so the bundles are those an execution before then saved, and a matrix frozen then is not
+    refused, since nothing refused one then. ``unrefused`` lifts only that refusal, so the runner writes today's
+    plans into the cells of a matrix frozen then, as a build that executed one without refusing it would have.
+    Either way the matrix is still validated as this build validates it.
     """
     path = root / "frozen.json"
     path.write_text(canonical_json(frozen) + "\n")
@@ -434,8 +442,15 @@ def execute_matrix(root, frozen, adapter, monkeypatch, *, before_placement=False
             return before_control_paths(plan), notes
         monkeypatch.setattr(execution.runner, "_plan", plan_before_placement)
     output = root.parent / "out"
-    manifest = experiment.execute(path, output, workspace_root=root / "work", adapters={"semgrep": adapter},
-                                  clock=lambda: datetime(2001, 1, 1, tzinfo=timezone.utc))
+    with monkeypatch.context() as patch:
+        if before_placement or unrefused:
+            frozen_before = experiment.frozen_before_control_paths
+            def validated_but_not_refused(document):
+                frozen_before(document)
+                return False
+            patch.setattr(experiment, "frozen_before_control_paths", validated_but_not_refused)
+        manifest = experiment.execute(path, output, workspace_root=root / "work", adapters={"semgrep": adapter},
+                                      clock=lambda: datetime(2001, 1, 1, tzinfo=timezone.utc))
     return output, manifest
 
 
@@ -532,19 +547,49 @@ def test_a_matrix_frozen_before_full_plans_placed_controls_reports_a_placed_stan
         tmp_path, monkeypatch):
     """A matrix frozen with the pathless plans accepts them alone: a standard cell that saved today's plan is drift.
 
-    The closed-book cell's bundle holds the plan that places the control on app.py, which is not the plan the matrix
-    froze for its input, so it is ineligible like any other plan the frozen contract does not give. The
-    identity-reduced cell's plan placed the control under either rule and is its frozen form.
+    This build refuses to execute such a matrix, so the matrix is executed here as a build that did not refuse it
+    would have. The closed-book cell's bundle holds the plan that places the control on app.py, which is not the
+    plan the matrix froze for its input, so it is ineligible like any other plan the frozen contract does not give.
+    The identity-reduced cell's plan placed the control under either rule and is its frozen form.
     """
     adapter = Scanning()
     root, frozen = located_control_matrix(tmp_path, monkeypatch, adapter)
-    output, manifest = execute_matrix(root, matrix_before_control_paths(frozen), adapter, monkeypatch)
+    output, manifest = execute_matrix(root, matrix_before_control_paths(frozen), adapter, monkeypatch, unrefused=True)
 
     assert saved_plans(output) == {"closed_book_standard": PLACED, "identity_reduced": PLACED}
     rows = scanned_cells(manifest, experiment.report(output))
     assert DRIFT in rows["closed_book_standard"]["reasons"]
     assert DRIFT not in rows["identity_reduced"]["reasons"], "its plan placed the control under either rule"
 
+
+
+def test_a_matrix_frozen_before_full_plans_placed_controls_is_not_executed_and_says_to_freeze_it_again(
+        tmp_path, monkeypatch):
+    """Execution refuses the matrix before it writes anything, and the matrix frozen again executes without drift.
+
+    A cell executed now would save today's plan, which places the control, and the report accepts only the plan the
+    matrix froze, so every standard cell would run and then be ineligible as drift. Validation still accepts the
+    matrix, as the report of an experiment executed from it before needs. Its declaration frozen again gives the
+    matrix this test froze, whose plans place the control: it executes, and its report has no drift.
+    """
+    adapter = Scanning()
+    root, frozen = located_control_matrix(tmp_path, monkeypatch, adapter)
+    legacy = matrix_before_control_paths(frozen)
+
+    with pytest.raises(ContractError) as refused:
+        execute_matrix(root, legacy, adapter, monkeypatch)
+
+    assert str(refused.value) == (
+        "matrix was frozen before full plans placed controls, so its standard plans place none, and a cell executed "
+        "now would save a plan that places them, which its report would mark as drift; freeze its declaration "
+        "again with scaneval matrix freeze and execute the new matrix")
+    assert not (root.parent / "out").exists(), "nothing is written before the refusal"
+    assert experiment.validate_frozen(legacy) is legacy
+    output, manifest = execute_matrix(root, frozen, adapter, monkeypatch)
+    assert saved_plans(output) == {"closed_book_standard": PLACED, "identity_reduced": PLACED}
+    report = experiment.report(output)
+    scanned_cells(manifest, report)
+    assert [row["reasons"] for row in report["observations"] if DRIFT in row["reasons"]] == []
 
 def test_a_matrix_frozen_since_full_plans_placed_controls_reports_a_pathless_standard_plan_as_drift(
         tmp_path, monkeypatch):

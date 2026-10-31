@@ -248,7 +248,10 @@ def frozen_before_control_paths(document: dict) -> bool:
 
     Refused, with the message drift always had: a population equal to neither, whatever else changed.
     Placement is the only difference forgiven, and only as a whole: one source planned each way is
-    neither.
+    neither. Forgiven means read, not run: validation accepts such a matrix, so an experiment executed
+    from it before then stays reportable, and its report accepts only the plans it froze, but
+    execution refuses it (:func:`scaneval.experiment_execution.execute`), since a cell executed now
+    would save a plan that places the control.
     """
     if document["population"] == _population(document["pack"], document["declaration"]):
         return False
