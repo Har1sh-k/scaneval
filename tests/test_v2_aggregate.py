@@ -1918,31 +1918,38 @@ def control_blocks(report: dict) -> list[dict]:
 
 
 def test_a_control_s_credit_can_depend_on_its_placement_exactly_where_the_scorer_s_observation_does():
-    """The bundles a placement check reads are those whose observation of a control depends on where it is placed.
+    """The bundles a placement check reads are those whose observation of a control can depend on where it is placed.
 
-    For every status, bundles_resolved, decision, omitted_paths, and examined_nothing (absent or true) a result and its
-    review can hold, scoring.observe observes C-scanned under a plan that places it nowhere and under one that places
-    it on app.py, which the result never lists. The control is sensitive (aggregate._sensitive_controls), read from
-    either observation alike, exactly when the two observations differ: only on a completed scan whose bundles are
-    resolved, assessed quiet, whose result lists an omitted path and does not say examined_nothing.
+    For every status the scan-result schema allows, either bundles_resolved, every decision the review-decisions
+    schema allows and none at all, omitted_paths absent, empty, or listing README.md, and examined_nothing absent,
+    false, or true, in every combination, since neither schema ties one of these to another, scoring.observe observes
+    C-scanned under a plan that places it nowhere and under one that places it on app.py, which the result never
+    lists. The control is sensitive (aggregate._sensitive_controls), read from either observation alike, exactly when
+    the two observations differ: only on a completed scan whose bundles are resolved, assessed quiet, whose result
+    lists an omitted path and does not say examined_nothing, whether it says that is false or does not say it at all.
     """
+    schemas = Path(__file__).resolve().parents[1] / "src" / "scaneval" / "schemas"
+    result_schema, review_schema = (json.loads((schemas / name).read_text(encoding="utf-8"))
+                                    for name in ("scan-result-2.1.schema.json", "review-decisions.schema.json"))
+    statuses = result_schema["properties"]["status"]["enum"]
+    assessments = review_schema["$defs"]["control_assessment"]["properties"]["decision"]["enum"]
     bound = input_hash("widget")
     alleged = {"claim_id": "c1", "allegation": "fixture allegation 1", "kind": "command_injection",
                "primary_location": {"path": "app.py", "start_line": 1, "end_line": 1}, "rank": 1}
     mirrored, scored = {}, {}
-    for combination in itertools.product(("success", "partial"), (True, False),
-                                         ("quiet", "false_allegation", "unresolved"), ((), ("README.md",)),
-                                         (None, True)):
+    for combination in itertools.product(statuses, (True, False), (*assessments, None), (None, (), ("README.md",)),
+                                         (None, False, True)):
         status, resolved, decision, omitted, examined_nothing = combination
         result = {"schema_version": "2.1", "run_id": "run-a", "system_id": "baseline", "input_hash": bound,
                   "status": status, "ranking": "native", "claims": [alleged], "bundles_resolved": resolved,
-                  "usage": {"wall_seconds": 1.0}, "omitted_paths": list(omitted),
+                  "usage": {"wall_seconds": 1.0}, **({} if omitted is None else {"omitted_paths": list(omitted)}),
                   **({} if examined_nothing is None else {"examined_nothing": examined_nothing})}
         decisions = {"schema_version": "2.0", "run_id": "run-a", "input_hash": bound,
                      "result_sha256": canonical_sha256(result), "claim_matches": [],
-                     "control_assessments": [{"control_id": "C-scanned", "decision": decision,
-                                              "claim_ids": ["c1"] if decision == "false_allegation" else [],
-                                              "reason": f"fixture: {decision}"}]}
+                     "control_assessments": [] if decision is None else [
+                         {"control_id": "C-scanned", "decision": decision,
+                          "claim_ids": ["c1"] if decision == "false_allegation" else [],
+                          "reason": f"fixture: {decision}"}]}
         observations, said = [], []
         for paths in (None, ["app.py"]):
             plan = {"schema_version": "2.1", "input_hash": bound, "scope": "reviewed", "targets": [],
@@ -1957,7 +1964,7 @@ def test_a_control_s_credit_can_depend_on_its_placement_exactly_where_the_scorer
 
     assert mirrored == {combination: [expected, expected] for combination, expected in scored.items()}
     assert [combination for combination, expected in scored.items() if expected] == [
-        ("success", True, "quiet", ("README.md",), None)]
+        ("success", True, "quiet", ("README.md",), None), ("success", True, "quiet", ("README.md",), False)]
 
 
 def test_a_view_names_an_input_whose_bundle_plans_place_its_controls_in_two_ways(tmp_path):
