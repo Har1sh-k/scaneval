@@ -2348,8 +2348,8 @@ def preserve_transcripts(sessions: tuple[Session, ...], transcripts: dict[str, t
             artifacts.append({"id": f"claude-session/{session.session_id}/{relative.as_posix()}",
                               "path": raw_dir / destination})
             moved += 1
-    notes = [f"{moved} Claude Code transcript(s) were moved from {projects_dir} into raw/claude-sessions and "
-             "registered as artifacts of this run."
+    notes = [f"{moved} Claude Code transcript(s) were moved from {portable(projects_dir)} into "
+             "raw/claude-sessions and registered as artifacts of this run."
              + (f" {len(refused)} transcript(s) could not be moved and were left in place: "
                 + "; ".join(refused[:5]) + ("; ..." if len(refused) > 5 else "") + "."
                 if refused else "")]

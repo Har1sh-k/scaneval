@@ -3796,6 +3796,24 @@ def test_the_collectors_bound_decides_which_transcripts_are_moved_and_a_moved_on
                                  f"{len(data) - 1}, so it is not the file discovery read to its end).")
 
 
+def test_the_capture_note_names_the_projects_directory_with_a_tilde_rather_than_a_home_directory(
+        tmp_path, monkeypatch):
+    """A note is recorded evidence, and the projects directory lives in the operator's home."""
+    from scaneval.adapters.llm_harness import Enclosure
+
+    source = transcript_fixture(tmp_path)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    raw = tmp_path / "raw"
+    raw.mkdir()
+
+    _artifacts, notes = deepsec_module.preserve_transcripts(
+        (workspace_history_session("session-aaaa"),), {"session-aaaa": (source,)}, source.parent, raw,
+        Enclosure.capture(tmp_path / "source", raw))
+
+    assert notes == ["1 Claude Code transcript(s) were moved from ~/transcripts into raw/claude-sessions and "
+                     "registered as artifacts of this run."]
+
+
 def test_a_move_that_fails_in_a_way_no_check_names_is_refused_and_the_scan_keeps_its_claims(tmp_path, monkeypatch):
     """Any exception out of a move is a refusal with a note, never a failure of the scan.
 
