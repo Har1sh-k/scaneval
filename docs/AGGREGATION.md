@@ -72,6 +72,13 @@ Strata also separate the original evidence scope. Diagnostic fixtures are never 
 draft or reviewed corpus evidence, and a human-approved finding review never upgrades the
 corpus labels. The shared metrics API takes each row's original `scope`, preserves it on target
 outcomes, and refuses a flat diagnostic/non-diagnostic mixture. Missing scope stays unavailable.
+A stratum resolves each observation's controls under its own bundle's plan, so runs planned
+either side of the change that placed controls (see **Omitted paths** under
+[What is read](#what-is-read)) can show the same quiet evidence resolved in one stratum and
+unresolved in another. The report's `notes` therefore carry, after each system's caveats, the
+warning `aggregate` gives each view whose bundle plans place one input's control in more than
+one way, prefixed with the view (`view full/standard: input widget: its bundle plans place ...`);
+runs whose plans agree add none.
 
 Condition-aware writers include optional-for-compatibility `condition_coverage` and
 `condition_digest_format: condition-structural-v1` fields in 2.1 reports. The structural identity

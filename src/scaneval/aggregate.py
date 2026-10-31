@@ -861,6 +861,12 @@ def aggregate_by_condition(run_dirs: Iterable[str | PathLike[str]], *, policy: d
     The complete scheduled denominator is retained beside each stratum's own denominator. These
     are descriptive target-observation counts and bounds, with no weighted headline or interval.
     Raw per-target outcomes are retained for a workflow with separately frozen pairing/weighting.
+    A stratum resolves each observation's controls under its own bundle's plan, so runs planned either
+    side of the change that placed controls can show the same quiet evidence resolved in one stratum
+    and unresolved in another. The notes therefore carry, after each system's caveats, the warning
+    :func:`aggregate` gives each (mode, profile) view whose bundle plans place one input's control in
+    more than one way (:func:`_placement_warnings`), prefixed with the view, as ``view full/standard:``;
+    runs whose plans agree add none.
     """
     corpus, resolved_policy = _load_corpus(run_dirs), resolve_policy(policy)
     rows = _scheduled_condition_rows(corpus)
@@ -889,7 +895,10 @@ def aggregate_by_condition(run_dirs: Iterable[str | PathLike[str]], *, policy: d
               "notes": ["Separate descriptive condition/status/policy strata; no pooled weighted recall or confidence interval.",
                         "Full scheduled view denominators are reported beside stratum denominators. Missing, unsupported, incomplete, and unreviewed targets remain unknown, never silent zeros.",
                         "Metrics use existing scoring.observe target/control decisions. Per-target outcomes are unweighted and do not replace an experiment's frozen weighting or paired analysis."]
-              + [warning for system, info in corpus.systems.items() for warning in _system_warnings(system, info)]}
+              + [warning for system, info in corpus.systems.items() for warning in _system_warnings(system, info)]
+              + [f"view {mode}/{profile}: {warning}" for mode, profile in _view_keys(corpus, corpus.systems)
+                 for warning in _placement_warnings(*_placements(corpus, mode, profile,
+                                                                 _systems_in_view(corpus, mode, profile)))]}
     return validate_document(REPORT_KIND, report)
 
 

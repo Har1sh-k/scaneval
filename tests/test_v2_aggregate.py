@@ -2473,6 +2473,41 @@ def test_an_omission_listed_only_where_the_run_froze_no_control_leaves_a_placeme
         assert [warning for warning in warnings if "bundle plans place" in warning] == [NO_CREDIT_DEPENDS]
 
 
+def test_a_by_condition_report_notes_each_view_whose_bundle_plans_place_a_control_in_two_ways(tmp_path):
+    """The condition strata resolve each observation's controls under its own bundle's plan, and the notes say so.
+
+    run-old's plan places C-scanned nowhere and run-new's on app.py, as plans saved either side of the change that
+    placed controls do; each scan is quiet and lists README.md alone as omitted, as every Semgrep full scan does. From
+    the same evidence the baseline's stratum shows C-scanned completed and unresolved and the candidate's resolved.
+    The notes say why, with the warning aggregate gives that view, prefixed with the view. Runs whose plans agree add
+    no note, whether one run alone or two runs that both place the control: their notes are the three every
+    condition-strata report of plain systems carries.
+    """
+    old = quiet_run(tmp_path / "old", "run-old", ("baseline",), placed=False)
+    new = quiet_run(tmp_path / "new", "run-new", ("candidate",), placed=True)
+    placed = quiet_run(tmp_path / "placed", "run-placed", ("baseline",), placed=True)
+    warning = ("input widget: its bundle plans place C-scanned nowhere in run-old and on app.py in run-new, so their "
+               "quiet assessments are not credited under one rule: a control placed nowhere earns none once its result "
+               "lists any omitted path")
+    notes = [
+        "Separate descriptive condition/status/policy strata; no pooled weighted recall or confidence interval.",
+        "Full scheduled view denominators are reported beside stratum denominators. Missing, unsupported, incomplete, "
+        "and unreviewed targets remain unknown, never silent zeros.",
+        "Metrics use existing scoring.observe target/control decisions. Per-target outcomes are unweighted and do not "
+        "replace an experiment's frozen weighting or paired analysis."]
+
+    report = aggregate.aggregate_by_condition([old, new], policy=policy())
+
+    assert {stratum["system_id"]: [(row["canonical_id"], row["completed"], row["resolved"])
+                                   for row in stratum["metrics"]["controls"]]
+            for stratum in report["condition_strata"]} == {"baseline": [("C-scanned", True, False)],
+                                                          "candidate": [("C-scanned", True, True)]}
+    assert view(aggregate.aggregate([old, new], policy=policy()))["warnings"] == [warning]
+    assert report["notes"] == notes + [f"view full/standard: {warning}"]
+    for runs in ([old], [new], [new, placed]):
+        assert aggregate.aggregate_by_condition(runs, policy=policy())["notes"] == notes
+
+
 # --- a run directory written by the runner ------------------------------------------------------
 
 
