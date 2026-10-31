@@ -20,6 +20,17 @@ A bundle is read through :func:`scaneval.scoring.observe`, which refuses a plan,
 that do not bind to one another, and :func:`scaneval.review.review_status`; a refused bundle is a failure
 too.
 
+Which system is which. A system is what its runs configured (adapter, adapter configuration, model,
+network policy, execution backend, and deadline), the adapter version their manifests record, and the
+processing those two make of it, ``full`` or ``curated`` (:func:`system_processing`). One system id is
+one of each in every run it is aggregated from, or the runs are refused; a run whose own invocation rows
+show it ran nothing for a system, every assignment skipped or never started, pools with any version,
+whatever version it recorded. A result written since the marker existed records its system's
+processing itself; it must be the one the configuration and the version give, or the runs are refused,
+and a result that records none is read by that derivation. System rows report the version and the
+processing, a comparison lists both among its configuration differences, and every view states a
+curated system's caveat: its figures describe paths chosen before the run and are not a detection rate.
+
 What is scored against what. An input is scored on the targets and controls its schedule froze before
 the run. An item frozen there but absent from the bundle's plan is a miss (``unscored``): a target is
 not detected, and a control on a scan that completed is a completed observation with no resolved
@@ -81,6 +92,7 @@ import math
 from math import comb
 from os import PathLike
 from pathlib import Path
+import re
 from typing import Any, Callable, Iterable, Sequence
 
 from . import __version__, conditions, review, scoring
@@ -116,6 +128,14 @@ REVIEW_STATES = ("human_approved", "draft", "stale", "missing")
 PAIR_OUTCOMES = ("correct", "both_flagged", "both_silent", "reversed")
 # Leave-one-project-out sensitivity is shown while projects are few (docs/EVALUATION_MATH.md, section 5).
 LOPO_PROJECT_LIMIT = 10
+# The system configuration key that curates processing, by adapter name, and the first adapter version
+# honoring it. DeepSec's config.process_manifest_by_tree chooses before the run which paths' regex candidates
+# are assigned AI batches; a DeepSec adapter before 1.2.0 ignores the key and runs unscoped
+# (docs/designs/deepsec-curated-processing.md). Kept here, beside the system identity it decides, so a saved
+# run is read by the rule of the adapter version it recorded and not by whichever adapter is installed now.
+CURATED_PROCESSING = {"deepsec": ("process_manifest_by_tree", (1, 2, 0))}
+# An adapter version this module can order: dot-separated decimal numbers and nothing else.
+RELEASE = re.compile(r"[0-9]+(?:\.[0-9]+)*")
 
 RANDOM_ORDER_LABEL = ("diagnostic: expected recall under a uniform random order of the delivered claims, "
                       "over unranked observations whose bundles and matches are resolved; not native recall@B "
@@ -190,6 +210,8 @@ class _Observation:
     input whose schedule froze no plan. ``unscored`` and ``unregistered`` count the frozen items the
     bundle's plan lacks and the items it adds. ``timing`` holds the execution record's start, finish,
     and wall seconds when the bundle carries one; a start or finish it cannot read is ``None``.
+    ``processing`` is the selection marker the bundle's result records, ``None`` when it records none: a
+    result written before the marker existed, or one the runner recorded in place of the adapter's.
     """
 
     run_id: str
@@ -206,6 +228,7 @@ class _Observation:
     unregistered: int = 0
     timing: tuple[datetime | None, datetime | None, float] | None = None
     condition: dict | None = field(default=None, repr=False)
+    processing: str | None = None
 
     @property
     def executed(self) -> bool:
@@ -376,7 +399,7 @@ def _observe(run: _Run, assignment: dict, row: dict | None, prepared: dict | Non
                      "reasons": [{"code": "unusable_condition_evidence", "message": f"Condition evidence for {assignment['assignment_id']} is unusable: {str(exc).replace(str(run.directory), '<run>')}"}]}
     return _Observation(**identity, status=result["status"], scope=scope, observed=observed,
                         review_state=state, unscored=unscored, unregistered=unregistered, timing=timing,
-                        condition=condition)
+                        condition=condition, processing=result.get("processing"))
 
 
 @dataclass
@@ -398,6 +421,37 @@ class _Corpus:
         return next(run.repetitions for run in self.runs if run.run_id == run_id)
 
 
+def system_processing(adapter: str, config: dict, adapter_version: str | None) -> tuple[str, str | None]:
+    """A system's selection marker, ``curated`` or ``full``, and the caveat a report states beside it.
+
+    ``curated`` means the configuration chose, before the run, which paths of each input are assigned the
+    scanner's analysis; today only DeepSec's ``config.process_manifest_by_tree`` does
+    (:data:`CURATED_PROCESSING`), and a curated run is a diagnostic of those paths, never a benchmark. It is
+    derived from what a run or a benchmark plan already recorded, the configuration and the adapter version,
+    so a run saved before results recorded the marker shows it without being rewritten, and it changes no
+    figure. A result written since records the marker itself (its ``processing``), which must be this one:
+    aggregation (:func:`_check_processing`) and the benchmark score refuse a recorded marker this
+    derivation contradicts, which is what catches a bundle edited after its run. The key's presence decides,
+    whatever its value, because the adapter refuses a malformed map rather than run unscoped. An adapter
+    version older than the first one honoring the key ignored it and ran unscoped, so that system is
+    ``full``, and its caveat says the key was ignored. Versions compare as release numbers, a missing
+    trailing part counting as zero, so 1.2 is 1.2.0 and 1.10.0 follows 1.9.0. A version that is unknown
+    (nothing ran) or not dot-separated numbers is taken as configured, ``curated``, which can only
+    understate what the figures are. Every other system is ``full`` with no caveat.
+    """
+    key, honored_since = CURATED_PROCESSING.get(adapter, (None, None))
+    if key is None or key not in config:
+        return "full", None
+    if adapter_version is not None and RELEASE.fullmatch(adapter_version):
+        release = tuple(int(part) for part in adapter_version.split("."))
+        if release + (0,) * (len(honored_since) - len(release)) < honored_since:
+            return "full", (f"its configuration names {adapter} config.{key}, which adapter {adapter} "
+                            f"{adapter_version} predates and ignores, so it ran unscoped and its processing is full")
+    return "curated", (f"processing is curated: {adapter} config.{key} chose before the run which paths are "
+                       "assigned AI batches, so its figures are a diagnostic of those paths, not a detection rate, "
+                       "and not comparable with a full run")
+
+
 def _configuration(run: _Run, system_id: str) -> dict:
     """What one system is, as its run configured it: adapter, config, model, network policy, execution."""
     entry = next(item for item in run.config["systems"] if item["system_id"] == system_id)
@@ -412,23 +466,109 @@ def _configuration(run: _Run, system_id: str) -> dict:
 
 
 def _systems(runs: list[_Run]) -> dict[str, dict]:
-    """Every scheduled system, refusing one system id configured differently in two runs."""
+    """Every scheduled system, refusing one system id configured or recorded differently in two runs.
+
+    A system is what its run configured (:func:`_configuration`) and the adapter its run manifest records it
+    resolved to, by name and ``adapter_version``. Two runs that ran one system id and record different names
+    or versions for it are refused as two configurations are, because a version can change what one
+    configuration does: DeepSec 1.1.0 ignores ``config.process_manifest_by_tree`` and 1.2.0 honors it.
+
+    Whether a run ran a system is read from the run's own invocation rows, never from the version it
+    recorded. A run ran nothing for a system when every assignment of it is ``skipped`` (its input was never
+    prepared, or the system itself was skipped) or has no row at all (the run stopped before starting it),
+    so no observation of it in that run depends on any adapter version. Such a run pools with runs of any
+    version, whatever version its manifest recorded, because refusing it would push its failures out of the
+    denominators they belong in; that covers a DeepSec system whose ``prepare`` failed, which the runner
+    records with its adapter's version. It adds no version, and ``idle_runs`` names it. A run that ran the
+    system binds the name and version its manifest records, and one that ran it but records no version is
+    refused, because what ran is then unknown. The system's ``adapter_version`` is the one the runs that ran
+    it recorded, or ``None`` when no run ran it; a version only an idle run recorded is never read, so it
+    says nothing about how the system ran. ``processing`` and its ``caveat`` follow from the configuration
+    and that version (:func:`system_processing`), and every marker a bundle of the system records must be
+    that ``processing`` (:func:`_check_processing`).
+    """
     systems: dict[str, dict] = {}
     for run in runs:
+        recorded = {row["system_id"]: row for row in run.manifest["systems"]}
+        # The systems this run invoked at least once. Every row that is not skipped names a bundle (the
+        # manifest contract), whether or not that bundle can still be read, and so a scan of that system.
+        ran = {row["system_id"] for row in run.manifest["invocations"] if row["status"] != "skipped"}
         for row in run.schedule["systems"]:
             system_id = row["system_id"]
             configuration = _configuration(run, system_id)
             known = systems.get(system_id)
             if known is None:
-                systems[system_id] = {"row": row, "configuration": configuration, "runs": [run.run_id]}
-                continue
-            if (canonical_json(known["configuration"]) != canonical_json(configuration)
+                known = systems[system_id] = {"row": row, "configuration": configuration, "runs": [],
+                                              "adapter": None, "adapter_run": None, "idle_runs": []}
+            elif (canonical_json(known["configuration"]) != canonical_json(configuration)
                     or canonical_json(known["row"]) != canonical_json(row)):
                 raise ContractError(
                     f"system {system_id} is configured differently in runs {known['runs'][0]} and "
                     f"{run.run_id}; one system id must name one configuration to be aggregated")
+            resolved = recorded.get(system_id)
+            adapter = (None if resolved is None or resolved["adapter_version"] is None
+                       else (resolved["adapter"], resolved["adapter_version"]))
+            if system_id not in ran:
+                known["idle_runs"].append(run.run_id)
+            elif adapter is None:
+                raise ContractError(
+                    f"run {run.run_id} records invocations of system {system_id} but no adapter version for it; "
+                    "a system that ran must record the adapter it ran with to be aggregated")
+            elif known["adapter"] is None:
+                known["adapter"], known["adapter_run"] = adapter, run.run_id
+            elif known["adapter"] != adapter:
+                raise ContractError(
+                    f"system {system_id} is recorded as adapter {' '.join(known['adapter'])} in run "
+                    f"{known['adapter_run']} and as {' '.join(adapter)} in run {run.run_id}; one system id "
+                    "must name one adapter at one version to be aggregated")
             known["runs"].append(run.run_id)
+    for info in systems.values():
+        version = info["adapter"][1] if info["adapter"] is not None else None
+        info["adapter_version"] = version
+        info["processing"], info["caveat"] = system_processing(
+            info["configuration"]["adapter"], info["configuration"]["config"], version)
     return dict(sorted(systems.items()))
+
+
+def _check_processing(systems: dict[str, dict], observations: dict[tuple[str, str, str, int], _Observation]) -> None:
+    """Refuse a bundle whose result records a processing other than the one its system's identity gives.
+
+    A result written since the marker existed records the processing of the system that ran it, as its
+    adapter said it; one written before records none, and neither does an error result the runner recorded
+    in the adapter's place. Every marker recorded must be the system's own (:func:`_systems`), derived from
+    what its runs configured and the adapter version they recorded, which is also all a bundle without one
+    is read by. An adapter records ``curated`` exactly when its configuration names the key that curates it
+    (:data:`CURATED_PROCESSING`), so a marker that derivation contradicts was edited after the run, or was
+    written by an adapter whose curation rule this module does not know yet. Either way the bundle does not
+    say which system it observed, and the runs are refused, naming it, rather than pooled under a marker
+    one of their bundles contradicts or turned into a failure no reader would trace back to it. Only a
+    bundle whose documents bind to one another reaches this check: a result edited without rebinding the
+    decisions written against it is already an ``unusable_bundle`` failure (:func:`_observe`).
+    """
+    for key, observation in sorted(observations.items()):
+        derived = systems[observation.system_id]["processing"]
+        if observation.processing is not None and observation.processing != derived:
+            raise ContractError(
+                f"system {observation.system_id} is recorded as processing {observation.processing} in run "
+                f"{key[0]} ({observation.assignment_id}), but its configuration and adapter version make it "
+                f"{derived}; a bundle must record the processing its system ran with to be aggregated, so this "
+                "one was edited or comes from an adapter whose curation rule this evaluator does not know")
+
+
+def _identity(info: dict) -> dict:
+    """One system as configuration differences read it: configuration, adapter version, and processing."""
+    return {**info["configuration"], "adapter_version": info["adapter_version"], "processing": info["processing"]}
+
+
+def _system_warnings(system_id: str, info: dict) -> list[str]:
+    """What a reader of any figure of one system must not miss about which system it is."""
+    warnings = [f"{system_id}: {info['caveat']}"] if info["caveat"] is not None else []
+    if info["adapter_version"] is not None and info["idle_runs"]:
+        warnings.append(f"{system_id}: run(s) {', '.join(info['idle_runs'])} ran nothing for it, every assignment "
+                        "skipped or never started, so they pool with any adapter version, whatever they recorded, "
+                        f"and add only failures; its adapter_version {info['adapter_version']} is the one the runs "
+                        "that ran it recorded")
+    return warnings
 
 
 def _registry(runs: list[_Run]) -> tuple[dict[str, dict], dict[str, dict]]:
@@ -479,7 +619,9 @@ def _load_corpus(run_dirs: Iterable[str | PathLike[str]]) -> _Corpus:
 
     Refused: no directory at all, one run given twice, runs whose schedules froze different packs
     (canonical ids, levels, and families are comparable only within one frozen pack), a system id
-    configured two ways, and a canonical item planned under two groupings.
+    configured two ways or recorded with two adapter versions, a bundle recording a processing its
+    system's configuration and adapter version do not give (:func:`_check_processing`), and a canonical
+    item planned under two groupings.
     """
     runs = [_load_run(directory) for directory in run_dirs]
     if not runs:
@@ -505,6 +647,7 @@ def _load_corpus(run_dirs: Iterable[str | PathLike[str]]) -> _Corpus:
             observations[key] = _observe(
                 run, assignment, rows.get(assignment["assignment_id"]), prepared.get(assignment["input_id"]),
                 manifest_systems.get(assignment["system_id"]), inputs[key[:2]])
+    _check_processing(systems, observations)
     return _Corpus(runs, observations, targets, controls, inputs, systems)
 
 
@@ -692,7 +835,8 @@ def aggregate_by_condition(run_dirs: Iterable[str | PathLike[str]], *, policy: d
               "condition_strata": strata, "views": [],
               "notes": ["Separate descriptive condition/status/policy strata; no pooled weighted recall or confidence interval.",
                         "Full scheduled view denominators are reported beside stratum denominators. Missing, unsupported, incomplete, and unreviewed targets remain unknown, never silent zeros.",
-                        "Metrics use existing scoring.observe target/control decisions. Per-target outcomes are unweighted and do not replace an experiment's frozen weighting or paired analysis."]}
+                        "Metrics use existing scoring.observe target/control decisions. Per-target outcomes are unweighted and do not replace an experiment's frozen weighting or paired analysis."]
+              + [warning for system, info in corpus.systems.items() for warning in _system_warnings(system, info)]}
     return validate_document(REPORT_KIND, report)
 
 
@@ -1697,8 +1841,9 @@ def _view_facts(corpus: _Corpus, mode: str, profile: str, system_ids: Iterable[s
     }
 
 
-def _view_warnings(facts: dict, results: Sequence[_SystemResult]) -> list[str]:
-    """What a reader of one view must not miss: unplanned inputs, unscored items, failures, scope."""
+def _view_warnings(facts: dict, results: Sequence[_SystemResult], systems: dict[str, dict]) -> list[str]:
+    """What a reader of one view must not miss: unplanned inputs, unscored items, failures, scope, and
+    which system each is when that is not a plain one (:func:`_system_warnings`)."""
     warnings = []
     unplanned = len(facts["inputs_without_frozen_plan"])
     if unplanned:
@@ -1724,6 +1869,7 @@ def _view_warnings(facts: dict, results: Sequence[_SystemResult]) -> list[str]:
         if result.block["evidence_scope"] != "reviewed":
             warnings.append(f"{system_id}: evidence scope is {result.block['evidence_scope']}, not "
                             "reviewed benchmark evidence")
+        warnings.extend(_system_warnings(system_id, systems[system_id]))
     return warnings
 
 
@@ -1788,9 +1934,11 @@ def _run_row(corpus: _Corpus, run: _Run) -> dict:
 
 
 def _system_row(system_id: str, info: dict) -> dict:
-    """What the schedules say one system is, and the runs that assigned it."""
+    """What the schedules say one system is, the adapter version and processing it ran with, and the runs
+    that assigned it (:func:`_systems`)."""
     row = info["row"]
-    return {"system_id": system_id, "adapter": row["adapter"], "model_id": row["model_id"],
+    return {"system_id": system_id, "adapter": row["adapter"], "adapter_version": info["adapter_version"],
+            "processing": info["processing"], "model_id": row["model_id"],
             "model_revision": row["model_revision"], "config_sha256": row["config_sha256"],
             "network_policy": row["network_policy"], "execution": row["execution"],
             "runs": list(info["runs"])}
@@ -1846,9 +1994,11 @@ def aggregate(run_dirs: Iterable[str | PathLike[str]], *, policy: dict | None = 
 
     Refused with :class:`ContractError`, before anything is computed: a directory that is not a 2.1 run
     directory, a run whose manifest, schedule, and configuration disagree, one run given twice, runs of
-    different packs, a system id configured two ways, a canonical item planned under two groupings,
-    and a view mixing diagnostic fixtures with other evidence. Nothing is written; the caller writes
-    the returned document. The same directories and policy give the same document in any order.
+    different packs, a system id configured two ways or recorded with two adapter versions, a bundle
+    recording a processing its system's configuration and adapter version do not give, a canonical item
+    planned under two groupings, and a view mixing diagnostic fixtures with other evidence. Nothing is
+    written; the caller writes the returned document. The same directories and policy give the same
+    document in any order.
     """
     context = _Context(_load_corpus(run_dirs), resolve_policy(policy))
     corpus = context.corpus
@@ -1863,7 +2013,7 @@ def aggregate(run_dirs: Iterable[str | PathLike[str]], *, policy: dict | None = 
         views.append({"mode": mode, "profile": profile,
                       "evidence_scope": _scope(set().union(*(result.scopes for result in results))),
                       **facts, "systems": [result.block for result in results],
-                      "warnings": _view_warnings(facts, results)})
+                      "warnings": _view_warnings(facts, results, corpus.systems)})
     report = {
         "schema_version": SCHEMA_VERSION, "evaluator_version": __version__,
         "condition_digest_format": conditions.IDENTITY_FORMAT,
@@ -2046,7 +2196,9 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
     manifest's selection and the inputs its configuration names, which is what the gate reads to leave
     such a comparison unresolved. Everything :func:`aggregate` refuses is refused here too. Differences
     are candidate minus baseline; each interval resamples the same clusters for both systems in every
-    replicate.
+    replicate. Two systems of different adapter versions or processing are compared, not refused: both
+    are listed among the configuration differences, as ``adapter_version`` and ``processing``, where a
+    gate policy must name them to measure them, and a curated system's caveat is in every view.
     """
     if baseline == candidate:
         raise ContractError("the baseline and the candidate are one system; name two systems to compare")
@@ -2075,7 +2227,7 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
             "systems": {"baseline": left.block, "candidate": right.block},
             "differences": [_difference(context, mine, theirs)
                             for mine, theirs in zip(left.slices, right.slices)],
-            "warnings": _view_warnings(facts, (left, right))})
+            "warnings": _view_warnings(facts, (left, right), corpus.systems)})
     structure = contracts[baseline]
     report = {
         "schema_version": SCHEMA_VERSION, "evaluator_version": __version__,
@@ -2087,8 +2239,8 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
         "candidate": _system_row(candidate, corpus.systems[candidate]),
         "contract": {"structure_sha256": canonical_sha256(structure), "inputs": len(structure["inputs"]),
                      "pairs": len(structure["pairs"])},
-        "configuration_differences": configuration_differences(corpus.systems[baseline]["configuration"],
-                                                               corpus.systems[candidate]["configuration"]),
+        "configuration_differences": configuration_differences(_identity(corpus.systems[baseline]),
+                                                               _identity(corpus.systems[candidate])),
         "condition_coverage": [row for row in _condition_coverage(corpus) if row["system_id"] in (baseline, candidate)],
         "views": views,
         "notes": _notes(context.policy),

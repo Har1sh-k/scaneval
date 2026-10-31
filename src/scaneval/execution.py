@@ -89,8 +89,12 @@ this module checks only their shape, the contract checks that each is a relative
 nothing here can see whether a path was really examined. It may also report ``examined_nothing``,
 that it can show no part of the input to have been examined, and a ``bool`` is written into the
 result as it is, in a 2.1 result for the same reason; it too is the adapter's claim and is checked
-for its type only. The error result recorded in place of a result the contract refused carries
-neither, like everything else the adapter supplied.
+for its type only. And it may report ``processing``, the selection marker of the system it ran:
+``curated`` when the system's configuration chose before the run which paths get the scanner's
+analysis, ``full`` when it chose none. A string is written into the result as it is, in a 2.1 result
+again, and checked here for its type only; the contract admits only those two values, and a value
+outside them is a failed import. The error result recorded in place of a result the contract
+refused carries none of the three, like everything else the adapter supplied.
 
 Directory separation documents the boundary; it does not enforce it. Network and
 filesystem policy are declared here and must be enforced outside this process.
@@ -924,11 +928,12 @@ def _outcome_violation(outcome: object) -> str | None:
 
     This checks only the shapes the bundle documents are built from: the outcome type itself,
     artifact entries, tool versions, command words, usage numbers, notes, the omitted paths, the
-    ``examined_nothing`` flag, and the containers this module copies or walks. It says nothing
-    about whether the scan was correct, complete, or honest, and it does not check the claims, the
-    ranking, or the status: the scan-result contract checks those, and a violation there is
-    recorded as a failed import. A field only the execution record constrains, such as a
-    non-integer exit code, is caught when that record is validated.
+    ``examined_nothing`` flag, the ``processing`` marker's type, and the containers this module
+    copies or walks. It says nothing about whether the scan was correct, complete, or honest, and it
+    does not check the claims, the ranking, the status, or the ``processing`` value: the scan-result
+    contract checks those, and a violation there is recorded as a failed import. A field only the
+    execution record constrains, such as a non-integer exit code, is caught when that record is
+    validated.
     """
     if not isinstance(outcome, NativeOutcome):
         return f"adapter returned {type(outcome).__name__}, not a NativeOutcome"
@@ -989,6 +994,8 @@ def _outcome_violation(outcome: object) -> str | None:
                 return f"omitted_paths[{index}] must be a string, not {type(path).__name__}"
     if outcome.examined_nothing is not None and not isinstance(outcome.examined_nothing, bool):
         return f"examined_nothing must be a bool or None, not {type(outcome.examined_nothing).__name__}"
+    if outcome.processing is not None and not isinstance(outcome.processing, str):
+        return f"processing must be a string or None, not {type(outcome.processing).__name__}"
     return None
 
 
@@ -1561,6 +1568,11 @@ def run_invocation(
             # Also a 2.1 field, so also 2.1 whatever the mode, and written as the adapter said it.
             result["schema_version"] = "2.1"
             result["examined_nothing"] = outcome.examined_nothing
+        if outcome.processing is not None:
+            # The selection marker of the system that ran: a 2.1 field as well, written as the adapter
+            # said it. The contract below admits only curated and full.
+            result["schema_version"] = "2.1"
+            result["processing"] = outcome.processing
         result, rendered_in_result = _recordable_document(result)
         if "omitted_paths" in result:
             # Rendering a name UTF-8 cannot encode can reorder the list or merge two entries into one, so the

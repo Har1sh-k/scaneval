@@ -51,6 +51,22 @@ Adapter 1.2.1 reads a standard-mode `process` exit 1 from DeepSec's records
 instead of ending the run with no claims (#120), so a failed batch's records
 written before and after that change carry different versions.
 
+Reports read the same facts from what each run recorded. A run manifest
+records every system's adapter version, so `scaneval aggregate` and `scaneval
+compare` refuse to pool one system id across two versions it ran with; a run that
+ran nothing for it pools whatever version it recorded. A curated system is
+marked `processing: curated` in their system rows and in the benchmark score's,
+with a caveat in every view and in the score's `limits`: its figures describe the
+chosen paths and are not a detection rate. Comparing it with a full system lists
+`processing` and the key among the configuration differences, so a gate passes
+the comparison only when its policy names both. A configuration naming the key
+with a recorded adapter before 1.2.0 is marked `full`, with a caveat that the key
+was ignored. A result that records the marker itself (see
+[What the run reports](#what-the-run-reports)) must agree with the configuration
+and the version, or the runs are refused, naming the bundle; a result written
+before the marker existed is read from them. No saved artifact is rewritten and no
+figure changes.
+
 ## What runs
 
 1. `deepsec scan` runs unchanged over the whole supported repository.
@@ -126,6 +142,13 @@ nothing, and an exit 1 with no such record stays `error` with no claims.
 
 `examined_nothing` is not set. The regex scan examined the tree. The notes say
 when no AI batch ran, and `partial` already withholds every quiet credit.
+
+Every outcome of a curated run, whatever its status, records `processing:
+curated` on its result, a 2.1 field. It is the run's own selection marker, and it
+changes no status, claim or credit. A full run records none. A configuration
+refused before anything runs (a tree with no entry, a listed path the tree does
+not hold) raises before there is an outcome, so the error result the runner
+records for it carries no marker.
 
 ## Limits
 

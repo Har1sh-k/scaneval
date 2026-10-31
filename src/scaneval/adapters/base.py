@@ -89,6 +89,15 @@ class NativeOutcome:
     result that says ``True``, wherever the plan places it, because a scan that read none of what it
     was given has reached no control. It is the adapter's claim like the list, and like the list it
     never changes ``status``.
+
+    ``processing`` is the adapter's statement about the system it ran rather than about what the scan
+    saw: ``"curated"`` says the system's configuration chose, before the run, which paths of the input
+    are assigned the scanner's analysis, ``"full"`` says it chose none, and ``None`` says the adapter
+    does not report it. The runner records a string as the result's ``processing`` in a 2.1 result,
+    whose contract admits only those two values. It is the selection marker that aggregation, comparison
+    and the benchmark score show beside the adapter version, and they refuse one that the system's
+    configuration and recorded adapter version do not give. It changes no status, claim, or quiet
+    credit.
     """
 
     status: str
@@ -109,6 +118,7 @@ class NativeOutcome:
     timed_out: bool = False
     omitted_paths: list[str] | None = None
     examined_nothing: bool | None = None
+    processing: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in STATUSES:

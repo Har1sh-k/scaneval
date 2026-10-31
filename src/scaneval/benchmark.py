@@ -16,6 +16,7 @@ import tempfile
 from . import execution, materialize
 from .adapters import get_adapter
 from .adapters.base import SystemSpec
+from .aggregate import system_processing
 from .contracts import (ContractError, canonical_json, canonical_sha256, load_document, pr_diff_sha256,
                         pr_input_hash, refuse_trial_path)
 from .datasets import read_json, validate_dataset, write_json
@@ -368,7 +369,30 @@ def score(directory: Path, judgments: dict | None = None) -> dict:
     decisions, judge = _decisions(packet, judgments)
     tasks = {t["task_id"]: t for t in dataset["tasks"]}
     systems = []
+    caveats = []
     for system in plan["systems"]:
+        # Which system this is, read from what the run already saved: the adapter version its verified
+        # receipts record (None when none ran) and the processing the plan's configuration and that version
+        # make of it, curated or full. A curated system's figures describe paths chosen before the run;
+        # they are reported as they are, with the caveat beside them, and no figure changes.
+        versions = {row["execution"]["adapter"]["version"] for row in observations
+                    if row["system_id"] == system["system_id"] and "execution" in row}
+        _require(len(versions) <= 1, f"saved invocations of system {system['system_id']} record different "
+                                     f"adapter versions: {', '.join(sorted(versions))}")
+        version = next(iter(versions), None)
+        processing, caveat = system_processing(system["adapter"], system.get("config", {}), version)
+        # A result saved since the marker existed records its system's processing, as the adapter said it, and
+        # every one that does must be the processing just derived: a marker the configuration and the version
+        # contradict was edited after the run, or comes from an adapter whose curation rule is not known here,
+        # and the run is not scored under it. A result that records none, saved before the marker existed or
+        # recorded by the runner in the adapter's place, is read by the derivation alone.
+        recorded = sorted({row["result"]["processing"] for row in observations
+                           if row["system_id"] == system["system_id"] and "processing" in row.get("result", {})})
+        _require(recorded in ([], [processing]),
+                 f"saved results of system {system['system_id']} record processing {', '.join(recorded)}, but its "
+                 f"configuration and adapter version make it {processing}")
+        if caveat is not None:
+            caveats.append(f"{system['system_id']}: {caveat}")
         totals = Counter()
         statuses = Counter()
         severities = {}
@@ -425,7 +449,8 @@ def score(directory: Path, judgments: dict | None = None) -> dict:
         ratio = lambda n, d: n / d if d else None
         coverage = ratio(totals["covered"], totals["positive"])
         complete = totals["unjudged"] == 0 and statuses["missing"] == 0
-        systems.append({"system_id": system["system_id"], "scheduled_invocations": sum(statuses.values()),
+        systems.append({"system_id": system["system_id"], "adapter_version": version, "processing": processing,
+                        "scheduled_invocations": sum(statuses.values()),
                         "statuses": dict(sorted(statuses.items())), "judging_complete": complete,
                         "planned_positive_annotations": totals["positive"], "covered_positive_annotations": totals["covered"],
                         "reference_coverage": coverage if complete else None,
@@ -457,4 +482,5 @@ def score(directory: Path, judgments: dict | None = None) -> dict:
                        "Failures and unsupported tasks stay in scheduled denominators; missing costs are not zero.",
                        "A quiet fixed control concerns only its named issue; rejected PR comments are not safe controls.",
                        "This is ScanEval's declared protocol, not an official source leaderboard score.",
-                       "Judge identity is supplied provenance; scoring does not authenticate a model invocation."]}
+                       "Judge identity is supplied provenance; scoring does not authenticate a model invocation."]
+            + caveats}

@@ -5210,6 +5210,47 @@ def test_a_full_run_without_the_map_sends_no_manifest(tmp_path, monkeypatch):
     assert "deepsec-process-manifest" not in {artifact["id"] for artifact in execution["raw_artifacts"]}
 
 
+@pytest.mark.parametrize("control, timeout_seconds, status, code", [
+    (None, 300, "partial", "scope_incomplete"),
+    ({"bad_export": True}, 300, "error", "unreadable_export"),
+    ({"scan_exit": 3}, 300, "error", "scan_exit_3"),
+    ({"hang": "scan"}, 3, "timeout", "timeout"),
+], ids=["scope-incomplete", "unreadable-export", "failed-scan", "timed-out"])
+def test_every_outcome_of_a_curated_run_records_its_processing_on_the_result(
+        tmp_path, monkeypatch, control, timeout_seconds, status, code):
+    """A bundle says it is a curated diagnostic in a field, whatever the status, and the marker changes nothing else."""
+    bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"], control=control, timeout_seconds=timeout_seconds)
+
+    result, _execution = documents(bundle)
+    assert (result["status"], result["error"]["code"]) == (status, code)
+    assert result["schema_version"] == "2.1" and result["processing"] == "curated"
+    assert result["bundles_resolved"] is False
+
+
+def test_a_full_run_records_no_processing_and_keeps_its_2_0_result(tmp_path, monkeypatch):
+    stub_collector(monkeypatch, tmp_path)
+    result, _execution = documents(invoke(tmp_path, fake_deepsec_root(tmp_path)))
+    assert result["status"] == "success" and "processing" not in result
+    assert result["schema_version"] == "2.0"
+
+
+def test_a_curated_configuration_refused_before_anything_runs_leaves_an_error_result_with_no_marker(tmp_path):
+    """The adapter raises before there is an outcome, so the runner's error result carries nothing the adapter said;
+    reports derive this bundle's processing from the configuration, as they do for a bundle written before it."""
+    root = fake_deepsec_root(tmp_path)
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root, process_manifest_by_tree={TREE: ["src/server.js"]})
+    bundle = run_invocation(prepared=prepared_input(tmp_path), adapter=adapter, spec=spec,
+                            preparation=adapter.prepare(spec, tmp_path / "cache"), out_dir=tmp_path / "out",
+                            run_id="run-deepsec", timeout_seconds=30, trace_mode="off",
+                            network_policy="model_provider_only", clock=CLOCK)
+
+    result, _execution = documents(bundle)
+    assert result["status"] == "error" and result["error"]["code"] == "adapter_failure"
+    assert "no entry for input tree" in result["error"]["message"]
+    assert "processing" not in result
+
+
 def test_the_documented_curated_configuration_is_one_the_adapter_accepts(tmp_path):
     """The design document's fabricated example, with only its installation path pointed at the fake CLI."""
     text = (ROOT / "docs" / "designs" / "deepsec-curated-processing.md").read_text(encoding="utf-8")

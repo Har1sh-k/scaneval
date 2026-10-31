@@ -236,6 +236,18 @@ Unknown cost and runtime totals are `null`, with counts of invocations that
 reported each value. A runtime total with some missing invocations is the sum of
 known values only.
 
+Each system row also names the `adapter_version` its saved receipts record (`null`
+when none ran; receipts naming two versions of one system are refused) and its
+`processing`, `curated` or `full`, decided as in [aggregation](AGGREGATION.md): a
+DeepSec configuration naming `process_manifest_by_tree` is `curated` unless its
+receipts record an adapter before 1.2.0, which ignored the key. A saved result that
+records `processing` itself, as every outcome of a curated DeepSec run now does, must
+record that same marker, or the run is not scored: the result was edited after the
+run, or its adapter curates by a rule the score does not know. A result saved before
+results recorded the marker is read by the rule alone. A curated system is scored
+like any other, and `limits` gains a line saying its figures describe the paths
+chosen before the run and are not a detection rate.
+
 The `scaneval-reference-coverage-2` protocol uses these rules:
 
 - Reference coverage is distinct positive annotations covered divided by all
