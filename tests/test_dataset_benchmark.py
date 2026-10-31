@@ -242,6 +242,64 @@ def test_claim_eligibility_is_isolated_per_system(environment, tmp_path):
             scores["failed"]["excluded_claims"], scores["failed"]["reference_coverage"]) == (1, 0, 1, 0)
 
 
+@pytest.mark.parametrize("version, processing, caveat", [
+    ("1.2.0", "curated", "processing is curated: deepsec config.process_manifest_by_tree chose before the run "
+                         "which paths are assigned AI batches, so its figures are a diagnostic of those paths, not "
+                         "a detection rate, and not comparable with a full run"),
+    ("1.1.0", "full", "its configuration names deepsec config.process_manifest_by_tree, which adapter deepsec "
+                      "1.1.0 predates and ignores, so it ran unscoped and its processing is full"),
+])
+def test_a_deepsec_system_is_marked_by_the_processing_its_receipts_ran_and_its_score_is_unchanged(
+        environment, tmp_path, monkeypatch, version, processing, caveat):
+    """A DeepSec configuration naming process_manifest_by_tree is curated when the recorded adapter honors the key.
+
+    Both systems run the fixture scanner over the same full-scan tasks, so every figure of the DeepSec one but its
+    measured wall time equals the other's: the adapter version its receipts record, its processing, and its line in
+    limits are the only additions. A receipt recording adapter 1.1.0, which predates the key, marks it full and says
+    the key was ignored.
+    """
+    class RecordedVersion(FixtureScanner):
+        adapter_version = version
+
+    monkeypatch.setattr(benchmark, "get_adapter",
+                        lambda name: RecordedVersion() if name == "deepsec" else FixtureScanner())
+    dataset = cve_dataset(environment)
+    systems = [{"system_id": "fixture-system", "adapter": "fixture", "config": {}},
+               {"system_id": "deepsec-system", "adapter": "deepsec",
+                "config": {"process_manifest_by_tree": {"sha256:" + "1" * 64: ["app.py"]}}}]
+    plan = benchmark.build_plan(dataset, systems, run_id="fixture-run", repetitions=1)
+    output = tmp_path / "run"
+    benchmark.run(plan, dataset, output, tmp_path / "cache", progress=lambda _: None)
+
+    score = benchmark.score(output, judgments_for(output))
+
+    rows = {row["system_id"]: row for row in score["systems"]}
+    assert (rows["fixture-system"]["adapter_version"], rows["fixture-system"]["processing"]) == ("1.0", "full")
+    assert (rows["deepsec-system"]["adapter_version"], rows["deepsec-system"]["processing"]) == (version, processing)
+    figures = {name: {key: value for key, value in row.items()
+                      if key not in ("system_id", "adapter_version", "processing", "runtime_seconds")}
+               for name, row in rows.items()}
+    assert figures["deepsec-system"] == figures["fixture-system"]
+    assert figures["deepsec-system"]["reference_coverage"] == 1
+    assert [line for line in score["limits"] if "process_manifest_by_tree" in line] == [f"deepsec-system: {caveat}"]
+
+
+def test_one_system_whose_saved_receipts_record_two_adapter_versions_is_not_scored(environment, tmp_path):
+    """One run prepares one adapter per system, so receipts naming two versions of it are not one system's."""
+    output = run_fixture(environment, tmp_path, repetitions=2)
+    path = output / "benchmark-run.json"
+    record = read_json(path)
+    receipt_path = output / "invocations" / record["invocations"][1]["invocation_id"] / "execution.json"
+    receipt = read_json(receipt_path)
+    receipt["adapter"]["version"] = "9.9.9"
+    receipt_path.write_text(json.dumps(receipt))
+    record["invocations"][1]["execution_sha256"] = canonical_sha256(receipt)
+    path.write_text(json.dumps(record))
+    with pytest.raises(ContractError, match="saved invocations of system fixture-system record different adapter "
+                                            "versions: 1.0, 9.9.9"):
+        benchmark.score(output)
+
+
 def test_negative_comment_is_not_a_safe_control(environment, tmp_path):
     environment["tasks"][0]["annotations"][0]["label"] = "negative"
     output = run_fixture(environment, tmp_path)
