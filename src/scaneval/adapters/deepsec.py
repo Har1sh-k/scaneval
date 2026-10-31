@@ -2806,7 +2806,9 @@ class DeepsecAdapter(Adapter):
     name = "deepsec"
     # 1.2.0 honors config.process_manifest_by_tree; an earlier adapter ignores the key and runs unscoped.
     # An experiment frozen against 1.1.0 is refused as adapter version drift until it is frozen again.
-    adapter_version = "1.2.0"
+    # 1.2.1 reads a full run's standard-mode process exit 1 from the records instead of ending the run
+    # with no claims, so the records of a failed batch written before and after can be told apart.
+    adapter_version = "1.2.1"
     requires_git = False
     supported_languages = frozenset({"python", "javascript", "typescript", "go", "rust"})
     scan_modes = frozenset({"full", "pr"})

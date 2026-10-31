@@ -5218,4 +5218,4 @@ def test_the_documented_curated_configuration_is_one_the_adapter_accepts(tmp_pat
     accepted = settings(SystemSpec(example["system_id"], example["adapter"], config))
     assert accepted.process_manifest_by_tree == {
         tree: tuple(paths) for tree, paths in example["config"]["process_manifest_by_tree"].items()}
-    assert get_adapter("deepsec").adapter_version == "1.2.0"
+    assert get_adapter("deepsec").adapter_version == "1.2.1"
