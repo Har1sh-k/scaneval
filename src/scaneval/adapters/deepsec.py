@@ -2160,7 +2160,11 @@ def move_transcript(source: Path, target: Path, enclosure: Enclosure) -> str | N
     was recorded as an adapter failure with none. Now the source is opened with
     ``O_NOFOLLOW|O_NONBLOCK``, which refuses a symbolic link and returns at once from a named pipe,
     and its descriptor is proved with :func:`os.fstat`, before a byte is read, to be a regular file
-    no larger than :func:`transcript_limit`, the collector's bound. A larger one is refused:
+    with one name and no larger than :func:`transcript_limit`, the collector's bound. A second name
+    is refused as :func:`~scaneval.adapters.llm_harness.stage_record` refuses one at its
+    destination: a hard link is not a symbolic link, so ``O_NOFOLLOW`` has nothing to refuse, and a
+    host file linked into the transcript's place on the same volume was registered and hashed as
+    the transcript exactly as one behind a symbolic link had been. A larger file is refused because
     discovery adopts only a transcript it read to its end within that bound, so the file there now
     is not the one it verified. The copy then streams from one descriptor to the other in chunks of
     :data:`TRANSCRIPT_CHUNK`, so a move never holds more than one chunk in memory. The bytes the
@@ -2206,6 +2210,9 @@ def move_transcript(source: Path, target: Path, enclosure: Enclosure) -> str | N
             return f"the transcript could not be read as a regular file ({reason})"
         if not stat.S_ISREG(found.st_mode):
             return "the transcript could not be read as a regular file (not a regular file)"
+        if found.st_nlink != 1:
+            return (f"the transcript has {found.st_nlink} names where it was written with one, so it may be a "
+                    "host file linked into its place")
         limit = transcript_limit()
         if found.st_size > limit:
             return (f"the transcript holds {found.st_size} byte(s), past the collector's bound of {limit}, "

@@ -3573,13 +3573,22 @@ def test_a_link_planted_where_a_transcript_is_moved_is_refused_and_never_written
     assert outcome_of(result) == outcome_of(baseline) and len(result["claims"]) == 2
 
 
-def test_a_transcript_swapped_for_a_link_after_the_import_is_refused_rather_than_followed(tmp_path, monkeypatch):
-    """A transcript that became a link once discovery and the import had read it is never followed.
+@pytest.mark.parametrize("link, reason", [
+    # Refused by the open, which does not follow a symbolic link.
+    (os.symlink, "the transcript could not be read as a regular file (it is a symbolic link, not a regular file)"),
+    # A hard link is not one the open could refuse; its second name is what the descriptor shows.
+    (os.link, "the transcript has 2 names where it was written with one, so it may be a host file linked "
+              "into its place"),
+], ids=["symbolic", "hard"])
+def test_a_transcript_swapped_for_a_link_after_the_import_is_refused_rather_than_followed(tmp_path, monkeypatch,
+                                                                                          link, reason):
+    """A transcript that became a link once discovery and the import had read it is never read.
 
     Discovery checked the name and the import opened it without following a link, and then the
     move opened it a third time with :func:`shutil.copyfile`, which does follow one: the host
     file the link named was registered and hashed in the bundle as that session's transcript,
-    and nothing said so.
+    and nothing said so. A hard link to a host file on the same volume did the same through an
+    open that refused symbolic links, since it is not one: the host file's bytes are the file.
     """
     root = fake_deepsec_root(tmp_path, session_ids=["session-aaaa"])
     stub_collector(monkeypatch, tmp_path)
@@ -3591,7 +3600,7 @@ def test_a_transcript_swapped_for_a_link_after_the_import_is_refused_rather_than
     def import_then_swap(observer, path, **options):
         summary = load(observer, path, **options)
         main.unlink()
-        main.symlink_to(host)
+        link(host, main)
         return summary
 
     monkeypatch.setattr(deepsec_module, "collector", lambda: (find, import_then_swap))
@@ -3602,12 +3611,12 @@ def test_a_transcript_swapped_for_a_link_after_the_import_is_refused_rather_than
     assert not list(bundle.rglob("claude-sessions")), "nothing is created for a transcript that was not read"
     assert not [path for path in bundle.rglob("*")
                 if path.is_file() and not path.is_symlink() and HOST_TEXT.encode() in path.read_bytes()]
-    assert main.is_symlink() and host.read_text(encoding="utf-8") == HOST_TEXT, "the link is left where it was"
+    assert os.path.samefile(main, host) and host.read_text(encoding="utf-8") == HOST_TEXT, \
+        "the link is left where it was"
     note = capture_note(execution)
     assert note.startswith("0 Claude Code transcript(s) were moved")
-    assert note.endswith("1 transcript(s) could not be moved and were left in place: session-aaaa/session-aaaa.jsonl "
-                         "(the transcript could not be read as a regular file (it is a symbolic link, not a "
-                         "regular file)).")
+    assert note.endswith(f"1 transcript(s) could not be moved and were left in place: session-aaaa/session-aaaa.jsonl "
+                         f"({reason}).")
     assert outcome_of(result) == outcome_of(baseline) and len(result["claims"]) == 2
 
 
