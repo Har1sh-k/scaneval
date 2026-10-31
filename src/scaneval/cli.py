@@ -1073,8 +1073,9 @@ def _compare(args: argparse.Namespace) -> int:
     """Compare two systems over run directories into one new report; refused unless their work matches.
 
     Two systems whose frozen evaluation contracts differ, or whose bundles place a control of one input
-    differently, are refused (2) before anything is written. 0 means the comparison was computed; it
-    decides nothing about promotion.
+    differently where a result of that input lists an omitted path or says it examined nothing, are
+    refused (2) before anything is written. 0 means the comparison was computed; it decides nothing
+    about promotion.
     """
     _refuse_trial_path(args.output)
     policy = aggregate.load_policy(args.policy) if args.policy else None
@@ -1552,7 +1553,8 @@ def _add_aggregate_commands(sub: argparse._SubParsersAction) -> None:
         description="Aggregate two systems over run directories and report candidate minus baseline "
                     "with paired cluster-bootstrap intervals. Refused unless both were assigned exactly "
                     "the same frozen work (inputs, plans, levels, budgets, repetitions, pairs, and "
-                    "pack) and their bundles place each input's controls alike. Decides no promotion.")
+                    "pack) and their bundles place alike the controls of each input where a result lists "
+                    "omitted paths or says it examined nothing. Decides no promotion.")
     comparing.add_argument("run_dirs", nargs="+", type=Path, metavar="RUN_DIR", help=run_dirs_help)
     comparing.add_argument("--baseline", required=True, help="system id of the baseline")
     comparing.add_argument("--candidate", required=True, help="system id of the candidate")

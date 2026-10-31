@@ -1849,24 +1849,35 @@ def test_a_comparison_needs_two_scheduled_systems(tmp_path):
 # plan written before full plans placed controls gave a standard input's controls no paths, and one written since
 # gives each the pack locates, so two runs of one input made either side of that change score the same evidence
 # under two rules: the scorer withholds quiet credit from a control placed nowhere once its result lists any
-# omitted path.
+# omitted path. A result that lists none and does not say examined_nothing has nothing withheld for what its scan
+# did not examine, so under it every placement earns the same credit.
 
 PLACED = {"C-scanned": ["app.py"], "C-omitted": ["vendor/helper.py"]}
-PLACEMENT_WARNING = (
-    "input widget: its bundle plans place C-omitted nowhere in run-a and on vendor/helper.py in run-b; "
-    "C-scanned nowhere in run-a and on app.py in run-b, so their quiet assessments are not credited under one "
-    "rule: a control placed nowhere earns none once its result lists any omitted path")
+PLACED_TWO_WAYS = ("input widget: its bundle plans place C-omitted nowhere in run-a and on vendor/helper.py in run-b; "
+                   "C-scanned nowhere in run-a and on app.py in run-b, ")
+PLACEMENT_WARNING = PLACED_TWO_WAYS + (
+    "so their quiet assessments are not credited under one rule: a control placed nowhere earns none once its "
+    "result lists any omitted path")
+NO_CREDIT_DEPENDS = PLACED_TWO_WAYS + (
+    "and no result of that input lists an omitted path or says it examined nothing, so no credit depends on where "
+    "they are placed")
+OMITTING = ", and a result of that input lists an omitted path or says it examined nothing; "
+SCANNED_EVERYTHING = {"omitted": [], "examined_nothing": False}
 
 
-def placement_run(root: Path, run_id: str, systems: tuple[str, ...], *, placed: bool) -> Path:
+def placement_run(root: Path, run_id: str, systems: tuple[str, ...], *, placed: bool,
+                  omitted=("README.md", "vendor/helper.py"), examined_nothing=None) -> Path:
     """One input with two safe controls, scanned once per system, each result omitting README.md and vendor/helper.py.
 
     Every control is assessed quiet. ``placed`` has each bundle's plan place C-scanned on app.py and C-omitted on
     vendor/helper.py, as a plan written today does; without it the plans place nothing, as a standard input's plan
-    written before full plans placed controls did.
+    written before full plans placed controls did. ``omitted`` and ``examined_nothing`` say what else each result
+    says its scan left out (``None`` leaves the field out): an empty list and ``False`` say a scan that examined
+    every path, as a Semgrep full scan that showed every file scanned does.
     """
     inputs = [planned("widget", controls=[control("C-scanned"), control("C-omitted")])]
-    spec = scan(omitted=["README.md", "vendor/helper.py"], paths=PLACED if placed else None)
+    spec = scan(omitted=None if omitted is None else list(omitted), examined_nothing=examined_nothing,
+                paths=PLACED if placed else None)
     return write_run(root, run_id, inputs, systems=systems,
                      outcomes={("widget", system_id, 1): spec for system_id in systems})
 
@@ -1908,8 +1919,59 @@ def test_a_comparison_whose_systems_bundles_place_a_control_differently_is_refus
     assert str(refused.value).startswith(
         "the systems were not scored against one plan: input widget places C-omitted nowhere in 1 of the bundles of "
         "baseline, and on vendor/helper.py in 1 of those of candidate; C-scanned nowhere in 1 of the bundles of "
-        "baseline, and on app.py in 1 of those of candidate; ")
+        "baseline, and on app.py in 1 of those of candidate" + OMITTING
+        + "a control placed nowhere earns no quiet credit once its result lists any omitted path, so a difference "
+          "in its credit may be the plans', not the systems'")
 
+
+
+def test_a_comparison_whose_systems_bundles_place_a_control_differently_stands_when_no_result_lists_an_omission(
+        tmp_path):
+    """The baseline run before full plans placed controls and the candidate run since, both scans examining every path.
+
+    No result lists an omitted path or says it examined nothing, so the scorer withholds no quiet credit for what a
+    scan did not examine, and the baseline's pathless plan credits both quiet controls as the candidate's placed plan
+    does. The comparison stands with no difference in any control figure. Its view, and an aggregate view of the same
+    runs, name the input and the controls whose placement differs and say that no credit depends on it.
+    """
+    run_a = placement_run(tmp_path / "a", "run-a", ("baseline",), placed=False, **SCANNED_EVERYTHING)
+    run_b = placement_run(tmp_path / "b", "run-b", ("candidate",), placed=True, **SCANNED_EVERYTHING)
+
+    comparison = aggregate.compare([run_a, run_b], baseline="baseline", candidate="candidate", policy=policy())
+    report = aggregate.aggregate([run_a, run_b], policy=policy())
+
+    assert view(comparison)["warnings"] == view(report)["warnings"] == [NO_CREDIT_DEPENDS]
+    resolved = {system_id: slice_of(system(view(report), system_id))["controls"]["capability_safe"]["resolved"]
+                for system_id in ("baseline", "candidate")}
+    assert resolved == {"baseline": 2, "candidate": 2}, "every placement credits a scan that examined every path"
+    difference = next(item for item in view(comparison)["differences"] if item["slice"]["dimension"] == "all")
+    safe = difference["controls"]["capability_safe"]
+    assert (safe["assessable_mass"], safe["completed_upper"]["value"], safe["resolved_rate"]["value"]) == (0.0, 0.0, 0.0)
+
+
+@pytest.mark.parametrize(("baseline_scan", "candidate_scan"), [
+    ({}, SCANNED_EVERYTHING),
+    (SCANNED_EVERYTHING, {}),
+    ({"omitted": None, "examined_nothing": True}, {"omitted": None, "examined_nothing": True}),
+], ids=["the-baseline-lists-omissions", "the-candidate-lists-omissions", "both-examined-nothing"])
+def test_a_placement_difference_is_refused_once_any_result_of_the_input_lists_an_omission(
+        tmp_path, baseline_scan, candidate_scan):
+    """One system's result listing an omitted path is enough, and so is a result saying it examined nothing.
+
+    The check reads every result of the input, whichever system's, as the scorer reads each: a control placed
+    nowhere is withheld once its result lists any omitted path, so where one does, a difference in placement can be a
+    difference in credit. A result that says examined_nothing withholds every control wherever it is placed, and is
+    counted all the same, so the check errs toward refusing.
+    """
+    run_a = placement_run(tmp_path / "a", "run-a", ("baseline",), placed=False, **baseline_scan)
+    run_b = placement_run(tmp_path / "b", "run-b", ("candidate",), placed=True, **candidate_scan)
+
+    with pytest.raises(ContractError) as refused:
+        aggregate.compare([run_a, run_b], baseline="baseline", candidate="candidate", policy=policy())
+
+    assert str(refused.value).startswith("the systems were not scored against one plan: input widget places ")
+    assert OMITTING in str(refused.value)
+    assert view(aggregate.aggregate([run_a, run_b], policy=policy()))["warnings"] == [PLACEMENT_WARNING]
 
 def test_a_comparison_whose_systems_bundles_place_a_control_both_ways_in_different_numbers_is_refused(tmp_path):
     """Each system has runs from both sides of the change, in different numbers, over the same evidence.
@@ -1937,7 +1999,7 @@ def test_a_comparison_whose_systems_bundles_place_a_control_both_ways_in_differe
         "the systems were not scored against one plan: input widget places C-omitted nowhere in 2 and on "
         "vendor/helper.py in 1 of the bundles of baseline, and nowhere in 1 and on vendor/helper.py in 2 of those of "
         "candidate; C-scanned nowhere in 2 and on app.py in 1 of the bundles of baseline, and nowhere in 1 and on "
-        "app.py in 2 of those of candidate; ")
+        "app.py in 2 of those of candidate" + OMITTING)
 
 
 def test_systems_whose_every_bundle_places_a_control_one_way_compare_though_one_read_fewer_bundles(tmp_path):
@@ -2193,7 +2255,8 @@ def test_cli_help_describes_both_commands(capsys):
     text = " ".join(capsys.readouterr().out.split())
     assert "Every scheduled assignment is an observation; a failed one stays in every denominator." in text
     assert "Refused unless both were assigned exactly the same frozen work" in text
-    assert "and their bundles place each input's controls alike" in text
+    assert ("and their bundles place alike the controls of each input where a result lists omitted paths or says "
+            "it examined nothing" in text)
     assert "--baseline BASELINE" in text and "--policy POLICY" in text
 
 

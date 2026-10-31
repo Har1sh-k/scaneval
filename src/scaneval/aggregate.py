@@ -52,11 +52,15 @@ Where controls are placed. The schedule freezes which controls an input carries 
 are; a bundle's plan says that, in the ``paths`` it gives each control, and the scorer withholds quiet
 credit from a control the plan places nowhere once the result lists any omitted path. A plan written
 before full plans placed controls gives a standard input's controls none, so the same evidence is
-credited file by file under a plan written since and not at all under one written before. A view
-whose bundle plans place one input's control in more than one way warns, naming the input, the
-controls, where each run's plans put them, and the runs; :func:`compare` refuses two systems whose
-bundles place a control of one input differently, counting how many of each system's bundles place it
-each way, because a difference in its credit would then be the plans', not the systems'.
+credited file by file under a plan written since and not at all under one written before. A result
+that lists no omitted path and does not say ``examined_nothing`` has nothing withheld for what its scan
+did not examine, so under it every placement earns the same credit. A view whose bundle plans place
+one input's control in more than one way warns, naming the input, the controls, where each run's plans
+put them, and the runs, and saying either that their quiet assessments are not credited under one
+rule, when a result of that input lists an omitted path or says it examined nothing, or that no credit
+depends on it, when none does. Only in the first case does :func:`compare` refuse two systems whose
+bundles place a control of that input differently, counting how many of each system's bundles place it
+each way, because a difference in its credit may then be the plans', not the systems'.
 
 Pairs. A vulnerable/fixed pair is scored on whole canonical items, not on the one record it names:
 its vulnerable side is the whole canonical target, and its fixed state the whole canonical control
@@ -224,7 +228,9 @@ class _Observation:
     result written before the marker existed, or one the runner recorded in place of the adapter's.
     ``placement`` says where the bundle's plan places each of its controls, as ``(control_id, paths)``
     pairs in control id order, ``paths`` being ``None`` for a control it places nowhere; a failure has no
-    plan, and ``None`` here.
+    plan, and ``None`` here. ``omitting`` says whether the result lists any omitted path or says
+    ``examined_nothing``: only then does the scorer withhold quiet credit for what the scan did not
+    examine, so only then can where the plan places a control change its credit.
     """
 
     run_id: str
@@ -243,6 +249,7 @@ class _Observation:
     condition: dict | None = field(default=None, repr=False)
     processing: str | None = None
     placement: tuple[tuple[str, tuple[str, ...] | None], ...] | None = field(default=None, repr=False)
+    omitting: bool = False
 
     @property
     def executed(self) -> bool:
@@ -390,6 +397,9 @@ def _observe(run: _Run, assignment: dict, row: dict | None, prepared: dict | Non
         return failure("missing", "unusable_bundle")
     placement = tuple(sorted(((control["control_id"], tuple(control["paths"]) if "paths" in control else None)
                               for control in plan["controls"]), key=lambda item: item[0]))
+    # As the scorer reads a result (scoring._unexamined_controls): one that lists no omitted path and does not say
+    # examined_nothing withholds no control's quiet credit for what its scan did not examine, wherever it is placed.
+    omitting = bool(result.get("omitted_paths")) or result.get("examined_nothing") is True
     scope = None
     unscored = unregistered = 0
     if planned:
@@ -415,7 +425,8 @@ def _observe(run: _Run, assignment: dict, row: dict | None, prepared: dict | Non
                      "reasons": [{"code": "unusable_condition_evidence", "message": f"Condition evidence for {assignment['assignment_id']} is unusable: {str(exc).replace(str(run.directory), '<run>')}"}]}
     return _Observation(**identity, status=result["status"], scope=scope, observed=observed,
                         review_state=state, unscored=unscored, unregistered=unregistered, timing=timing,
-                        condition=condition, processing=result.get("processing"), placement=placement)
+                        condition=condition, processing=result.get("processing"), placement=placement,
+                        omitting=omitting)
 
 
 @dataclass
@@ -1863,8 +1874,8 @@ Placement = tuple[str, ...] | None
 Placements = dict[tuple[str, str], dict[Placement, set[tuple[str, str, int]]]]
 
 
-def _placements(corpus: _Corpus, mode: str, profile: str, system_ids: Iterable[str]) -> Placements:
-    """Where the bundle plans of one view place each control of each input, and which bundles say so.
+def _placements(corpus: _Corpus, mode: str, profile: str, system_ids: Iterable[str]) -> tuple[Placements, set[str]]:
+    """Where the bundle plans of one view place each control of each input, which bundles say so, and where it counts.
 
     Keyed by (input id, control id): each placement, the paths a plan gives the control or ``None`` for
     none, maps to the (run id, system id, repetition) of every bundle whose plan gave it, so that the
@@ -1872,17 +1883,26 @@ def _placements(corpus: _Corpus, mode: str, profile: str, system_ids: Iterable[s
     count; a failure has no plan and says nothing about where a control is. An input whose schedule froze
     no plan takes no part in any control metric, so where its bundles place a control changes no credit
     and is not collected.
+
+    The second value holds the ids of the inputs one of whose collected bundles has a result that lists
+    an omitted path or says ``examined_nothing`` (``_Observation.omitting``), whichever system's it is.
+    Only from such a result does the scorer withhold quiet credit for what the scan did not examine, so
+    only for those inputs can where a plan places a control, or that it places it nowhere, change its
+    credit; for every other input, every placement earns the same.
     """
     wanted = set(system_ids)
     found: Placements = defaultdict(lambda: defaultdict(set))
+    omitting: set[str] = set()
     for (run_id, input_id, system_id, repetition), observation in sorted(corpus.observations.items()):
         row = corpus.inputs[(run_id, input_id)]
         if (system_id not in wanted or observation.placement is None or row["plan"]["state"] != "frozen"
                 or (row["mode"], row["profile"]) != (mode, profile)):
             continue
+        if observation.omitting:
+            omitting.add(input_id)
         for control_id, paths in observation.placement:
             found[(input_id, control_id)][paths].add((run_id, system_id, repetition))
-    return found
+    return found, omitting
 
 
 def _placed(paths: Placement) -> str:
@@ -1895,14 +1915,17 @@ def _placement_order(paths: Placement) -> tuple[bool, tuple[str, ...]]:
     return paths is not None, paths or ()
 
 
-def _placement_warnings(placements: Placements) -> list[str]:
+def _placement_warnings(placements: Placements, omitting: set[str]) -> list[str]:
     """One warning per input whose bundle plans place a control in more than one way, naming where and in which runs.
 
     A plan written before full plans placed controls places a standard input's controls nowhere, and one
     written since places each the pack locates, so two runs of one input made either side of that change
-    disagree. Their quiet assessments are then not credited under one rule, because the scorer withholds
-    quiet credit from a control placed nowhere once its result lists any omitted path. A control every
-    plan places alike, nowhere included, is not named.
+    disagree. When a result of that input lists an omitted path or says ``examined_nothing`` (it is in
+    *omitting*, see :func:`_placements`), their quiet assessments are not credited under one rule, because
+    the scorer withholds quiet credit from a control placed nowhere once its result lists any omitted path,
+    and the warning says so. When none does, the scorer withholds no quiet credit for what a scan did not
+    examine, wherever a plan places a control, and the warning says plainly that no credit depends on
+    where they are placed. A control every plan places alike, nowhere included, is not named.
     """
     differing: dict[str, list[str]] = defaultdict(list)
     for (input_id, control_id), seen in sorted(placements.items()):
@@ -1910,16 +1933,20 @@ def _placement_warnings(placements: Placements) -> list[str]:
             ways = " and ".join(f"{_placed(paths)} in {', '.join(sorted({run for run, _system, _ in seen[paths]}))}"
                                 for paths in sorted(seen, key=_placement_order))
             differing[input_id].append(f"{control_id} {ways}")
-    return [f"input {input_id}: its bundle plans place {'; '.join(controls)}, so their quiet assessments are not "
-            "credited under one rule: a control placed nowhere earns none once its result lists any omitted path"
+    return [f"input {input_id}: its bundle plans place {'; '.join(controls)}, "
+            + ("so their quiet assessments are not credited under one rule: a control placed nowhere earns none "
+               "once its result lists any omitted path" if input_id in omitting else
+               "and no result of that input lists an omitted path or says it examined nothing, so no credit "
+               "depends on where they are placed")
             for input_id, controls in sorted(differing.items())]
 
 
 def _view_warnings(facts: dict, results: Sequence[_SystemResult], systems: dict[str, dict],
-                   placements: Placements) -> list[str]:
+                   placements: Placements, omitting: set[str]) -> list[str]:
     """What a reader of one view must not miss: unplanned inputs, unscored items, failures, scope,
     which system each is when that is not a plain one (:func:`_system_warnings`), and a control the
-    bundle plans of one input place in more than one way (see :func:`_placement_warnings`)."""
+    bundle plans of one input place in more than one way, and whether any credit depends on it (see
+    :func:`_placement_warnings`)."""
     warnings = []
     unplanned = len(facts["inputs_without_frozen_plan"])
     if unplanned:
@@ -1946,7 +1973,7 @@ def _view_warnings(facts: dict, results: Sequence[_SystemResult], systems: dict[
             warnings.append(f"{system_id}: evidence scope is {result.block['evidence_scope']}, not "
                             "reviewed benchmark evidence")
         warnings.extend(_system_warnings(system_id, systems[system_id]))
-    return warnings + _placement_warnings(placements)
+    return warnings + _placement_warnings(placements, omitting)
 
 
 def _result_bindings(run: _Run) -> list[dict]:
@@ -2090,7 +2117,7 @@ def aggregate(run_dirs: Iterable[str | PathLike[str]], *, policy: dict | None = 
                       "evidence_scope": _scope(set().union(*(result.scopes for result in results))),
                       **facts, "systems": [result.block for result in results],
                       "warnings": _view_warnings(facts, results, corpus.systems,
-                                                 _placements(corpus, mode, profile, system_ids))})
+                                                 *_placements(corpus, mode, profile, system_ids))})
     report = {
         "schema_version": SCHEMA_VERSION, "evaluator_version": __version__,
         "condition_digest_format": conditions.IDENTITY_FORMAT,
@@ -2169,7 +2196,7 @@ def _counted(counts: Counter) -> str:
     return " and ".join(f"{_placed(paths)} in {counts[paths]}" for paths in sorted(counts, key=_placement_order))
 
 
-def _placement_gap(placements: Placements, names: tuple[str, str]) -> str | None:
+def _placement_gap(placements: Placements, omitting: set[str], names: tuple[str, str]) -> str | None:
     """The first input whose bundles place a control in one mix for one system and another for the other, in words.
 
     The frozen contract cannot show this: a schedule freezes which controls an input carries, never where
@@ -2183,10 +2210,18 @@ def _placement_gap(placements: Placements, names: tuple[str, str]) -> str | None
     its placements are mixed: two systems whose every read bundle places the control one way, the same way,
     were scored under one plan whatever their counts. A system with no read bundle of the input has nothing
     to compare and differs in nothing, and placements that are mixed alike for both systems are not a
-    difference (the view's warnings name them). ``None`` when no input differs.
+    difference (the view's warnings name them).
+
+    Only an input in *omitting* can differ: one with a result, of either system, that lists an omitted
+    path or says ``examined_nothing``. The scorer withholds quiet credit for what a scan did not examine
+    from no other result, wherever its plan places a control or if it places it nowhere, so no credit of
+    any other input depends on placement; a difference there is the view's warning to name (see
+    :func:`_placement_warnings`), not a reason to refuse. ``None`` when no input differs.
     """
     differing: dict[str, list[str]] = defaultdict(list)
     for (input_id, control_id), seen in sorted(placements.items()):
+        if input_id not in omitting:
+            continue
         sides = [Counter(paths for paths, where in seen.items() for _run, system, _ in where if system == name)
                  for name in names]
         one_plan = len(sides[0]) == len(sides[1]) == 1 and sides[0].keys() == sides[1].keys()
@@ -2312,16 +2347,20 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
     are listed among the configuration differences, as ``adapter_version`` and ``processing``, where a
     gate policy must name them to measure them, and a curated system's caveat is in every view.
 
-    The two systems' bundles must also place every control of one input alike: as many bundles of each
+    Where a result of one input, of either system, lists an omitted path or says ``examined_nothing``, the
+    two systems' bundles must also place every control of that input alike: as many bundles of each
     placing it each way, or, since a failure reads no plan, every bundle of both placing it the same one
     way. The frozen contract cannot show this (see :func:`_placement_gap`), and two that do not are
     refused before a metric is computed ("the systems were not scored against one plan"). A
     baseline run before full plans placed controls and a candidate run since, over the same evidence,
     would otherwise credit the candidate's quiet controls on scanned files and withhold the baseline's,
     and show the plans' difference as an improvement; so would two systems that each have runs from
-    both sides of that change in different numbers. Bundles that place a control in several ways, as
-    many of each system's bundles each way, are not refused; each view's warnings name them, as
-    :func:`aggregate` does.
+    both sides of that change in different numbers. Only such a result has quiet credit withheld for
+    what its scan did not examine, so where no result of an input lists an omitted path or says it
+    examined nothing, every placement of its controls earns the same credit: such a difference is not
+    refused, and each view's warnings name the input and the controls whose placement differs and say
+    that no credit depends on it. Bundles that place a control in several ways, as many of each system's
+    bundles each way, are not refused either; each view's warnings name them, as :func:`aggregate` does.
     """
     if baseline == candidate:
         raise ContractError("the baseline and the candidate are one system; name two systems to compare")
@@ -2336,14 +2375,15 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
     if gap is not None:
         raise ContractError(f"the systems do not share the frozen evaluation contract: {gap}")
     placements = {view: _placements(corpus, *view, (baseline, candidate)) for view in _view_keys(corpus, (baseline,))}
-    for found in placements.values():
-        gap = _placement_gap(found, (baseline, candidate))
+    for found, omitting in placements.values():
+        gap = _placement_gap(found, omitting, (baseline, candidate))
         if gap is not None:
             raise ContractError(
-                f"the systems were not scored against one plan: {gap}; a control placed nowhere earns no quiet "
-                "credit once its result lists any omitted path, so a difference in its credit would be the plans', "
-                "not the systems'. A plan written before full plans placed controls places none: run again what "
-                "was planned before then, so that both systems are planned alike")
+                f"the systems were not scored against one plan: {gap}, and a result of that input lists an omitted "
+                "path or says it examined nothing; a control placed nowhere earns no quiet credit once its result "
+                "lists any omitted path, so a difference in its credit may be the plans', not the systems'. A plan "
+                "written before full plans placed controls places none: run again what was planned before then, so "
+                "that both systems are planned alike")
     views = []
     for mode, profile in _view_keys(corpus, (baseline,)):
         facts = _view_facts(corpus, mode, profile, (baseline,))
@@ -2359,7 +2399,7 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
             "systems": {"baseline": left.block, "candidate": right.block},
             "differences": [_difference(context, mine, theirs)
                             for mine, theirs in zip(left.slices, right.slices)],
-            "warnings": _view_warnings(facts, (left, right), corpus.systems, placements[(mode, profile)])})
+            "warnings": _view_warnings(facts, (left, right), corpus.systems, *placements[(mode, profile)])})
     structure = contracts[baseline]
     report = {
         "schema_version": SCHEMA_VERSION, "evaluator_version": __version__,
