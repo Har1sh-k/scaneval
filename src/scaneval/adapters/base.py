@@ -66,6 +66,7 @@ class CommandResult:
     wall_seconds: float
     stdout_path: Path
     stderr_path: Path
+    cleanup_succeeded: bool = True
 
 
 @dataclass
@@ -159,6 +160,95 @@ def active_backend() -> Any:
     return _ACTIVE_BACKEND.get()
 
 
+def _wait_for_unreaped_exit(pid: int, timeout_seconds: float) -> bool:
+    """Observe *pid* exit without releasing its PID/process-group identity.
+
+    ``waitpid`` (and :meth:`subprocess.Popen.wait`) reaps the leader. A later
+    ``killpg(pid, ...)`` can then target an unrelated process group if the kernel
+    recycles that numeric ID between the probe and signal. ``WNOWAIT`` leaves the
+    exited leader waitable, so its PID and process-group ID cannot be recycled while
+    the caller drains descendants.
+    """
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
+    while True:
+        try:
+            event = os.waitid(os.P_PID, pid, flags)
+        except InterruptedError:
+            continue
+        if event is not None:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.01, remaining))
+
+
+def _signal_reserved_process_group(pid: int, signal_to_send: int) -> bool:
+    """Signal a group whose unreaped leader still reserves *pid*.
+
+    Some supported kernels report ``EPERM`` for a group containing only an exited
+    zombie leader. The definitive check is therefore the observation after the
+    leader is reaped; this return value only controls the TERM grace period.
+    """
+    try:
+        os.killpg(pid, signal_to_send)
+    except OSError:
+        return False
+    return True
+
+
+def _process_group_absent_after_reap(pid: int, timeout_seconds: float) -> bool:
+    """Boundedly observe group disappearance after reaping, without signalling it."""
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while True:
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            # Permission denial or any other result is not proof of absence. It may
+            # still clear as a killed descendant is reaped, so keep observing briefly.
+            pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.01, remaining))
+
+
+def _feed_stdin_while_leader_is_unreaped(process: subprocess.Popen, data: bytes, deadline: float) -> bool:
+    """Boundedly feed stdin without polling or reaping the process-group leader."""
+    if process.stdin is None:
+        return True
+    descriptor = process.stdin.fileno()
+    offset = 0
+    try:
+        os.set_blocking(descriptor, False)
+        while offset < len(data):
+            try:
+                written = os.write(descriptor, data[offset:])
+            except BlockingIOError:
+                written = 0
+            except BrokenPipeError:
+                return True
+            if written:
+                offset += written
+                continue
+            try:
+                event = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            except InterruptedError:
+                continue
+            if event is not None:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.01, remaining))
+        return True
+    finally:
+        process.stdin.close()
+
+
 def run_command(
     argv: list[str],
     *,
@@ -168,6 +258,7 @@ def run_command(
     stdout_path: Path,
     stderr_path: Path,
     stdin_text: str | None = None,
+    ensure_group_empty: bool = False,
 ) -> CommandResult:
     """Run one process with a hard timeout, streaming stdout/stderr to files.
 
@@ -183,6 +274,8 @@ def run_command(
     """
     backend = _ACTIVE_BACKEND.get()
     if backend is not None:
+        if ensure_group_empty:
+            raise AdapterError("process-group emptiness checks are available only on the local execution seam")
         return backend.run_command(argv, cwd=cwd, timeout_seconds=timeout_seconds, env=env,
                                    stdout_path=stdout_path, stderr_path=stderr_path, stdin_text=stdin_text)
     if _ROUTING:
@@ -190,6 +283,10 @@ def run_command(
             f"could not start {argv[0] if argv else 'a command'}: an execution backend is holding a "
             "scan in this process and this command was started outside it, from a thread that does "
             "not carry the backend; it was not run on the host")
+    if ensure_group_empty:
+        waitid_names = ("waitid", "P_PID", "WEXITED", "WNOHANG", "WNOWAIT", "killpg")
+        if any(not hasattr(os, name) for name in waitid_names):
+            raise AdapterError("process-group emptiness checks require POSIX waitid(WNOWAIT) support")
     started = time.monotonic()
     with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
         try:
@@ -201,62 +298,137 @@ def run_command(
         except OSError as exc:
             raise AdapterError(f"could not start {argv[0]}: {exc}") from exc
         timed_out = False
-        try:
-            process.communicate(input=stdin_text.encode("utf-8") if stdin_text is not None else None,
-                                timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            timed_out = True
+        cleanup_succeeded = True
+        if ensure_group_empty:
+            # Do not call poll(), communicate(), or wait() until the process group has been
+            # drained: all three can reap the leader and free its numeric PGID for reuse.
             try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+                command_deadline = started + max(0.0, timeout_seconds)
+                input_delivered = _feed_stdin_while_leader_is_unreaped(
+                    process, stdin_text.encode("utf-8") if stdin_text is not None else b"", command_deadline)
+                leader_exited = input_delivered and _wait_for_unreaped_exit(
+                    process.pid, max(0.0, command_deadline - time.monotonic()))
+                if not leader_exited:
+                    timed_out = True
+                    _signal_reserved_process_group(process.pid, signal.SIGKILL)
+                    leader_exited = _wait_for_unreaped_exit(process.pid, 5)
+                if not leader_exited:
+                    raise AdapterError("scanner leader did not exit within bounded process-group cleanup")
+
+                # The exited leader is deliberately still waitable here. Its PID/PGID therefore
+                # cannot be recycled between either signal and the eventual reap.
+                if _signal_reserved_process_group(process.pid, signal.SIGTERM):
+                    time.sleep(0.25)
+                _signal_reserved_process_group(process.pid, signal.SIGKILL)
+            except ChildProcessError as exc:
+                # An unexpected external waiter has already freed the group identity. Never
+                # signal that numeric PGID after this point.
+                raise AdapterError("scanner leader was reaped before process-group cleanup") from exc
+            except BaseException as original:
+                # The code above has not reaped the leader, so these group signals cannot hit a
+                # recycled PGID. Preserve the triggering exception after bounded best-effort
+                # termination and reaping.
+                group_stopped = False
+                for _ in range(3):
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        group_stopped = True
+                        break
+                    except ProcessLookupError:
+                        group_stopped = True
+                        break
+                    except BaseException:
+                        pass
+                if not group_stopped:
+                    try:
+                        original.add_note("scanner process-group cleanup failed after three attempts")
+                    except BaseException:
+                        pass
+                    try:
+                        process.kill()
+                    except BaseException:
+                        pass
+                try:
+                    exited_for_reap = _wait_for_unreaped_exit(process.pid, 5)
+                except BaseException:
+                    exited_for_reap = False
+                if exited_for_reap:
+                    deadline = time.monotonic() + 5
+                    for _ in range(3):
+                        try:
+                            process.wait(timeout=max(0, deadline - time.monotonic()))
+                            break
+                        except BaseException:
+                            pass
+                if process.returncode is None:
+                    try:
+                        original.add_note("scanner could not be reaped within bounded cleanup attempts")
+                    except BaseException:
+                        pass
+                raise
+
+            # From this point onward the implementation may reap and observe, but must never
+            # signal the numeric PGID again. A surviving group makes the command non-success.
             process.wait(timeout=5)
-        except BaseException as original:
-            # Retry interrupted cleanup without replacing the triggering exception. The
-            # attempts and total wait are bounded even if another signal handler raises.
-            group_stopped = False
-            for _ in range(3):
+            cleanup_succeeded = _process_group_absent_after_reap(process.pid, 1.0)
+        else:
+            try:
+                process.communicate(input=stdin_text.encode("utf-8") if stdin_text is not None else None,
+                                    timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                timed_out = True
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
-                    group_stopped = True
-                    break
                 except ProcessLookupError:
-                    group_stopped = True
-                    break
-                except BaseException:
                     pass
-            if not group_stopped:
-                try:
-                    original.add_note("scanner process-group cleanup failed after three attempts")
-                except BaseException:
-                    pass
-                # A group operation can fail independently of direct-child termination.
-                try:
-                    process.kill()
-                except BaseException:
-                    pass
-            deadline = time.monotonic() + 5
-            reaped = False
-            for _ in range(3):
-                try:
-                    process.wait(timeout=max(0, deadline - time.monotonic()))
-                    reaped = True
-                    break
-                except BaseException:
-                    pass
-            if not reaped:
-                try:
-                    original.add_note("scanner could not be reaped within bounded cleanup attempts")
-                except BaseException:
-                    pass
-            if process.stdin is not None:
-                try:
-                    process.stdin.close()
-                except BaseException:
-                    pass
-            raise
+                process.wait(timeout=5)
+            except BaseException as original:
+                # Retry interrupted cleanup without replacing the triggering exception. The
+                # attempts and total wait are bounded even if another signal handler raises.
+                group_stopped = False
+                for _ in range(3):
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        group_stopped = True
+                        break
+                    except ProcessLookupError:
+                        group_stopped = True
+                        break
+                    except BaseException:
+                        pass
+                if not group_stopped:
+                    try:
+                        original.add_note("scanner process-group cleanup failed after three attempts")
+                    except BaseException:
+                        pass
+                    # A group operation can fail independently of direct-child termination.
+                    try:
+                        process.kill()
+                    except BaseException:
+                        pass
+                deadline = time.monotonic() + 5
+                reaped = False
+                for _ in range(3):
+                    try:
+                        process.wait(timeout=max(0, deadline - time.monotonic()))
+                        reaped = True
+                        break
+                    except BaseException:
+                        pass
+                if not reaped:
+                    try:
+                        original.add_note("scanner could not be reaped within bounded cleanup attempts")
+                    except BaseException:
+                        pass
+                if process.stdin is not None:
+                    try:
+                        process.stdin.close()
+                    except BaseException:
+                        pass
+                raise
     wall = time.monotonic() - started
-    return CommandResult(list(argv), None if timed_out else process.returncode, timed_out, wall, stdout_path, stderr_path)
+    return CommandResult(list(argv), None if timed_out else process.returncode, timed_out, wall,
+                         stdout_path, stderr_path, cleanup_succeeded)
 
 
 def tail_text(path: Path, limit: int = 2000) -> str:
@@ -303,6 +475,12 @@ class Adapter(ABC):
     # refuse a request it cannot honour rather than scan something else.
     scan_modes: frozenset[str] = frozenset({"full"})
     env_passthrough: tuple[str, ...] = ()
+    # Top-level scanner-owned paths excluded from the immutable input comparison.  By default the
+    # runner also copies each one under raw/harness-state.  An adapter that independently performs a
+    # bounded, no-follow evidence import may set ``state_capture_dirs`` to a subset (including the
+    # empty tuple) so the generic unbounded tree copy cannot replace its already-preserved outcome.
+    state_dirs: tuple[str, ...] = ()
+    state_capture_dirs: tuple[str, ...] | None = None
     # Whether this adapter may run under the ``oci`` execution backend. True is three promises:
     # every scanner process it starts goes through :func:`run_command` from the thread that called
     # ``scan()``; its scanner exists in a Linux image and it takes the in-image tool when a backend

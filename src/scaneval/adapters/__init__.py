@@ -10,6 +10,7 @@ _REGISTRY = {
     "semgrep": ("scaneval.adapters.semgrep", "SemgrepAdapter"),
     "llm-harness": ("scaneval.adapters.llm_harness", "LlmHarnessAdapter"),
     "deepsec": ("scaneval.adapters.deepsec", "DeepsecAdapter"),
+    "runsortie": ("scaneval.adapters.runsortie", "RunSortieAdapter"),
 }
 
 
