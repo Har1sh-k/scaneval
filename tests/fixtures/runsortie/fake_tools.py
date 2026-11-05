@@ -1,11 +1,11 @@
 """Fabricated engine and agent processes for the opt-in conformance test against a real RunSortie.
 
 The real pinned RunSortie CLI starts these by name from PATH: ``npm run runtime -- bootstrap ...`` for
-the Fieldglass engine, ``codex`` for the primary and ``claude`` for the challenger. None of them calls a
-model or the network. The engine writes Fieldglass-shaped evidence; the primary disposes every packet
+the Fieldglass engine and ``claude`` for both direct review roles. None of them calls a model or the
+network. The engine writes Fieldglass-shaped evidence; the primary disposes every packet
 as confirmed with a security argument citing real lines of the evaluated commit; the challenger agrees.
 
-Invoked as ``fake_tools.py <npm|npm-empty|codex|claude|claude-inconclusive> <arguments...>``;
+Invoked as ``fake_tools.py <npm|npm-empty|pi|claude|claude-inconclusive> <arguments...>``;
 ``npm-empty`` emits a valid zero-finding engine result and the last mode is a challenger that returns
 INCONCLUSIVE, for the negative conformance case.
 """
@@ -81,14 +81,8 @@ def write_budget_state(spec: dict) -> dict:
 
 
 def primary(args: list[str]) -> int:
-    if args[:1] == ["--version"]:
-        print("codex-cli 0.0.0-fabricated")
-        return 0
-    if args[:2] == ["login", "status"]:
-        print("Logged in (fabricated)")
-        return 0
     prompt = sys.stdin.read()
-    repo = Path(args[args.index("--cd") + 1])
+    repo = Path.cwd()
     revision = re.search(r"source revision ([0-9a-f]{40})", prompt).group(1)
     target = re.search(r"RUNSORTIE_DONE:([^:\s]+):evidence-updated", prompt).group(1)
     plan = json.loads((repo / ".fieldglass" / "primary-review-packets.json").read_text(encoding="utf-8"))
@@ -105,10 +99,11 @@ def primary(args: list[str]) -> int:
 
 def challenger(args: list[str], verdict: str = "CONFIRMED VULNERABLE") -> int:
     if args[:1] == ["--version"]:
-        print("0.0.0 (fabricated Claude Code)")
+        print("2.1.310 (Claude Code)")
         return 0
     if args[:2] == ["auth", "status"]:
-        print(json.dumps({"loggedIn": True}))
+        print(json.dumps({"loggedIn": True, "authMethod": "api_key", "apiProvider": "firstParty",
+                          "apiKeySource": "ANTHROPIC_API_KEY"}))
         return 0
     prompt = sys.stdin.read()
     binding = re.search(r'"sourceRevision":"([0-9a-f]{40})","packetId":"(RCP-[0-9a-f]{24})","packetEvidenceHash":"([0-9a-f]{64})"',
@@ -139,12 +134,39 @@ def main(argv: list[str]) -> int:
             return engine(args[4:], empty=True)
         print(f"fabricated npm refuses {args}", file=sys.stderr)
         return 1
-    if tool == "codex":
-        return primary(args)
-    if tool == "claude":
-        return challenger(args)
-    if tool == "claude-inconclusive":
-        return challenger(args, "INCONCLUSIVE")
+    if tool == "pi":
+        if args[:1] == ["--version"]:
+            print("1.4.0")
+            return 0
+        if args[:1] == ["--help"]:
+            print("--no-tools --no-extensions --no-mcp --no-skills --no-prompt-templates --no-themes --no-context-files --no-approve")
+            return 0
+        return 0
+    if tool in ("claude", "claude-inconclusive"):
+        if args[:1] == ["--version"]:
+            print("2.1.310 (Claude Code)")
+            return 0
+        if args[:1] == ["--help"]:
+            print("--bare skip hooks, background prefetches, keychain reads; Anthropic auth is strictly ANTHROPIC_API_KEY")
+            print("--restricted removes the built-in command tools and WebFetch unless --tools names them; confines the file tools to working directories")
+            print("--strict-mcp-config ignoring all other MCP configurations")
+            print("--tools <tools...> Specify the list of available tools")
+            print("--permission-prompts <target>: anything that would prompt is denied automatically")
+            print("--disable-slash-commands")
+            return 0
+        if args[:3] == ["auth", "status", "--help"]:
+            print("--json Output as JSON")
+            return 0
+        if args[:3] == ["auth", "status", "--json"] or args[:4] == ["--bare", "auth", "status", "--json"]:
+            print(json.dumps({"loggedIn": True, "authMethod": "api_key", "apiProvider": "firstParty",
+                              "apiKeySource": "ANTHROPIC_API_KEY"}))
+            return 0
+        permission = args[args.index("--permission-mode") + 1]
+        if permission == "acceptEdits":
+            return primary(args)
+        if permission == "plan":
+            return challenger(args, "INCONCLUSIVE" if tool == "claude-inconclusive" else "CONFIRMED VULNERABLE")
+        return 2
     return 2
 
 

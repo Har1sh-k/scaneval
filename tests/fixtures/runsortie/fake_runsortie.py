@@ -1069,7 +1069,7 @@ class Run:
                    "items": items, "summary": review_summary(items)}
         journal = {**payload, "integrityHash": stable_hash(payload)}
         target_state_key = sha(
-            f"{self.target['name']}\0{self.repo.resolve()}\0{self.target['branch']}")[:32]
+            f"{self.target['name']}\0{os.path.abspath(self.repo)}\0{self.target['branch']}")[:32]
         path = self.state_root / "review-work" / target_state_key \
             / f"review-work-{binding_hash[:32]}.json"
         write_json(path, journal)
@@ -1184,7 +1184,7 @@ def scan(scenario: dict, config: dict, target_name: str) -> int:
             raise RuntimeError("evidence paths are dirty before the scan")
         if scenario.get("agent_missing"):
             run.record_run({"target": target_name, "lastAttemptAt": attempted, "outcome": "failed",
-                            "message": "Codex CLI is not installed or is not on PATH"})
+                            "message": "Claude CLI is not installed or is not on PATH"})
             return EXIT_AUTH
         before_head = git(run.repo, "rev-parse", "HEAD")
         existing = (read_json(run.state_root / "state.json") or {"targets": {}})["targets"].get(target_name) or {}
@@ -1309,7 +1309,6 @@ def main(argv: list[str]) -> int:
             gemini_system_settings = Path(os.environ.get("GEMINI_CLI_SYSTEM_SETTINGS_PATH", ""))
             gemini_system_defaults = Path(os.environ.get("GEMINI_CLI_SYSTEM_DEFAULTS_PATH", ""))
             pi_home = Path(os.environ.get("PI_CODING_AGENT_DIR", ""))
-            codex_home = Path(os.environ.get("CODEX_HOME", ""))
             role_wrapper_env = {}
             role_wrapper_argv = {}
             for tool in scenario.get("probe_role_wrappers", []):
@@ -1344,7 +1343,7 @@ def main(argv: list[str]) -> int:
                 if completed.returncode == 0:
                     npm_shell_resolutions = completed.stdout.splitlines()
             private_names = ("HOME", "TMPDIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME",
-                             "XDG_DATA_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "GEMINI_CLI_HOME",
+                             "XDG_DATA_HOME", "CLAUDE_CONFIG_DIR", "GEMINI_CLI_HOME",
                              "PI_CODING_AGENT_DIR")
             private_modes = {}
             poison_paths = []
@@ -1380,9 +1379,7 @@ def main(argv: list[str]) -> int:
                                      "pi_auth": ((pi_home / "auth.json").read_text(encoding="utf-8")
                                                  if (pi_home / "auth.json").is_file() else None),
                                      "pi_models_store": ((pi_home / "models-store.json").read_text(encoding="utf-8")
-                                                         if (pi_home / "models-store.json").is_file() else None),
-                                     "codex_bootstrap": ((codex_home / "fixture-login-state").read_text(encoding="utf-8")
-                                                         if (codex_home / "fixture-login-state").is_file() else None)})
+                                                         if (pi_home / "models-store.json").is_file() else None)})
                          + "\n")
     config = json.loads(Path(options[1]).read_text(encoding="utf-8"))
     if config["targets"][0].get("pushResults") is not False or config.get("notifications"):

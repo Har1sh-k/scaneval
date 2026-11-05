@@ -9,18 +9,15 @@ challenger and no evidence commit; a run of one is never recorded as the other, 
 reuses ``llm_harness`` only for its hardened snapshot, staging and import of finding records, never
 for its completion semantics.
 
-What one invocation does. :meth:`RunSortieAdapter.prepare` refuses anything but an explicit, clean,
-prebuilt RunSortie checkout at the exact ``expected_commit`` and package version, with its bundled
-Fieldglass already installed, and records each runtime identity at the assurance it really has.
-:meth:`RunSortieAdapter.scan` writes a mode-0600 RunSortie configuration naming the disposable ScanEval
-workspace as the only target, ``.fieldglass`` as the only evidence root, ``commitResults: true``,
-``pushResults: false``, no schedule and no notification, with the pinned checkout's installed
-Fieldglass as ``engine.localPath`` so RunSortie never copies or installs an engine. State and cache
-directories and agent homes are created for the invocation, with operator homes/configuration refused.
-When Codex is selected its API-key login and status check run privately first; then exactly one
-``node dist/cli.js scan --config ... --target scaneval`` process is started. Every process goes through
-:func:`~scaneval.adapters.base.run_command` with the shared deadline; RunSortie's separate native
-``status`` prose is never invoked or parsed.
+What production does. :meth:`RunSortieAdapter.prepare` validates and records the requested native
+routes, then records ``runnable: false`` because the pinned direct agents do not provide the external
+process/filesystem sandbox plus endpoint-specific egress control needed by this integration.
+:meth:`RunSortieAdapter.scan` therefore returns ``unsupported`` with an empty command before it inspects
+checkout identity or contents, creates adapter runtime state, consumes credentials, probes a CLI, or starts a
+RunSortie/agent process. The native
+execution and evidence path remains below that capability gate for deterministic fabricated-runtime
+contract tests and future work on an independently attested boundary; those tests are not production
+readiness or evidence that any direct agent is safe to launch.
 
 What decides the status. Everything RunSortie leaves behind is read without following a link and
 bounded, staged create-only into the bundle and registered file by file before the workspace
@@ -31,14 +28,12 @@ baseline acceptance at the evaluated head, a complete and internally consistent 
 over well-formed review packets, a work budget that was not exhausted, exactly one evidence commit
 changing only ``.fieldglass``, and no import loss.
 
-What is not established. Network access is not enforced: the local backend is the only one this
-adapter runs under, and RunSortie's agents reach their providers directly. No provider attests the
-model it served, and RunSortie has three model roles (engine, primary, challenger) where a result has
-one model slot, so ``model_identity`` is ``None``; the requested routes are in the frozen system
-configuration and the routes RunSortie's own records name are in the receipts and notes. The evidence
-commit changes the workspace's synthetic ``.git``, which ScanEval's condition audit records as
-``history_changed``; that is the truth about the run and is not hidden. The checks against what
-RunSortie wrote are checks, not isolation: ``docs/THREAT_MODEL.md`` applies here as to every adapter.
+What is not established. No v1 boundary attests provider/model/routing, prevents direct agents from
+loading remote policy or exposing stored credentials, or enforces their filesystem/process and network
+effects. In particular, Claude 2.1.310 can fetch and apply remote managed helpers and additional roots,
+and Codex API-key login persists a credential file readable by workspace tools. These known gaps are
+capability refusals, not warnings attached to a launch. ``docs/THREAT_MODEL.md`` applies here as to
+every adapter.
 """
 
 from __future__ import annotations
@@ -49,7 +44,6 @@ import json
 import os
 from pathlib import Path
 import posixpath
-import pwd
 import re
 import selectors
 import shlex
@@ -75,18 +69,19 @@ TARGET = "scaneval"
 ENGINE_SOURCE = "bundled:fieldglass"
 SUPPORTED_RUNSORTIE_COMMIT = "af8f2402469dca441f6d9efd5929ddeab5c64957"
 SUPPORTED_RUNSORTIE_VERSION = "0.1.0"
-AGENTS = ("codex",)
-VERIFIER_AGENTS = ("codex",)
+AGENTS = ("codex", "claude", "cursor", "gemini")
+VERIFIER_AGENTS = AGENTS
 # ``AGENT_REASONING_EFFORTS`` in the pinned src/types.ts. Cursor is refused outright: its headless
 # mode is not read-only, so RunSortie will not run it as a verifier, and as a primary it would receive
 # its prompt on the command line. Direct Gemini routes are also refused in v1: its pinned headless CLI
 # cannot both proceed in an untrusted workspace and prove that repository hooks/config were ignored.
-# Claude 2.1.310 ``--bare`` suppresses hooks/plugins but not remote admin permission policy, while
-# pinned RunSortie's allowed-tools arguments are additive. Direct Claude agents are therefore also
-# refused in secure v1; two distinct Codex model routes retain native cross-model review.
+# The parser recognizes the pinned native agent vocabulary so it can issue a precise refusal. Secure
+# v1 exposes no runnable direct-agent route: none has the external process/filesystem sandbox plus
+# endpoint-specific egress attestation needed to close its remaining credential/policy boundary.
 AGENT_EFFORTS = {"codex": ("minimal", "low", "medium", "high", "xhigh"),
-                 "claude": ("low", "medium", "high", "xhigh", "max")}
-AGENT_BINARIES = {"codex": "codex", "claude": "claude"}
+                 "claude": ("low", "medium", "high", "xhigh", "max"),
+                 "cursor": (), "gemini": ()}
+AGENT_BINARIES = {"codex": "codex", "claude": "claude", "cursor": "cursor-agent", "gemini": "gemini"}
 SEVERITIES = ("high", "medium", "low")
 BUDGET_ROLES = evidence.WORK_BUDGET_ROLES
 CONFIG_KEYS = frozenset({"root", "expected_commit", "expected_version", "expected_dist_tree_sha256", "engine_model",
@@ -144,18 +139,6 @@ PI_ISOLATION_FLAGS = ("--no-tools", "--no-extensions", "--no-mcp", "--no-skills"
                       "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve")
 NPM_SCRIPT_SHELL = Path("/bin/sh")
 AGENT_SHELL = Path("/bin/bash")
-MANAGED_PREFERENCES_ROOT = Path("/Library/Managed Preferences")
-CODEX_SYSTEM_POLICY_PATHS = (
-    Path("/etc/codex/config.toml"), Path("/etc/codex/requirements.toml"),
-    Path("/etc/codex/managed_config.toml"),
-    MANAGED_PREFERENCES_ROOT / "com.openai.codex.plist",
-    Path("/Library/Preferences/com.openai.codex.plist"),
-)
-CLAUDE_SYSTEM_POLICY_PATHS = (
-    Path("/Library/Application Support/ClaudeCode"), Path("/etc/claude-code"),
-    MANAGED_PREFERENCES_ROOT / "com.anthropic.claude-code.plist",
-    MANAGED_PREFERENCES_ROOT / "com.anthropic.claudecode.plist",
-)
 GIT_TIMEOUT_SECONDS = 60
 PROBE_TIMEOUT_SECONDS = 30
 PREPARATION_TIMEOUT_SECONDS = 300
@@ -165,10 +148,8 @@ MAX_PROBE_OUTPUT_BYTES = 1024 * 1024
 CLAUDE_BARE_PACKAGE_VERSION = "2.1.310"
 CLI_PACKAGE_PINS = {
     "pi": ("@earendil-works/pi-coding-agent", "1.4.0"),
-    "codex": ("@openai/codex", "0.165.0"),
     "claude": ("@anthropic-ai/claude-code", CLAUDE_BARE_PACKAGE_VERSION),
 }
-
 
 def _credential_wrapper(real: str, *, keep: frozenset[str], arguments: tuple[str, ...] = ()) -> bytes:
     """A deterministic shell wrapper that removes every non-role provider secret before exec."""
@@ -732,6 +713,30 @@ class Settings(NamedTuple):
     credential_env: dict[str, str]
 
 
+def _direct_agent_capability(settings: Settings) -> dict[str, Any]:
+    """Describe why no pinned native direct-agent route is runnable in secure v1."""
+    selected = {settings.primary.agent, settings.challenger.agent}
+    reasons: list[str] = []
+    if "codex" in selected:
+        reasons.append(
+            "direct Codex API-key login persists a readable credential file that workspace tools can access")
+    if "claude" in selected:
+        reasons.append(
+            "direct Claude 2.1.310 can fetch and apply remote managed policy helpers and additional "
+            "filesystem roots, with no supported wrapper flag to disable that path")
+    if selected & {"cursor", "gemini"}:
+        reasons.append(
+            "the selected direct agent lacks an externally attestable process/filesystem and policy-endpoint boundary")
+    return {
+        "runnable": False,
+        "status": "unsupported",
+        "selected_agents": sorted(selected),
+        "required_boundary": (
+            "externally attestable process/filesystem sandbox plus endpoint-specific egress control"),
+        "reasons": reasons,
+    }
+
+
 def _route(value: Any, label: str, allowed: tuple[str, ...]) -> Route:
     if not isinstance(value, dict) or not set(value) <= ROUTE_KEYS or not {"agent", "model"} <= set(value):
         raise AdapterError(f"config.{label} must be {{agent, model[, reasoning_effort]}} and nothing else")
@@ -1166,37 +1171,6 @@ def _fixed_executable(path: Path, label: str, deadline: Deadline | None = None) 
     return {"path": str(path), "realpath": str(real), "sha256": _sha256(real, deadline)}
 
 
-def _absent_agent_system_policy(selected_agents: set[str]) -> dict[str, Any]:
-    """Refuse host-admin policy layers that private HOME variables do not redirect."""
-    try:
-        username = pwd.getpwuid(os.getuid()).pw_name
-    except (KeyError, OSError) as exc:
-        raise AdapterError(f"the OS account name needed for managed-policy checks is unavailable: {exc}") from exc
-    candidates: list[tuple[str, Path]] = []
-    if "codex" in selected_agents:
-        candidates.extend(("Codex", path) for path in CODEX_SYSTEM_POLICY_PATHS)
-        candidates.extend(("Codex", MANAGED_PREFERENCES_ROOT / username / name) for name in (
-            "com.openai.codex.plist", "com.openai.codex"))
-    if "claude" in selected_agents:
-        candidates.extend(("Claude", path) for path in CLAUDE_SYSTEM_POLICY_PATHS)
-        candidates.extend(("Claude", MANAGED_PREFERENCES_ROOT / username / name) for name in (
-            "com.anthropic.claude-code.plist", "com.anthropic.claudecode.plist"))
-    checked: list[str] = []
-    for agent, path in candidates:
-        try:
-            os.lstat(path)
-        except FileNotFoundError:
-            checked.append(str(path))
-            continue
-        except OSError as exc:
-            raise AdapterError(f"{agent} system/managed policy path could not be proven absent ({path}): {exc}") from exc
-        raise AdapterError(
-            f"{agent} system/managed policy is present at {path}; secure v1 refuses policy, hooks, plugins, "
-            "or routing outside the invocation-private home")
-    return {"selected_agents": sorted(selected_agents), "checked_absent": checked,
-            "assurance": "known Codex/Claude system and managed policy paths were absent by no-follow lstat"}
-
-
 def _json_file(path: Path, label: str, deadline: Deadline | None = None) -> dict:
     try:
         if deadline:
@@ -1479,7 +1453,12 @@ def _dist_identity(root: Path, deadline: Deadline | None = None) -> dict[str, An
 
 def _isolated_probe_identity(identity: dict[str, Any], selected_agents: set[str],
                              deadline: Deadline) -> dict[str, Any]:
-    """Probe security flags under an empty private HOME/config with no provider credentials."""
+    """Probe the fabricated-runtime contract path under an empty HOME with no credentials.
+
+    Production never reaches this function: the direct-agent capability gate returns ``runnable:
+    false`` first.  These observations support deterministic native-path tests only and deliberately
+    make no claim that a selected agent has a safe execution boundary.
+    """
     private = Path(tempfile.mkdtemp(prefix="scaneval-runsortie-probe-"))
     guard = _capture_root(private)
     result: dict[str, Any] | None = None
@@ -1488,11 +1467,9 @@ def _isolated_probe_identity(identity: dict[str, Any], selected_agents: set[str]
         home, tmp = private / "home", private / "tmp"
         xdg_config, xdg_cache = home / ".config", home / ".cache"
         xdg_state, xdg_data = home / ".local/state", home / ".local/share"
-        codex_home, claude_home = home / ".codex", home / ".claude"
-        gemini_home, pi_home = home / ".gemini", home / ".pi/agent"
+        pi_home = home / ".pi/agent"
         npm_cache = private / "npm-cache"
-        for directory in (home, tmp, xdg_config, xdg_cache, xdg_state, xdg_data, codex_home,
-                          claude_home, gemini_home, pi_home, npm_cache):
+        for directory in (home, tmp, xdg_config, xdg_cache, xdg_state, xdg_data, pi_home, npm_cache):
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
             directory.chmod(0o700)
         _write_private_file(pi_home / "auth.json", b"{}")
@@ -1504,11 +1481,9 @@ def _isolated_probe_identity(identity: dict[str, Any], selected_agents: set[str]
         env = build_env((), {
             "PATH": identity["runtime_path"], "HOME": str(home), "TMPDIR": str(tmp),
             "LANG": "C", "LC_ALL": "C", "SHELL": str(probe_shell),
-            "CLAUDE_CODE_SHELL": str(probe_shell), "CLAUDE_CODE_SAFE_MODE": "1",
             "XDG_CONFIG_HOME": str(xdg_config), "XDG_CACHE_HOME": str(xdg_cache),
             "XDG_STATE_HOME": str(xdg_state), "XDG_DATA_HOME": str(xdg_data),
-            "CODEX_HOME": str(codex_home), "CLAUDE_CONFIG_DIR": str(claude_home),
-            "GEMINI_CLI_HOME": str(gemini_home), "PI_CODING_AGENT_DIR": str(pi_home),
+            "PI_CODING_AGENT_DIR": str(pi_home),
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_TERMINAL_PROMPT": "0", "GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1",
             "NODE_OPTIONS": "", "npm_config_node_options": "", "npm_config_userconfig": os.devnull,
@@ -1541,31 +1516,12 @@ def _isolated_probe_identity(identity: dict[str, Any], selected_agents: set[str]
         capabilities: dict[str, Any] = {
             "probeEnvironment": "invocation-private-empty-home-with-no-credentials",
             "pi": {"allIsolationFlags": True, "flags": pi_flags},
+            "directAgentSecurityBoundaryAttested": False,
         }
-        if "codex" in selected_agents:
-            codex = identity["agents"]["codex"]["realpath"]
-            login_help = output(codex, "login", "--help")
-            status_help = output(codex, "login", "status", "--help")
-            codex_capabilities = {"loginWithApiKey": "--with-api-key" in login_help,
-                                  "loginStatus": bool(status_help.strip())}
-            if not all(codex_capabilities.values()):
-                raise AdapterError("the selected Codex CLI lacks login --with-api-key or login status capability")
-            capabilities["codex"] = codex_capabilities
-        if "claude" in selected_agents:
-            claude_identity = identity["agents"]["claude"]
-            if (claude_identity.get("package_name") != "@anthropic-ai/claude-code"
-                    or claude_identity.get("package_version") != CLAUDE_BARE_PACKAGE_VERSION):
-                raise AdapterError(f"secure v1 Claude --bare requires package version {CLAUDE_BARE_PACKAGE_VERSION}")
-            claude_help = output(claude_identity["realpath"], "--help").lower()
-            claude_capabilities = {
-                "bare": "--bare" in claude_help, "bareSkipsHooks": "hook" in claude_help,
-                "bareSkipsPlugins": "plugin" in claude_help,
-                "bareIgnoresOauth": "oauth" in claude_help or "keychain" in claude_help,
-                "bareUsesApiKey": "api key" in claude_help or "api-key" in claude_help,
-            }
-            if not all(claude_capabilities.values()):
-                raise AdapterError("the selected Claude CLI help does not prove secure-v1 --bare semantics")
-            capabilities["claude"] = claude_capabilities
+        capabilities["agents"] = {
+            agent: {"versionObservedOnly": True, "securityBoundaryAttested": False}
+            for agent in sorted(selected_agents)
+        }
         result = {"versions": versions, "capabilities": capabilities}
     except BaseException as exc:
         failure = exc
@@ -1587,7 +1543,6 @@ def runtime_identity(settings: Settings, *, probe_versions: bool, deadline: Dead
     paths and digests.
     """
     selected_agents = {settings.primary.agent, settings.challenger.agent}
-    system_policy = _absent_agent_system_policy(selected_agents)
     root = settings.root
     runtime_path = _canonical_runtime_path()
     if not root.is_dir():
@@ -1623,7 +1578,6 @@ def runtime_identity(settings: Settings, *, probe_versions: bool, deadline: Dead
         "runsortie_node_modules": root_dependencies,
         "fieldglass": _fieldglass_identity(root, deadline),
         "runtime_path": runtime_path,
-        "agent_system_policy": system_policy,
         "engine_driver": {"driver": engine_driver,
                           **_npm_launcher_identity(engine_driver, deadline, runtime_path=runtime_path)},
         "node": _executable("node", deadline, runtime_path=runtime_path),
@@ -1640,7 +1594,7 @@ def runtime_identity(settings: Settings, *, probe_versions: bool, deadline: Dead
         expected_name, expected_version = CLI_PACKAGE_PINS[role]
         if (selected.get("package_name"), selected.get("package_version")) != (expected_name, expected_version):
             raise AdapterError(
-                f"secure v1 requires {role} from {expected_name}@{expected_version}; observed "
+                f"the synthetic native-path contract requires {role} from {expected_name}@{expected_version}; observed "
                 f"{selected.get('package_name')}@{selected.get('package_version')}")
     if probe_versions:
         probes = _isolated_probe_identity(
@@ -2603,9 +2557,9 @@ class RunSortieAdapter(Adapter):
     requires_git = True
     scan_modes = frozenset({"full"})
     supported_languages = frozenset({"python", "javascript", "typescript", "go", "rust"})
-    # Execution records describe the runner's possible offer statically. The exact one engine key
-    # selected for an invocation is separately bound in preparation/config/isolation artifacts.
-    env_passthrough = tuple(sorted(CREDENTIAL_ENV_ALLOWLIST))
+    # Production secure v1 starts no RunSortie/agent process and therefore offers no provider credential. The
+    # deterministic synthetic path patches this declaration alongside its explicit capability seam.
+    env_passthrough = ()
     # RunSortie's own evidence root. Declared so the runner leaves it out of the watched input tree,
     # and refuses an input that ships one.  This adapter imports findings and receipts itself with
     # no-follow byte/entry/deadline bounds, so the runner's generic whole-tree capture is disabled;
@@ -2617,30 +2571,44 @@ class RunSortieAdapter(Adapter):
 
     def prepare(self, spec: SystemSpec, cache_root: Path) -> dict[str, Any]:
         settings = read_settings(spec.config)
+        capability = _direct_agent_capability(settings)
+        record = {"runnable": bool(capability["runnable"]), "capability": capability,
+                  "routes": {"engine": settings.engine_model, "primary": settings.primary._asdict(),
+                             "challenger": settings.challenger._asdict(),
+                             "minimum_severity": settings.minimum_severity},
+                  "work_budget": settings.work_budget, "credential_env": dict(settings.credential_env),
+                  "provider_attestation": None}
+        if not capability["runnable"]:
+            return record
         deadline = Deadline(PREPARATION_TIMEOUT_SECONDS)
         try:
             identity = runtime_identity(settings, probe_versions=True, deadline=deadline)
         except DeadlineExpired as exc:
             raise AdapterError(
                 f"RunSortie preparation exceeded its {PREPARATION_TIMEOUT_SECONDS}-second monotonic bound") from exc
-        return {**identity,
-                "routes": {"engine": settings.engine_model,
-                           "primary": settings.primary._asdict(), "challenger": settings.challenger._asdict(),
-                           "minimum_severity": settings.minimum_severity},
-                "work_budget": settings.work_budget,
-                "credential_env": dict(settings.credential_env),
-                "provider_attestation": None}
+        return {**identity, **record}
 
     def scan(self, *, request, source_dir, raw_dir, spec, preparation, timeout_seconds, trace_mode, trace_dir):
         deadline = Deadline(timeout_seconds)
         try:
+            if request["input"]["mode"] != "full" or request["input"].get("pr") is not None:
+                raise AdapterError("runsortie carries out fresh full baselines only; this request was refused")
+            settings = read_settings(spec.config)
+            capability = _direct_agent_capability(settings)
+            if not capability["runnable"]:
+                reason = "; ".join(capability["reasons"])
+                return NativeOutcome(
+                    status="unsupported", exit_code=None, timed_out=False, command=[], claims=[], artifacts=[],
+                    notes=["RunSortie secure v1 did not launch: " + reason],
+                    error={"code": "unsupported_runtime_boundary",
+                           "message": (reason + "; required boundary: "
+                                       + capability["required_boundary"])[:2000]},
+                    model_identity=None, examined_nothing=True, processing="full",
+                    usage={"cost_usd": None})
             backend = active_backend()
             if backend is not None:
                 raise AdapterError(f"runsortie runs only on the local unenforced backend, not {getattr(backend, 'name', 'another')}; "
                                    "its runtime and agents are host installs")
-            if request["input"]["mode"] != "full" or request["input"].get("pr") is not None:
-                raise AdapterError("runsortie carries out fresh full baselines only; this request was refused")
-            settings = read_settings(spec.config)
             current = runtime_identity(settings, probe_versions=False, deadline=deadline)
             if current != _without_versions({key: preparation.get(key) for key in current}):
                 raise AdapterError("the RunSortie runtime changed between preparation and this invocation; nothing was run")
@@ -2714,39 +2682,22 @@ class RunSortieAdapter(Adapter):
         home_dir, private_tmp = private / "home", private / "tmp"
         xdg_config, xdg_cache = home_dir / ".config", home_dir / ".cache"
         xdg_state, xdg_data = home_dir / ".local" / "state", home_dir / ".local" / "share"
-        codex_home, claude_home = home_dir / ".codex", home_dir / ".claude"
-        gemini_home, pi_home = home_dir / ".gemini", home_dir / ".pi" / "agent"
+        pi_home = home_dir / ".pi" / "agent"
         isolated_bin = private / "isolated-bin"
         for directory in (state_dir, cache_dir, npm_cache_dir, home_dir, private_tmp, xdg_config, xdg_cache,
-                          xdg_state, xdg_data, codex_home, claude_home, gemini_home, pi_home, isolated_bin):
+                          xdg_state, xdg_data, pi_home, isolated_bin):
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
             directory.chmod(0o700)
         state_guard, cache_guard = _capture_root(state_dir), _capture_root(cache_dir)
         config_path = private / "runsortie-config.json"
         _write_private_file(config_path, config_bytes)
-        gemini_settings = (json.dumps({
-            "hooksConfig": {"enabled": False},
-            "security": {"blockGitExtensions": True, "folderTrust": {"enabled": True}},
-            "skills": {"enabled": False},
-        }, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-        gemini_user_settings = gemini_home / "settings.json"
-        gemini_system_settings = gemini_home / "system-settings.json"
-        gemini_system_defaults = gemini_home / "system-defaults.json"
-        for path in (gemini_user_settings, gemini_system_settings, gemini_system_defaults):
-            _write_private_file(path, gemini_settings)
         pi_auth_bytes, pi_models_store_bytes = b"{}", b"{}"
         pi_auth = pi_home / "auth.json"
         pi_models_store = pi_home / "models-store.json"
         _write_private_file(pi_auth, pi_auth_bytes)
         _write_private_file(pi_models_store, pi_models_store_bytes)
-        codex_selected = settings.primary.agent == "codex" or settings.challenger.agent == "codex"
-        claude_selected = settings.primary.agent == "claude" or settings.challenger.agent == "claude"
         engine_credential = settings.credential_env["engine"]
         credential_names = {engine_credential}
-        if codex_selected:
-            credential_names.add("OPENAI_API_KEY")
-        if claude_selected:
-            credential_names.add("ANTHROPIC_API_KEY")
 
         def required_secret(name: str, role: str) -> str:
             value = os.environ.get(name)
@@ -2757,10 +2708,6 @@ class RunSortieAdapter(Adapter):
             return value
 
         required_secret(engine_credential, "Pi engine")
-        if codex_selected:
-            required_secret("OPENAI_API_KEY", "Codex agent")
-        if claude_selected:
-            required_secret("ANTHROPIC_API_KEY", "Claude --bare agent")
 
         wrapper_specs: list[tuple[str, Path, bytes]] = []
         pi_wrapper = isolated_bin / "pi"
@@ -2768,23 +2715,17 @@ class RunSortieAdapter(Adapter):
             preparation["engine_driver"]["realpath"], keep=frozenset({engine_credential}),
             arguments=PI_ISOLATION_FLAGS)
         wrapper_specs.append(("Pi isolation wrapper", pi_wrapper, pi_wrapper_bytes))
-        if codex_selected:
-            wrapper_specs.append(("Codex credential-isolation wrapper", isolated_bin / "codex",
-                                  _credential_wrapper(preparation["agents"]["codex"]["realpath"], keep=frozenset())))
-        if claude_selected:
-            wrapper_specs.append(("Claude bare isolation wrapper", isolated_bin / "claude",
-                                  _credential_wrapper(preparation["agents"]["claude"]["realpath"],
-                                                      keep=frozenset({"ANTHROPIC_API_KEY"}),
-                                                      arguments=("--bare",))))
         runtime_path = str(isolated_bin) + os.pathsep + preparation["runtime_path"]
         npm_script_wrapper = isolated_bin / "runsortie-npm-script-shell"
         npm_script_wrapper_bytes = (
-            "#!/bin/sh\nPATH=" + shlex.quote(runtime_path) + "\nexport PATH\nexec "
+            "#!/bin/sh\nunset "
+            + " ".join(sorted(CREDENTIAL_ENV_ALLOWLIST - {engine_credential}))
+            + "\nPATH=" + shlex.quote(runtime_path) + "\nexport PATH\nexec "
             + shlex.quote(str(NPM_SCRIPT_SHELL)) + ' "$@"\n').encode("utf-8")
         wrapper_specs.append(("npm lifecycle PATH-reset wrapper", npm_script_wrapper, npm_script_wrapper_bytes))
         tsx_wrapper = isolated_bin / "tsx"
         tsx_wrapper_bytes = _credential_wrapper(
-            preparation["fieldglass"]["tsx_launcher"]["realpath"], keep=CREDENTIAL_ENV_ALLOWLIST)
+            preparation["fieldglass"]["tsx_launcher"]["realpath"], keep=frozenset({engine_credential}))
         wrapper_specs.append(("Fieldglass tsx absolute-launch wrapper", tsx_wrapper, tsx_wrapper_bytes))
         agent_shell_wrapper = isolated_bin / "scaneval-bash"
         agent_shell_wrapper_bytes = (
@@ -2795,9 +2736,6 @@ class RunSortieAdapter(Adapter):
         for _label, wrapper_path, wrapper_bytes in wrapper_specs:
             _write_private_file(wrapper_path, wrapper_bytes, mode=0o700)
         immutable_policy_files = [
-            ("Gemini user settings", gemini_user_settings, gemini_settings, 0o600),
-            ("Gemini system settings", gemini_system_settings, gemini_settings, 0o600),
-            ("Gemini system defaults", gemini_system_defaults, gemini_settings, 0o600),
             ("Pi empty credential store", pi_auth, pi_auth_bytes, 0o600),
             ("Pi empty model store", pi_models_store, pi_models_store_bytes, 0o600),
         ]
@@ -2819,13 +2757,8 @@ class RunSortieAdapter(Adapter):
 
         register("runsortie-config", raw / "runsortie-config.json", config_bytes)
         register("runsortie-primary-prompt", raw / "runsortie-primary-prompt.txt", primary_prompt_bytes)
-        register("runsortie-gemini-settings", raw / "runsortie-gemini-settings.json", gemini_settings)
-        register("runsortie-gemini-system-settings", raw / "runsortie-gemini-system-settings.json", gemini_settings)
-        register("runsortie-gemini-system-defaults", raw / "runsortie-gemini-system-defaults.json", gemini_settings)
         wrapper_artifacts = {
             "Pi isolation wrapper": ("runsortie-pi-wrapper", raw / "runsortie-pi-wrapper.sh"),
-            "Codex credential-isolation wrapper": ("runsortie-codex-wrapper", raw / "runsortie-codex-wrapper.sh"),
-            "Claude bare isolation wrapper": ("runsortie-claude-wrapper", raw / "runsortie-claude-wrapper.sh"),
             "npm lifecycle PATH-reset wrapper": (
                 "runsortie-npm-script-shell-wrapper", raw / "runsortie-npm-script-shell-wrapper.sh"),
             "Fieldglass tsx absolute-launch wrapper": (
@@ -2837,15 +2770,12 @@ class RunSortieAdapter(Adapter):
             artifact_id, artifact_path = wrapper_artifacts[label]
             register(artifact_id, artifact_path, wrapper_bytes)
         isolation_record = (json.dumps({
-            "version": 1, "cachedLoginImported": False,
+            "version": 1, "syntheticNativePathOnly": True,
+            "productionDirectAgentCapability": "unsupported",
+            "directAgentSecurityBoundaryAttested": False,
             "credentialEnvironmentRoles": dict(settings.credential_env),
             "privateHomes": ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME",
-                             "CODEX_HOME", "CLAUDE_CONFIG_DIR", "GEMINI_CLI_HOME", "PI_CODING_AGENT_DIR"],
-            "claudeSafeMode": True, "claudeBare": claude_selected, "directGeminiAgentRoutes": "refused",
-            "geminiFolderTrust": "empty-private-store-untrusted",
-            "geminiHooksEnabled": False, "geminiSkillsEnabled": False,
-            "geminiSystemSettingsControlled": True, "geminiSystemDefaultsControlled": True,
-            "codexApiKeyBootstrap": codex_selected,
+                             "PI_CODING_AGENT_DIR"],
             "agentShellStartupFilesDisabled": True,
             "dynamicAgentStatePreserved": False,
             "immutablePolicy": {
@@ -2853,9 +2783,7 @@ class RunSortieAdapter(Adapter):
                 for label, _path, data, mode in immutable_policy_files
             },
             "piIsolationFlags": list(PI_ISOLATION_FLAGS),
-            "roleCredentialRetention": {
-                "pi-engine": [engine_credential], "codex-agent": [],
-                "claude-agent": ["ANTHROPIC_API_KEY"] if claude_selected else []},
+            "roleCredentialRetention": {"pi-engine": [engine_credential], "direct-agent": []},
         }, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
         register("runsortie-agent-isolation", raw / "runsortie-agent-isolation.json", isolation_record)
         env = build_env(tuple(sorted(credential_names)), {
@@ -2863,12 +2791,7 @@ class RunSortieAdapter(Adapter):
             "LANG": "C", "LC_ALL": "C",
             "XDG_CONFIG_HOME": str(xdg_config), "XDG_CACHE_HOME": str(xdg_cache),
             "XDG_STATE_HOME": str(xdg_state), "XDG_DATA_HOME": str(xdg_data),
-            "CODEX_HOME": str(codex_home), "CLAUDE_CONFIG_DIR": str(claude_home),
-            "GEMINI_CLI_HOME": str(gemini_home), "PI_CODING_AGENT_DIR": str(pi_home),
-            "GEMINI_CLI_SYSTEM_SETTINGS_PATH": str(gemini_system_settings),
-            "GEMINI_CLI_SYSTEM_DEFAULTS_PATH": str(gemini_system_defaults),
-            "CLAUDE_CODE_SAFE_MODE": "1", "SHELL": str(agent_shell_wrapper),
-            "CLAUDE_CODE_SHELL": str(agent_shell_wrapper),
+            "PI_CODING_AGENT_DIR": str(pi_home), "SHELL": str(agent_shell_wrapper),
             "RUNSORTIE_STATE_DIR": str(state_dir), "RUNSORTIE_CACHE_DIR": str(cache_dir),
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0",
             "GIT_NO_REPLACE_OBJECTS": "1",
@@ -2881,32 +2804,6 @@ class RunSortieAdapter(Adapter):
             "npm_config_script_shell": str(npm_script_wrapper), "npm_config_cache": str(npm_cache_dir),
             "npm_config_logs_max": "0", "npm_config_offline": "true",
             "npm_config_update_notifier": "false", "NO_UPDATE_NOTIFIER": "1"})
-        if codex_selected:
-            api_key = required_secret("OPENAI_API_KEY", "Codex agent")
-            codex_env = dict(env)
-            for credential_name in CREDENTIAL_ENV_ALLOWLIST - {"OPENAI_API_KEY"}:
-                codex_env.pop(credential_name, None)
-            codex = preparation["agents"]["codex"]["realpath"]
-            auth_timeout = deadline.remaining(cap=min(10.0, max(0.5, deadline.remaining() * 0.10)))
-            login = run_command(
-                [codex, "login", "--with-api-key"], cwd=private, timeout_seconds=auth_timeout, env=codex_env,
-                stdin_text=api_key + "\n", stdout_path=private / "codex-login.stdout",
-                stderr_path=private / "codex-login.stderr", ensure_group_empty=True)
-            if login.timed_out or login.exit_code != 0 or not login.cleanup_succeeded:
-                raise AdapterError("the private Codex API-key bootstrap failed before RunSortie launch")
-            status = run_command(
-                [codex, "login", "status"], cwd=private,
-                timeout_seconds=deadline.remaining(cap=min(10.0, max(0.5, deadline.remaining() * 0.10))), env=codex_env,
-                stdout_path=private / "codex-login-status.stdout", stderr_path=private / "codex-login-status.stderr",
-                ensure_group_empty=True)
-            if status.timed_out or status.exit_code != 0 or not status.cleanup_succeeded:
-                raise AdapterError("the private Codex login status check failed before RunSortie launch")
-            # Codex now authenticates from its invocation-private CODEX_HOME and its runtime wrapper
-            # removes every provider secret.  Do not expose the bootstrap key to RunSortie, npm,
-            # Fieldglass, Git, or the engine unless OPENAI_API_KEY is deliberately also the one
-            # configured Pi-engine credential.
-            if engine_credential != "OPENAI_API_KEY":
-                env.pop("OPENAI_API_KEY", None)
         argv = [preparation["node"]["path"], str(settings.root / "dist" / "cli.js"), "scan",
                 "--config", str(config_path), "--target", TARGET]
         remaining = deadline.remaining()
@@ -2920,6 +2817,7 @@ class RunSortieAdapter(Adapter):
         if scan_timed_out:
             deadline.expired = True
             result.timed_out = True
+        scan_deadline = deadline
         deadline = Deadline(POST_RUN_EVIDENCE_GRACE_SECONDS)
         artifacts += [{"id": "runsortie-stdout", "path": raw / "runsortie-stdout.txt"},
                       {"id": "runsortie-stderr", "path": raw / "runsortie-stderr.txt"}]
@@ -2986,7 +2884,7 @@ class RunSortieAdapter(Adapter):
             state_read = (Read(state_data, None) if state_data is not None else
                           Read(None, "state.json was absent from the preserved native-state snapshot"))
             target_state_key = hashlib.sha256(
-                f"{TARGET}\0{source.resolve()}\0{branch}".encode("utf-8")).hexdigest()[:32]
+                f"{TARGET}\0{os.path.abspath(os.fspath(source))}\0{branch}".encode("utf-8")).hexdigest()[:32]
             binding_hash = evidence.review_work_binding_hash(TARGET, evaluated)
             expected_journal = (f"review-work/{target_state_key}/"
                                 f"review-work-{binding_hash[:32]}.json")
@@ -3061,6 +2959,7 @@ class RunSortieAdapter(Adapter):
                                agent_isolation_unchanged=agent_isolation_unchanged,
                                imported=imported, records=records, artifacts=artifacts, notes=notes,
                                register=register, timeout_seconds=timeout_seconds, deadline=deadline,
+                               scan_deadline=scan_deadline,
                                preservation_failures=preservation_failures)
         except Exception as exc:  # noqa: BLE001 - the claims already read must survive a reader defect
             claims, seen = [], set()
@@ -3071,9 +2970,11 @@ class RunSortieAdapter(Adapter):
             notes.append("The evidence could not be judged after the run; every imported finding is kept as a "
                          "provisional claim and nothing about completion is asserted.")
             return NativeOutcome(
-                status="timeout" if result.timed_out or deadline.expired else "error", exit_code=result.exit_code,
-                timed_out=result.timed_out or deadline.expired, command=argv, claims=claims, artifacts=artifacts, notes=notes,
-                error={"code": "timeout" if result.timed_out or deadline.expired else "evidence_unjudged",
+                status="timeout" if result.timed_out or scan_deadline.expired or deadline.expired else "error",
+                exit_code=result.exit_code,
+                timed_out=result.timed_out or scan_deadline.expired or deadline.expired,
+                command=argv, claims=claims, artifacts=artifacts, notes=notes,
+                error={"code": "timeout" if result.timed_out or scan_deadline.expired or deadline.expired else "evidence_unjudged",
                        "message": f"RunSortie evidence could not be judged: {type(exc).__name__}: {exc}"[:2000]},
                 model_identity=None, bundles_resolved=False, processing="full", usage={"cost_usd": None})
 
@@ -3081,7 +2982,7 @@ class RunSortieAdapter(Adapter):
                evidence_snapshot, product_before, result, argv, state_read, receipts, review_journal_data,
                agent_isolation_unchanged, imported, records,
                primary_prompt_bytes, artifacts, notes, register, timeout_seconds, deadline: Deadline,
-               preservation_failures: list[str], source_guard: RootGuard) -> NativeOutcome:
+               scan_deadline: Deadline, preservation_failures: list[str], source_guard: RootGuard) -> NativeOutcome:
         """Read history and identity, judge every native record, and build the outcome."""
         history_read = read_history(source, evaluated, evaluated_tree, evidence_snapshot, git_guard, deadline)
         history = history_read.evidence
@@ -3153,6 +3054,9 @@ class RunSortieAdapter(Adapter):
                                                      fallback_captured=fallback_population,
                                                      honor_dispositions=False)
         lost = imported.lost + len(reconciliation.losses)
+        if time.monotonic() >= scan_deadline.ends:
+            scan_deadline.expired = True
+            result.timed_out = True
         baseline = target.baseline
         # A native failure recorded on RunSortie's catch path carries no heads; it is already an error,
         # and a head it does name must still be the evaluated one.

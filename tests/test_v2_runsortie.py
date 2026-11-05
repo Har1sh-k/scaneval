@@ -1,11 +1,13 @@
 """Native RunSortie adapter: strict preparation, one native scan, independent evidence, completion.
 
-Every end-to-end test runs the real :func:`scaneval.execution.run_invocation` against a deterministic
+Every default end-to-end test runs the real :func:`scaneval.execution.run_invocation` against a deterministic
 stand-in for ``node dist/cli.js scan`` (tests/fixtures/runsortie/fake_runsortie.py) that follows the
 pinned ``scanTarget`` control flow: the engine, the review packets, the primary's guard, the challenger,
 the work budget, the wrapper's own evidence commit, checkpoint withholding, the baseline state machine
-and the native exit codes. No model, network or real RunSortie is used. Scenario hooks tamper with what
-the stand-in leaves so the adapter's own checks, not the stand-in's honesty, decide each status.
+and the native exit codes. By default no model, network, or real RunSortie is used. The separately marked
+opt-in conformance cases use the real pinned CLI with fabricated engine and agent processes. Scenario
+hooks tamper with what the stand-in leaves so the adapter's own checks, not the stand-in's honesty,
+decide each status.
 """
 
 from __future__ import annotations
@@ -67,6 +69,16 @@ def _executable(path: Path, text: str) -> None:
 class Runtime:
     def __init__(self, tmp_path: Path, monkeypatch):
         self.tmp = tmp_path
+        # Production secure v1 refuses every direct-agent route.  Most tests below exercise the
+        # already-written evidence/runtime machinery with deterministic fake processes through this
+        # explicit test-only monkeypatch; refusal itself has dedicated unpatched regressions.
+        self.native_direct_agent_capability = rs._direct_agent_capability
+        monkeypatch.setattr(rs, "_direct_agent_capability", lambda settings: {
+            "runnable": True, "status": "synthetic-test-only",
+            "selected_agents": sorted({settings.primary.agent, settings.challenger.agent}),
+            "required_boundary": "synthetic deterministic fake", "reasons": [],
+        })
+        monkeypatch.setattr(RunSortieAdapter, "env_passthrough", tuple(sorted(rs.CREDENTIAL_ENV_ALLOWLIST)))
         self.root = tmp_path / "runsortie"
         root = self.root
         _write(root / "package.json", json.dumps({"name": "runsortie", "version": "0.1.0"}))
@@ -127,7 +139,6 @@ class Runtime:
         (self.bin / "npm").symlink_to(npm_root / "bin" / "npm-cli.js")
         self.npm_package = npm_root
         package_specs = {
-            "codex": ("@openai/codex", "0.165.0", Path("bin/codex.js")),
             "claude": ("@anthropic-ai/claude-code", "2.1.310", Path("bin/claude.exe")),
             "gemini": ("@google/gemini-cli", "1.0.0", Path("bundle/gemini.js")),
             "pi": ("@earendil-works/pi-coding-agent", "1.4.0", Path("dist/bundle/cli.js")),
@@ -139,85 +150,47 @@ class Runtime:
             _executable(package_root / launcher_relative, "#!/bin/sh\nexit 0\n")
             self.agent_packages[agent] = package_root
             (self.bin / agent).symlink_to(package_root / launcher_relative)
-        _executable(self.agent_packages["codex"] / "bin" / "codex.js", r'''#!/bin/sh
-for argument in "$@"; do
-  case "$argument" in
-    --fixture-env-output=*)
-      output=${argument#*=}
-      env | LC_ALL=C sort > "$output"
-      printf '%s\n' "$@" > "$output.args"
-      exit 0
-      ;;
-  esac
-done
-if [ "$1" = "--version" ]; then
-  echo "codex-cli 0.165.0"
-  exit 0
-fi
-if [ "$1" = "login" ] && [ "$2" = "--help" ]; then
-  echo "codex login --with-api-key | status"
-  exit 0
-fi
-if [ "$1" = "login" ] && [ "$2" = "status" ] && [ "$3" = "--help" ]; then
-  echo "codex login status"
-  exit 0
-fi
-if [ "$1" = "login" ] && [ "$2" = "--with-api-key" ]; then
-  IFS= read -r token || exit 11
-  [ -n "$token" ] || exit 12
-  printf '%s\n' bootstrapped > "$CODEX_HOME/fixture-login-state"
-  exit 0
-fi
-if [ "$1" = "login" ] && [ "$2" = "status" ]; then
-  [ -f "$CODEX_HOME/fixture-login-state" ] || exit 13
-  echo "Logged in using an API key"
-  exit 0
-fi
-exit 0
-''')
         agent_fixture = r'''#!/bin/sh
-for argument in "$@"; do
-  case "$argument" in
-    --fixture-env-output=*)
-      output=${argument#*=}
-      env | LC_ALL=C sort > "$output"
-      printf '%s\n' "$@" > "$output.args"
-      exit 0
-      ;;
-  esac
-done
 if [ "$1" = "--version" ]; then
-  echo "2.1.310"
-  exit 0
-fi
-if [ "$1" = "--help" ]; then
-  echo "--bare uses API key auth, ignores OAuth/keychain, and skips hooks and plugins"
+  echo "2.1.310 (Claude Code)"
 fi
 exit 0
 '''
         _executable(self.agent_packages["claude"] / "bin" / "claude.exe", agent_fixture)
-        pi_fixture = agent_fixture.replace('echo "2.1.310"', 'echo "1.4.0"').replace(
-            'echo "--bare uses API key auth, ignores OAuth/keychain, and skips hooks and plugins"',
-            'echo "--no-tools --no-extensions --no-mcp --no-skills --no-prompt-templates --no-themes --no-context-files --no-approve"')
+        pi_fixture = r'''#!/bin/sh
+for argument in "$@"; do
+  case "$argument" in
+    --fixture-env-output=*)
+      output=${argument#*=}
+      env | LC_ALL=C sort > "$output"
+      printf '%s\n' "$@" > "$output.args"
+      exit 0
+      ;;
+  esac
+done
+if [ "$1" = "--version" ]; then echo "1.4.0"; exit 0; fi
+if [ "$1" = "--help" ]; then
+  echo "--no-tools --no-extensions --no-mcp --no-skills --no-prompt-templates --no-themes --no-context-files --no-approve"
+  exit 0
+fi
+exit 0
+'''
         _executable(self.agent_packages["pi"] / "dist" / "bundle" / "cli.js", pi_fixture)
-        _write(self.agent_packages["codex"] / "node_modules" / "@openai" / "codex-fixture-platform"
-               / "vendor" / "aarch64-fixture" / "codex", "fixture codex platform binary\n")
         _write(self.agent_packages["pi"] / "dist" / "bundle" / "cli-runtime.js",
                "export const runtime = 1;\n")
         # Only the fakes and the real Git: an agent CLI installed elsewhere on the operator's PATH must
         # never be found, recorded or started by a test.
         (self.bin / "git").symlink_to(shutil.which("git"))
         monkeypatch.setenv("PATH", os.pathsep.join((str(self.bin), "/usr/bin", "/bin")))
-        monkeypatch.setenv("OPENAI_API_KEY", "fixture-openai-api-key")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "fixture-anthropic-api-key")
+        monkeypatch.setenv("OPENAI_API_KEY", "fixture-engine-api-key")
 
     def config(self, **overrides) -> dict:
         config = {"root": str(self.root), "expected_commit": self.commit,
                   "expected_version": SUPPORTED_RUNSORTIE_VERSION,
                   "expected_dist_tree_sha256": self.dist_digest,
                   "engine_model": "fieldglass-route/model-a",
-                  "primary": {"agent": "codex", "model": "primary-model", "reasoning_effort": "high"},
-                  "challenger": {"agent": "codex", "model": "challenger-model"},
+                  "primary": {"agent": "claude", "model": "primary-model", "reasoning_effort": "high"},
+                  "challenger": {"agent": "claude", "model": "challenger-model"},
                   "credential_env": {"engine": "OPENAI_API_KEY"}}
         config.update(overrides)
         return {key: value for key, value in config.items() if value is not None}
@@ -310,6 +283,7 @@ def test_runsortie_is_a_standalone_adapter_and_llm_harness_keeps_its_meaning():
     assert (adapter.name, adapter.adapter_version, adapter.requires_git) == ("runsortie", "0.1.0", True)
     assert adapter.scan_modes == frozenset({"full"}) and adapter.oci_compatible is False
     assert adapter.supported_languages == frozenset({"python", "javascript", "typescript", "go", "rust"})
+    assert adapter.env_passthrough == ()
     assert adapter.state_dirs == (".fieldglass",) and adapter.state_capture_dirs == ()
     harness = get_adapter("llm-harness")
     assert harness.name == "llm-harness" and harness.adapter_version == "2.6.0"
@@ -353,15 +327,12 @@ def test_git_plumbing_ignores_and_workspace_guard_rejects_replace_refs(tmp_path,
     ({"expected_dist_tree_sha256": None}, "expected_dist_tree_sha256"),
     ({"expected_dist_tree_sha256": "sha256:" + "A" * 64}, "expected_dist_tree_sha256"),
     ({"engine_model": None}, "engine_model"),
-    ({"primary": {"agent": "cursor", "model": "m"}}, "primary.agent"),
-    ({"primary": {"agent": "codex", "model": "m", "reasoning_effort": "max"}}, "reasoning_effort must be one of"),
-    ({"primary": {"agent": "gemini", "model": "m"}}, "primary.agent must be one of codex"),
-    ({"primary": {"agent": "claude", "model": "m"}}, "primary.agent must be one of codex"),
-    ({"primary": {"agent": "codex", "model": "m", "token": "x"}}, "nothing else"),
-    ({"challenger": {"agent": "cursor", "model": "other"}}, "challenger.agent"),
-    ({"challenger": {"agent": "gemini", "model": "other"}}, "challenger.agent must be one of codex"),
-    ({"challenger": {"agent": "claude", "model": "other"}}, "challenger.agent must be one of codex"),
-    ({"challenger": {"agent": "codex", "model": "primary-model"}}, "must differ"),
+    ({"primary": {"agent": "unknown", "model": "m"}}, "primary.agent"),
+    ({"primary": {"agent": "claude", "model": "m", "reasoning_effort": "minimal"}}, "reasoning_effort must be one of"),
+    ({"primary": {"agent": "cursor", "model": "m", "reasoning_effort": "low"}}, "no enforceable reasoning-effort"),
+    ({"primary": {"agent": "claude", "model": "m", "token": "x"}}, "nothing else"),
+    ({"challenger": {"agent": "unknown", "model": "other"}}, "challenger.agent"),
+    ({"challenger": {"agent": "claude", "model": "primary-model"}}, "must differ"),
     ({"engine_model": "claude:engine-model"}, "hardened Pi engine route only"),
     ({"engine_model": "openai-codex/gpt-5.1-codex"}, "openai-codex provider"),
     ({"engine_model": "pi:openai-codex/gpt-5.1-codex"}, "openai-codex provider"),
@@ -389,47 +360,77 @@ def test_configuration_accepts_only_named_provider_secrets_without_values(runtim
     assert settings.credential_env == {"engine": "OPENROUTER_API_KEY"}
 
 
-def test_selected_agent_system_policy_is_refused_before_any_version_probe(runtime, monkeypatch):
-    agent = "codex"
-    policy = runtime.tmp / "codex-managed-policy"
-    _write(policy, "executable managed hook policy\n")
-    monkeypatch.setattr(rs, "MANAGED_PREFERENCES_ROOT", runtime.tmp / "absent-managed-preferences")
-    monkeypatch.setattr(rs, "CODEX_SYSTEM_POLICY_PATHS", (policy,))
-    monkeypatch.setattr(rs, "CLAUDE_SYSTEM_POLICY_PATHS", ())
-    monkeypatch.setattr(rs, "_probe", lambda *args, **kwargs: pytest.fail("policy refusal must precede probes"))
-    config = runtime.config(primary={"agent": agent, "model": "primary"},
-                            challenger={"agent": agent, "model": "challenger"})
-    with pytest.raises(AdapterError, match=f"{agent.title()} system/managed policy is present"):
-        RunSortieAdapter().prepare(SystemSpec("r", "runsortie", config), runtime.tmp)
+@pytest.mark.parametrize(("primary_agent", "challenger_agent"), list(itertools.product(rs.AGENTS, repeat=2)))
+def test_secure_v1_records_and_returns_unsupported_for_every_native_direct_agent_without_launch(
+        runtime, monkeypatch, primary_agent, challenger_agent):
+    monkeypatch.setattr(rs, "_direct_agent_capability", runtime.native_direct_agent_capability)
+    monkeypatch.setattr(rs, "runtime_identity",
+                        lambda *_args, **_kwargs: pytest.fail("refusal must precede runtime probing"))
+    monkeypatch.setattr(rs, "_probe",
+                        lambda *_args, **_kwargs: pytest.fail("refusal must precede CLI probes"))
+    monkeypatch.setattr(rs, "run_command",
+                        lambda *_args, **_kwargs: pytest.fail("unsupported capability must never launch a command"))
+    config = runtime.config(
+        primary={"agent": primary_agent, "model": "primary-route"},
+        challenger={"agent": challenger_agent, "model": "challenger-route"})
+    adapter = RunSortieAdapter()
+    spec = SystemSpec("r", "runsortie", config)
+    preparation = adapter.prepare(spec, runtime.tmp)
+    assert preparation["runnable"] is False
+    assert preparation["capability"]["selected_agents"] == sorted({primary_agent, challenger_agent})
+    assert preparation["capability"]["reasons"]
+    outcome = adapter.scan(
+        request={"input": {"mode": "full", "pr": None}}, source_dir=runtime.tmp / "source",
+        raw_dir=runtime.tmp / "raw", spec=spec, preparation=preparation, timeout_seconds=30,
+        trace_mode="off", trace_dir=None)
+    assert outcome.status == "unsupported" and outcome.command == [] and outcome.exit_code is None
+    assert outcome.error["code"] == "unsupported_runtime_boundary"
+    assert outcome.examined_nothing is True and outcome.bundles_resolved is True
+    assert runtime.invocations() == []
 
 
-def test_unselected_agent_system_policy_is_not_consulted(runtime, monkeypatch):
-    policy = runtime.tmp / "claude-managed-policy"
-    _write(policy, "claude-only policy\n")
-    monkeypatch.setattr(rs, "MANAGED_PREFERENCES_ROOT", runtime.tmp / "absent-managed-preferences")
-    monkeypatch.setattr(rs, "CODEX_SYSTEM_POLICY_PATHS", ())
-    monkeypatch.setattr(rs, "CLAUDE_SYSTEM_POLICY_PATHS", (policy,))
-    config = runtime.config(primary={"agent": "codex", "model": "primary"},
-                            challenger={"agent": "codex", "model": "challenger"})
-    preparation = RunSortieAdapter().prepare(SystemSpec("r", "runsortie", config), runtime.tmp)
-    assert set(preparation["agents"]) == {"codex"}
+def test_secure_v1_unsupported_bundle_validates_replays_and_advertises_no_provider_credentials(
+        tmp_path, monkeypatch):
+    config = {
+        "root": str(tmp_path / "checkout-is-not-inspected"),
+        "expected_commit": SUPPORTED_RUNSORTIE_COMMIT,
+        "expected_version": SUPPORTED_RUNSORTIE_VERSION,
+        "expected_dist_tree_sha256": "sha256:" + "0" * 64,
+        "engine_model": "fabricated/engine",
+        "primary": {"agent": "codex", "model": "primary-route"},
+        "challenger": {"agent": "claude", "model": "challenger-route"},
+        "credential_env": {"engine": "OPENROUTER_API_KEY"},
+    }
+    adapter = RunSortieAdapter()
+    spec = SystemSpec("runsortie-unsupported", "runsortie", config)
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    assert preparation["runnable"] is False
+    bundle = run_invocation(
+        prepared=_prepared(tmp_path), adapter=adapter, spec=spec, preparation=preparation,
+        out_dir=tmp_path / "out", run_id="run-unsupported", timeout_seconds=30,
+        trace_mode="off", network_policy="model_provider_only", clock=CLOCK)
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == execution["status"] == "unsupported"
+    assert result["examined_nothing"] is True and result["bundles_resolved"] is True
+    assert execution["command"] == [] and execution["exit_code"] is None
+    assert execution["raw_artifacts"] == []
+    assert not set(rs.CREDENTIAL_ENV_ALLOWLIST) & set(execution["environment"]["passthrough"])
 
+    plan, decisions = _quiet_review(result)
+    evaluator = bundle / "evaluator"
+    evaluator.mkdir()
+    (evaluator / "plan.json").write_text(canonical_json(plan) + "\n", encoding="utf-8")
+    (evaluator / "decisions.json").write_text(canonical_json(decisions) + "\n", encoding="utf-8")
 
-def test_unreadable_agent_system_policy_path_is_refused(runtime, monkeypatch):
-    policy = runtime.tmp / "unreadable-policy"
-    real_lstat = os.lstat
-    monkeypatch.setattr(rs, "MANAGED_PREFERENCES_ROOT", runtime.tmp / "absent-managed-preferences")
-    monkeypatch.setattr(rs, "CODEX_SYSTEM_POLICY_PATHS", (policy,))
-    monkeypatch.setattr(rs, "CLAUDE_SYSTEM_POLICY_PATHS", ())
+    def refused(*_args, **_kwargs):
+        raise AssertionError("unsupported offline replay tried to open a socket or start a process")
 
-    def refused(path):
-        if Path(path) == policy:
-            raise PermissionError("fixture refusal")
-        return real_lstat(path)
-
-    monkeypatch.setattr(rs.os, "lstat", refused)
-    with pytest.raises(AdapterError, match="could not be proven absent"):
-        rs._absent_agent_system_policy({"codex"})
+    monkeypatch.setattr(socket, "socket", refused)
+    monkeypatch.setattr(subprocess, "Popen", refused)
+    replayed = tmp_path / "replayed-unsupported.json"
+    assert main(["replay", str(bundle), "--output", str(replayed)]) == 0
+    assert json.loads(replayed.read_text(encoding="utf-8")) == score(plan, result, decisions)
 
 
 def test_preparation_records_pinned_identities_at_their_real_assurance(runtime):
@@ -454,31 +455,31 @@ def test_preparation_records_pinned_identities_at_their_real_assurance(runtime):
     assert preparation["npm_script_shell"]["sha256"].startswith("sha256:")
     assert preparation["agent_shell"]["path"] == "/bin/bash"
     assert preparation["agent_shell"]["sha256"].startswith("sha256:")
-    assert preparation["agent_system_policy"]["selected_agents"] == ["codex"]
-    assert preparation["agent_system_policy"]["checked_absent"]
-    assert set(preparation["agents"]) == {"codex"}
-    assert preparation["agents"]["codex"]["package_name"] == "@openai/codex"
-    assert preparation["agents"]["codex"]["package_version"] == "0.165.0"
+    assert set(preparation["agents"]) == {"claude"}
+    assert preparation["agents"]["claude"]["package_name"] == "@anthropic-ai/claude-code"
+    assert preparation["agents"]["claude"]["package_version"] == "2.1.310"
     assert preparation["probe_capabilities"]["pi"]["allIsolationFlags"] is True
-    assert preparation["probe_capabilities"]["codex"]["loginWithApiKey"] is True
+    assert preparation["probe_capabilities"]["directAgentSecurityBoundaryAttested"] is False
+    assert preparation["probe_capabilities"]["agents"]["claude"] == {
+        "versionObservedOnly": True, "securityBoundaryAttested": False}
     assert preparation["provider_attestation"] is None
     assert preparation["credential_env"] == {"engine": "OPENAI_API_KEY"}
-    assert preparation["routes"]["primary"] == {"agent": "codex", "model": "primary-model", "reasoning_effort": "high"}
+    assert preparation["routes"]["primary"] == {"agent": "claude", "model": "primary-model", "reasoning_effort": "high"}
     json.dumps(preparation)
 
 
 @pytest.mark.parametrize("role,field,value", [
     ("pi", "name", "@mariozechner/pi-coding-agent"),
     ("pi", "version", "1.4.1"),
-    ("codex", "name", "@openai/codex-near-miss"),
-    ("codex", "version", "0.165.1"),
+    ("claude", "name", "@anthropic-ai/claude-code-near-miss"),
+    ("claude", "version", "2.1.311"),
 ])
 def test_preparation_refuses_near_miss_selected_cli_package_contracts(runtime, role, field, value):
     manifest = runtime.agent_packages[role] / "package.json"
     package = json.loads(manifest.read_text(encoding="utf-8"))
     package[field] = value
     manifest.write_text(json.dumps(package), encoding="utf-8")
-    with pytest.raises(AdapterError, match=rf"secure v1 requires {role}"):
+    with pytest.raises(AdapterError, match=rf"synthetic native-path contract requires {role}"):
         RunSortieAdapter().prepare(SystemSpec("r", "runsortie", runtime.config()), runtime.tmp / "cache")
 
 
@@ -580,8 +581,8 @@ def test_preparation_refuses_an_unpinned_dirty_unbuilt_or_uninstalled_runtime(ru
     with pytest.raises(AdapterError, match="must already be built"):
         prepare()
     _write(runtime.root / "dist" / "cli.js", "#!/usr/bin/env node\nimport './main.js';\n")
-    (runtime.bin / "codex").unlink()
-    with pytest.raises(AdapterError, match="codex is not on PATH"):
+    (runtime.bin / "claude").unlink()
+    with pytest.raises(AdapterError, match="claude is not on PATH"):
         prepare()
 
 
@@ -618,9 +619,9 @@ def test_native_config_targets_the_workspace_only_and_never_pushes(runtime):
     assert config["schedule"]["enabled"] is False and "notifications" not in config
     assert config["engine"] == {"source": "bundled:fieldglass", "ref": "bundled",
                                 "localPath": str(runtime.root / "fieldglass"), "model": "fieldglass-route/model-a"}
-    assert config["agent"] == "codex" and config["agentModel"] == "primary-model"
+    assert config["agent"] == "claude" and config["agentModel"] == "primary-model"
     assert config["agentReasoningEffort"] == "high"
-    assert config["verifier"] == {"agent": "codex", "model": "challenger-model", "minimumSeverity": "medium"}
+    assert config["verifier"] == {"agent": "claude", "model": "challenger-model", "minimumSeverity": "medium"}
     assert config["workBudget"] == {"version": 1, "modelCalls": {"challenger": 2}}
 
 
@@ -644,37 +645,29 @@ def test_a_complete_run_succeeds_with_claims_and_separate_disposition_metadata(r
         _executable(fieldglass_bin / poisoned, "#!/bin/sh\nexit 96\n")
     operator_home = runtime.tmp / "operator-home"
     _write(operator_home / ".npmrc", "script-shell=/operator/attacker-shell\nnode-options=--require=/operator/hook.js\n")
-    _write(operator_home / ".codex" / "config.toml", 'model_provider = "poison-provider"\n')
-    _write(operator_home / ".claude" / "settings.json", '{"hooks":{"PreToolUse":[{"command":"poison"}]}}\n')
-    _write(operator_home / ".gemini" / "settings.json", '{"hooks":{"BeforeModel":[{"command":"poison"}]}}\n')
     _write(operator_home / ".pi" / "agent" / "extensions" / "poison.js", "throw new Error('poison');\n")
     monkeypatch.setenv("HOME", str(operator_home))
     poison_shell = operator_home / "attacker-bash"
     _executable(poison_shell, "#!/bin/sh\nexit 97\n")
     monkeypatch.setenv("SHELL", str(poison_shell))
-    monkeypatch.setenv("CLAUDE_CODE_SHELL", str(poison_shell))
     monkeypatch.setenv("LANG", "poison_LOCALE")
     monkeypatch.setenv("LC_ALL", "poison_LOCALE")
     monkeypatch.setenv("NODE_OPTIONS", "--require=/operator/environment-hook.js")
     monkeypatch.setenv("OPENAI_API_KEY", "s3cr3t-token-value")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-role-secret")
     monkeypatch.setenv("OPENROUTER_API_KEY", "engine-role-secret")
     monkeypatch.setenv("UNNAMED_SECRET", "never-passed-value")
     monkeypatch.setenv("RUNSORTIE_ENGINE_PATH", "/operator/engine")
     result, execution, bundle = _run(runtime, {
         "engine": {"findings": FINDINGS}, "primary": {"dispositions": {"FG-SQLI-0002": "dismissed"}},
-        "probe_role_wrappers": ["pi", "codex"],
+        "probe_role_wrappers": ["pi"],
         "probe_npm_shell_path": True,
-        "wrapper_log_env": ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "HF_TOKEN"],
+        "wrapper_log_env": ["OPENAI_API_KEY", "OPENROUTER_API_KEY", "HF_TOKEN"],
         "log_env": ["RUNSORTIE_STATE_DIR", "RUNSORTIE_CACHE_DIR", "RUNSORTIE_ENGINE_PATH", "OPENAI_API_KEY",
-                    "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY",
-                    "UNNAMED_SECRET", "GIT_CONFIG_GLOBAL", "npm_config_offline", "NODE_OPTIONS",
+                    "OPENROUTER_API_KEY", "UNNAMED_SECRET", "GIT_CONFIG_GLOBAL", "npm_config_offline", "NODE_OPTIONS",
                     "npm_config_node_options", "npm_config_userconfig", "npm_config_globalconfig",
                     "npm_config_script_shell", "npm_config_cache", "HOME", "TMPDIR", "XDG_CONFIG_HOME",
-                    "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
-                    "GEMINI_CLI_HOME", "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
-                    "GEMINI_CLI_SYSTEM_DEFAULTS_PATH", "PI_CODING_AGENT_DIR", "CLAUDE_CODE_SAFE_MODE",
-                    "SHELL", "CLAUDE_CODE_SHELL", "LANG", "LC_ALL"],
+                    "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "PI_CODING_AGENT_DIR",
+                    "SHELL", "LANG", "LC_ALL"],
     }, config=runtime.config(credential_env={"engine": "OPENROUTER_API_KEY"}))
 
     assert result["status"] == "success", result.get("error")
@@ -688,9 +681,7 @@ def test_a_complete_run_succeeds_with_claims_and_separate_disposition_metadata(r
     assert any(name.startswith("runsortie-findings/") and "sqli" in name for name in artifacts), \
         "the dismissed finding's raw record stays registered"
     for name in ("runsortie-config", "runsortie-stdout", "runsortie-stderr", "runsortie-reconciliation",
-                 "runsortie-primary-prompt", "runsortie-agent-isolation", "runsortie-gemini-settings",
-                 "runsortie-gemini-system-settings", "runsortie-gemini-system-defaults",
-                 "runsortie-pi-wrapper", "runsortie-codex-wrapper",
+                 "runsortie-primary-prompt", "runsortie-agent-isolation", "runsortie-pi-wrapper",
                  "runsortie-npm-script-shell-wrapper", "runsortie-tsx-wrapper",
                  "runsortie-agent-shell-wrapper",
                  "runsortie-receipts/verification-summary.json", "runsortie-receipts/baseline-acceptance.json",
@@ -710,13 +701,13 @@ def test_a_complete_run_succeeds_with_claims_and_separate_disposition_metadata(r
     assert by_id["FG-LOG-0003"]["severity"] == "low" and by_id["FG-LOG-0003"]["engine_status"] == "open"
     assert receipt["verdict"] == {"status": "success", "code": None, "unmet": []}
     assert receipt["readings"]["review_work_journal"] == {"state": "valid", "issues": []}
-    assert receipt["native"]["observed_routes"] == ["challenger=codex/challenger-model", "primary=codex/primary-model"]
+    assert receipt["native"]["observed_routes"] == ["challenger=claude/challenger-model", "primary=claude/primary-model"]
     assert receipt["changed_paths"] and all(path.startswith(".fieldglass/") for path in receipt["changed_paths"])
 
     assert execution["model_identity"] is None
-    assert {"OPENAI_API_KEY", "OPENROUTER_API_KEY"} <= set(execution["environment"]["passthrough"])
+    assert "OPENROUTER_API_KEY" in execution["environment"]["passthrough"]
     assert execution["tool_versions"]["runsortie"] == f"runsortie@{runtime.commit}"
-    assert execution["tool_versions"]["observed_review_routes"].startswith("challenger=codex/")
+    assert execution["tool_versions"]["observed_review_routes"].startswith("challenger=claude/")
     assert any("local and unenforced" in note for note in execution["notes"])
     assert any("history" in note for note in execution["notes"])
     condition = json.loads((bundle / "condition.json").read_text(encoding="utf-8"))
@@ -729,9 +720,7 @@ def test_a_complete_run_succeeds_with_claims_and_separate_disposition_metadata(r
     assert call["argv"][0] == str(runtime.root / "dist" / "cli.js")
     assert call["config_mode"] == "0o600"
     env = call["env"]
-    assert env["OPENAI_API_KEY"] is None and env["UNNAMED_SECRET"] is None, \
-        "the one-time Codex bootstrap key is removed before RunSortie and Fieldglass launch"
-    assert env["ANTHROPIC_API_KEY"] is None
+    assert env["OPENAI_API_KEY"] is None and env["UNNAMED_SECRET"] is None
     assert env["OPENROUTER_API_KEY"] == "engine-role-secret"
     assert env["RUNSORTIE_ENGINE_PATH"] is None, "the operator's engine override never reaches RunSortie"
     assert env["GIT_CONFIG_GLOBAL"] == os.devnull and env["npm_config_offline"] == "true"
@@ -741,43 +730,32 @@ def test_a_complete_run_succeeds_with_claims_and_separate_disposition_metadata(r
     assert env["HOME"] != str(operator_home) and Path(env["HOME"]).name == "home"
     private_root = Path(env["HOME"]).parent
     for key in ("TMPDIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME",
-                "CODEX_HOME", "CLAUDE_CONFIG_DIR", "GEMINI_CLI_HOME", "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
-                "GEMINI_CLI_SYSTEM_DEFAULTS_PATH", "PI_CODING_AGENT_DIR"):
+                "PI_CODING_AGENT_DIR"):
         assert Path(env[key]).is_relative_to(private_root), (key, env[key])
     assert set(call["private_modes"].values()) == {"0o700"}
     assert call["private_poison_paths"] == [], "operator config/hooks were not copied into the private homes"
-    assert env["CLAUDE_CODE_SAFE_MODE"] == "1"
-    assert Path(env["SHELL"]).name == Path(env["CLAUDE_CODE_SHELL"]).name == "scaneval-bash"
+    assert Path(env["SHELL"]).name == "scaneval-bash"
     shell_wrapper = (bundle / artifacts["runsortie-agent-shell-wrapper"]).read_text(encoding="utf-8")
     assert "/bin/bash --noprofile --norc" in shell_wrapper
     assert env["LANG"] == env["LC_ALL"] == "C"
     assert not private_root.exists(), "the isolated home and agent state are deleted after bounded inspection"
-    gemini = json.loads(call["gemini_settings"])
-    assert gemini["hooksConfig"]["enabled"] is False and gemini["skills"]["enabled"] is False
-    assert gemini["security"]["folderTrust"]["enabled"] is True
-    assert json.loads(call["gemini_system_settings"]) == gemini
-    assert json.loads(call["gemini_system_defaults"]) == gemini
-    assert call["gemini_trust_store_exists"] is False
     assert call["pi_auth"] == call["pi_models_store"] == "{}"
-    assert call["codex_bootstrap"] == "bootstrapped\n"
     assert Path(call["resolved_pi"]).name == "pi" and "isolated-bin" in Path(call["resolved_pi"]).parts
     assert all(flag in call["pi_wrapper"] for flag in rs.PI_ISOLATION_FLAGS)
     preparation_pi_target = str(runtime.agent_packages["pi"] / "dist" / "bundle" / "cli.js")
     assert preparation_pi_target in call["pi_wrapper"]
     assert call["role_wrapper_env"]["pi"] == {
-        "OPENAI_API_KEY": None, "ANTHROPIC_API_KEY": None,
-        "OPENROUTER_API_KEY": "engine-role-secret", "HF_TOKEN": None}
-    assert all(value is None for value in call["role_wrapper_env"]["codex"].values())
+        "OPENAI_API_KEY": None, "OPENROUTER_API_KEY": "engine-role-secret", "HF_TOKEN": None}
     assert all(flag in call["role_wrapper_argv"]["pi"] for flag in rs.PI_ISOLATION_FLAGS)
     assert [Path(path).name for path in call["npm_shell_resolutions"]] == ["pi", "git", "node", "tsx"]
     assert all(not Path(path).is_relative_to(fieldglass_bin) for path in call["npm_shell_resolutions"])
     assert "isolated-bin" in Path(call["npm_shell_resolutions"][0]).parts
     assert "isolated-bin" in Path(call["npm_shell_resolutions"][3]).parts
     isolation = json.loads((bundle / artifacts["runsortie-agent-isolation"]).read_text(encoding="utf-8"))
-    assert isolation["cachedLoginImported"] is False and isolation["codexApiKeyBootstrap"] is True
+    assert isolation["syntheticNativePathOnly"] is True
+    assert isolation["productionDirectAgentCapability"] == "unsupported"
+    assert isolation["directAgentSecurityBoundaryAttested"] is False
     assert isolation["credentialEnvironmentRoles"] == {"engine": "OPENROUTER_API_KEY"}
-    assert isolation["claudeBare"] is False
-    assert isolation["directGeminiAgentRoutes"] == "refused"
     assert isolation["dynamicAgentStatePreserved"] is False
     assert all(value["sha256"].startswith("sha256:") for value in isolation["immutablePolicy"].values())
     assert Path(env["npm_config_cache"]).name == "npm-cache" and not Path(env["npm_config_cache"]).exists()
@@ -1039,24 +1017,6 @@ def test_active_oci_backend_is_refused_before_the_native_fake_launches(runtime):
     assert runtime.invocations() == []
 
 
-def test_codex_without_an_explicit_api_key_is_refused_before_runsortie_launch(runtime, monkeypatch):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-engine-key")
-    adapter = get_adapter("runsortie")
-    spec = SystemSpec("runsortie-fake", "runsortie", runtime.config(
-        credential_env={"engine": "OPENROUTER_API_KEY"}))
-    preparation = adapter.prepare(spec, runtime.tmp)
-    runtime.scenario.write_text(json.dumps({"invocation_log": str(runtime.log)}), encoding="utf-8")
-    bundle = run_invocation(
-        prepared=_prepared(runtime.tmp / "codex-no-key"), adapter=adapter, spec=spec, preparation=preparation,
-        out_dir=runtime.tmp / "codex-no-key" / "out", run_id="run-codex-no-key", timeout_seconds=30,
-        trace_mode="off", network_policy="model_provider_only", clock=CLOCK)
-    result = load_document(bundle / "result.json", "scan-result")
-    assert result["status"] == "error"
-    assert "Codex agent requires" in result["error"]["message"]
-    assert runtime.invocations() == []
-
-
 def test_target_root_pi_configuration_is_refused_before_runsortie_launch(runtime):
     adapter = get_adapter("runsortie")
     spec = SystemSpec("runsortie-fake", "runsortie", runtime.config())
@@ -1123,7 +1083,7 @@ def test_installed_dependency_tree_mutation_after_preparation_is_refused(runtime
 
 
 @pytest.mark.parametrize("launcher,relative", [
-    ("codex", "node_modules/@openai/codex-fixture-platform/vendor/aarch64-fixture/codex"),
+    ("claude", "bin/claude.exe"),
     ("pi", "dist/bundle/cli-runtime.js"),
     ("npm", "lib/cli.js"),
 ])
@@ -1696,12 +1656,9 @@ def test_a_reader_defect_after_import_keeps_every_claim(runtime, monkeypatch):
 
 # --- isolation and filesystem safety ---------------------------------------------------------
 
-@pytest.mark.parametrize("operation", [
-    {"op": "private_file_write", "env": "GEMINI_CLI_HOME", "path": "settings.json", "text": "{}\n"},
-    {"op": "private_file_write", "env": "PI_CODING_AGENT_DIR", "path": "auth.json",
-     "text": '{"attacker":"secret"}\n'},
-])
-def test_adapter_owned_agent_policy_mutation_prevents_success_but_keeps_claims(runtime, operation):
+def test_adapter_owned_engine_policy_mutation_prevents_success_but_keeps_claims(runtime):
+    operation = {"op": "private_file_write", "env": "PI_CODING_AGENT_DIR", "path": "auth.json",
+                 "text": '{"attacker":"secret"}\n'}
     result, execution, _bundle = _run(runtime, {
         "engine": {"findings": FINDINGS}, "hooks": {"after": [operation]}})
     assert result["status"] != "success" and result["bundles_resolved"] is False
@@ -1712,7 +1669,7 @@ def test_adapter_owned_agent_policy_mutation_prevents_success_but_keeps_claims(r
 def test_dynamic_private_agent_state_is_not_mistaken_for_operator_configuration(runtime):
     result, _execution, _bundle = _run(runtime, {
         "engine": {"findings": FINDINGS}, "hooks": {"after": [{
-            "op": "private_file_write", "env": "CODEX_HOME", "path": "sessions/runtime-state.json",
+            "op": "private_file_write", "env": "PI_CODING_AGENT_DIR", "path": "sessions/runtime-state.json",
             "text": '{"generated":true}\n'}]}})
     assert result["status"] == "success", result.get("error")
 
@@ -2120,7 +2077,7 @@ def test_fd_tree_snapshot_rejects_root_rename_and_replacement(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
     (root / "record").write_bytes(b"old-root\n")
-    guard = rs._capture_root(root)._replace(mount_id="root-mount")
+    guard = rs._capture_root(root)
     moved = tmp_path / "moved-root"
 
     def replace_root(descriptor, status, relative):
@@ -2209,7 +2166,7 @@ def test_fd_relative_regular_refuses_a_leaf_mount_id_change(tmp_path, monkeypatc
     root = tmp_path / "root"
     root.mkdir()
     (root / "leaf").write_bytes(b"local")
-    guard = rs._capture_root(root)
+    guard = rs._capture_root(root)._replace(mount_id="root-mount")
     calls = 0
 
     def mount_id(_descriptor):
@@ -2259,8 +2216,8 @@ def test_cleanup_missing_renamed_root_is_failure_and_leaves_captured_inode_obser
 
 def test_emergency_cleanup_uses_a_fresh_budget_after_the_scan_deadline_expires(tmp_path):
     root = tmp_path / "private"
-    (root / "home" / ".codex").mkdir(parents=True)
-    (root / "home" / ".codex" / "auth.json").write_bytes(b"secret")
+    (root / "home" / ".claude").mkdir(parents=True)
+    (root / "home" / ".claude" / "runtime-state.json").write_bytes(b"private")
     guard = rs._capture_root(root)
     expired = rs.Deadline(0)
     with pytest.raises(rs.DeadlineExpired):
@@ -2339,9 +2296,15 @@ def test_real_runsortie_cli_with_fabricated_engine_and_agents(tmp_path, monkeypa
     """Deterministic conformance, not live readiness: the real RunSortie CLI, Node and Git run, and its
     Fieldglass engine and both agents are fabricated processes, so no model and no network is used.
 
-    PATH holds only the fabricated tools, a link to the real ``node``, and the real ``git``, so an
-    agent CLI installed on the operator's machine can never be found. The checkout is only read.
+    Fabricated tools take precedence in PATH; host agent-install directories are excluded, while
+    ``/usr/bin`` and ``/bin`` remain for ordinary shell utilities. The checkout is only read.
     """
+    monkeypatch.setattr(rs, "_direct_agent_capability", lambda settings: {
+        "runnable": True, "status": "synthetic-test-only",
+        "selected_agents": sorted({settings.primary.agent, settings.challenger.agent}),
+        "required_boundary": "synthetic deterministic fake", "reasons": [],
+    })
+    monkeypatch.setattr(RunSortieAdapter, "env_passthrough", tuple(sorted(rs.CREDENTIAL_ENV_ALLOWLIST)))
     root = Path(CONFORMANCE_ROOT).resolve()
     real_node = shutil.which("node")
     if real_node is None:
@@ -2355,15 +2318,25 @@ def test_real_runsortie_cli_with_fabricated_engine_and_agents(tmp_path, monkeypa
     bin_dir.mkdir()
     (bin_dir / "node").symlink_to(real_node)
     (bin_dir / "git").symlink_to(shutil.which("git"))
-    for tool, mode in (("npm", "npm-empty" if empty else "npm"), ("codex", "codex"),
-                       ("claude", challenger)):
-        _executable(bin_dir / tool, f'#!/bin/sh\nexec "{sys.executable}" -I "{TOOLS}" {mode} "$@"\n')
-    _executable(bin_dir / "pi", "#!/bin/sh\nexit 0\n")
+    package_specs = {
+        "npm": ("npm", "10.9.0", "bin/npm-cli.js", "npm-empty" if empty else "npm"),
+        "pi": ("@earendil-works/pi-coding-agent", "1.4.0", "dist/bundle/cli.js", "pi"),
+        "claude": ("@anthropic-ai/claude-code", "2.1.310", "bin/claude.js", challenger),
+    }
+    for tool, (package_name, package_version, relative, mode) in package_specs.items():
+        package_root = tmp_path / "packages" / tool
+        _write(package_root / "package.json", json.dumps({
+            "name": package_name, "version": package_version, "bin": {tool: relative}}))
+        launcher = package_root / relative
+        _executable(launcher, f'#!/bin/sh\nexec "{sys.executable}" -I "{TOOLS}" {mode} "$@"\n')
+        (bin_dir / tool).symlink_to(launcher)
     monkeypatch.setenv("PATH", os.pathsep.join((str(bin_dir), "/usr/bin", "/bin")))
+    monkeypatch.setenv("OPENAI_API_KEY", "fabricated-engine-key")
     config = {"root": str(root), "expected_commit": commit, "expected_version": version,
               "expected_dist_tree_sha256": rs._dist_identity(root)["tree_sha256"],
-              "engine_model": "fabricated/engine", "primary": {"agent": "codex", "model": "fabricated-primary"},
-              "challenger": {"agent": "claude", "model": "fabricated-challenger"}}
+              "engine_model": "fabricated/engine", "primary": {"agent": "claude", "model": "fabricated-primary"},
+              "challenger": {"agent": "claude", "model": "fabricated-challenger"},
+              "credential_env": {"engine": "OPENAI_API_KEY"}}
     if budget is not None:
         config["work_budget"] = budget
     adapter = get_adapter("runsortie")
@@ -2390,7 +2363,7 @@ def test_real_runsortie_cli_with_fabricated_engine_and_agents(tmp_path, monkeypa
         "FG-API-CMDI-0001": "reported-confirmed", "FG-API-INFO-0002": "reported-outside-review"}
     assert {entry["finding_id"]: entry["reportability"] for entry in receipt["findings"]} == expected_findings
     assert receipt["native"]["observed_routes"] == ([] if empty else [
-        "challenger=claude/fabricated-challenger", "primary=codex/fabricated-primary"])
+        "challenger=claude/fabricated-challenger", "primary=claude/fabricated-primary"])
     assert execution["tool_versions"]["runsortie"] == f"runsortie@{commit}"
     assert receipt["readings"]["work_budget"]["state"] == ("unconfigured" if budget is None else "complete")
     if empty:
