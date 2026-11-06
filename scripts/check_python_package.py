@@ -29,19 +29,47 @@ assert not any(name in sys.modules for name in (
 lines = []
 observer = Observer(mode="metadata", sink=create_jsonl_sink(lines.append),
                     run_id="package-smoke", producer_id="installed-observer")
-observer.emit(type="model.request", capture_status="complete", call_id="call-1",
-              metadata={"model": "synthetic-no-call"})
+for event_type, call_id, metadata in (
+    ("model.request", "call-1", {"model": "synthetic-no-call", "input_tokens": 12}),
+    ("model.response", "call-1", {"model": "synthetic-no-call", "output_tokens": 3}),
+    ("tool.start", "tool-1", {"tool": "synthetic-local-tool"}),
+    ("tool.end", "tool-1", {"tool": "synthetic-local-tool"}),
+):
+    observer.emit(type=event_type, capture_status="complete", call_id=call_id,
+                  metadata=metadata)
 observer.flush()
 assert observer.get_state().dropped_events == 0
+assert not observer.get_state().capture_gap
 observer.close()
-assert len(lines) == 1
-assert json.loads(lines[0])["type"] == "model.request"
+events = [json.loads(line) for line in lines]
+assert [event["type"] for event in events] == [
+    "model.request", "model.response", "tool.start", "tool.end",
+]
+assert events[0]["metadata"]["input_tokens"] == 12
+assert events[1]["metadata"]["output_tokens"] == 3
 for resource in (
     "schemas/run-config-2.1.schema.json", "mappings/kinds.json",
     "datasets/locks/aacr-bench.json", "data/model-cutoffs.json",
     "adapters/llm_harness_driver.mts", "adapters/pi_open_context_tools.mjs",
 ):
     assert files("scaneval").joinpath(resource).is_file(), resource
+'''
+
+
+EVALUATE_SMOKE = r'''
+import json
+from pathlib import Path
+import sys
+import scaneval
+
+bundle = Path(sys.argv[1])
+plan = json.loads((bundle / "evaluator" / "plan.json").read_text())
+result = json.loads((bundle / "result.json").read_text())
+decisions = json.loads((bundle / "evaluator" / "decisions.json").read_text())
+expected = json.loads((bundle / "evaluation.json").read_text())
+report = scaneval.evaluate(plan, result, decisions)
+assert report == expected, "installed evaluate() differs from the CLI's saved report"
+assert scaneval.evaluate(plan, result, decisions) == report, "evaluate() is not repeatable"
 '''
 
 
@@ -103,10 +131,12 @@ def main() -> int:
              "--no-input", "install", "--no-cache-dir", str(artifact)], cwd=work, env=env)
         run([str(python), "-I", "-c", OBSERVER_SMOKE, version], cwd=work, env=env, timeout=30)
         run([str(cli), "demo", "demo"], cwd=work, env=env, timeout=30)
+        run([str(python), "-I", "-c", EVALUATE_SMOKE, str(work / "demo")],
+            cwd=work, env=env, timeout=30)
         run([str(cli), "replay", "demo", "--output", "replay.json"], cwd=work, env=env, timeout=30)
         if (work / "demo" / "evaluation.json").read_bytes() != (work / "replay.json").read_bytes():
             raise AssertionError("installed CLI demo/replay produced different evaluation bytes")
-    print(f"scaneval {version}: {artifact.name} passed isolated Observer, resources, and CLI demo/replay checks")
+    print(f"scaneval {version}: {artifact.name} passed isolated evaluate(), Observer, resources, and CLI demo/replay checks")
     return 0
 
 
