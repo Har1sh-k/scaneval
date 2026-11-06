@@ -1342,6 +1342,8 @@ def _check_parsed(kind: str, where: str, text: str, new_text: str, originals: li
         expected = _rewritten(before, rewrite, where)
         try:
             after = parse(new_text)
+        except RecursionError:
+            raise _refused(too_deep) from None
         except _PARSE_ERRORS as exc:
             raise _refused(f"{where}: the transformed file is not valid {name} ({_reason(exc)}); replacements are "
                            "written into the file as they are, without quoting or escaping, so one holding a "
