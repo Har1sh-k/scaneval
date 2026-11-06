@@ -5520,7 +5520,8 @@ def test_a_pending_unlisted_record_with_analysis_history_absent_is_unexpected_no
     bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"],
                          control={"omit_analysis_history": ["src/db.js"]})
 
-    result, _execution = documents(bundle)
+    result, execution = documents(bundle)
+    assert (result["status"], result["error"]["code"]) == ("partial", "import_loss")
     records = dict(bundle_file_records(bundle))
     malformed = records["src/db.js.json"]
     assert malformed["status"] == "pending" and malformed["findings"] == []
@@ -5529,6 +5530,8 @@ def test_a_pending_unlisted_record_with_analysis_history_absent_is_unexpected_no
     assert scope.unexpected == ("src/db.js.json",)
     assert scope.unselected == () and scope.external == 0
     assert result["omitted_paths"] == [], "the malformed record must not become an ordinary unselected path"
+    assert any(note.startswith("1 file record(s) the manifest does not list") and "(src/db.js.json)" in note
+               for note in execution["notes"])
 
 
 def test_a_fresh_external_record_is_counted_external_and_never_reported_as_an_omission(tmp_path, monkeypatch):
