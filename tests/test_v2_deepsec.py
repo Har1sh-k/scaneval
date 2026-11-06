@@ -3245,6 +3245,56 @@ def test_only_an_id_transcript_discovery_may_be_handed_is_usable(session_id, usa
     assert session_id_usable(session_id) is usable
 
 
+def test_session_id_usability_delegates_to_the_configured_collector_module(monkeypatch):
+    calls = []
+
+    def import_sentinel(module_name):
+        assert module_name == deepsec_module.COLLECTOR_MODULE
+        calls.append(module_name)
+
+        def refuse(session_id):
+            assert session_id == "session-aaaa"
+            return False
+
+        return SimpleNamespace(session_id_is_usable=refuse)
+
+    monkeypatch.setattr(deepsec_module, "import_module", import_sentinel)
+
+    assert deepsec_module.session_id_usable("session-aaaa") is False
+    assert calls == [deepsec_module.COLLECTOR_MODULE]
+
+
+def test_session_id_usability_falls_back_when_the_configured_collector_is_missing(monkeypatch):
+    missing_module = "scaneval.collectors.not_installed"
+    calls = []
+
+    def missing(module_name):
+        assert module_name == missing_module
+        calls.append(module_name)
+        raise ImportError(module_name)
+
+    monkeypatch.setattr(deepsec_module, "COLLECTOR_MODULE", missing_module)
+    monkeypatch.setattr(deepsec_module, "import_module", missing)
+
+    assert deepsec_module.session_id_usable("session-aaaa") is True
+    assert deepsec_module.session_id_usable("*") is False
+    assert calls == [missing_module, missing_module]
+
+
+def test_session_id_usability_falls_back_when_the_collector_has_no_helper(monkeypatch):
+    monkeypatch.setattr(deepsec_module, "import_module", lambda _module_name: SimpleNamespace())
+
+    assert deepsec_module.session_id_usable("session-aaaa") is True
+    assert deepsec_module.session_id_usable("*") is False
+
+
+def test_session_id_usability_coerces_the_collectors_answer_to_bool(monkeypatch):
+    module = SimpleNamespace(session_id_is_usable=lambda _session_id: "usable")
+    monkeypatch.setattr(deepsec_module, "import_module", lambda _module_name: module)
+
+    assert deepsec_module.session_id_usable("session-aaaa") is True
+
+
 def test_a_crafted_session_id_never_reaches_discovery_and_imports_nobody_else(tmp_path, monkeypatch):
     """``*`` interpolated into a glob pulled every transcript on the machine into one trace.
 

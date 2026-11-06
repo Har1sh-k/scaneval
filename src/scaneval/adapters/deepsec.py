@@ -292,7 +292,7 @@ def session_id_usable(session_id: Any) -> bool:
     if not isinstance(session_id, str):
         return False
     try:
-        helper = getattr(import_module("scaneval.collectors"), "session_id_is_usable", None)
+        helper = getattr(import_module(COLLECTOR_MODULE), "session_id_is_usable", None)
     except ImportError:
         helper = None
     if helper is not None:
