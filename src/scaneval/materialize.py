@@ -459,6 +459,9 @@ def export_snapshot(
     The bytes come from the hardened immutable checkout, not directly from raw Git blobs.
     Repository-owned checkout conversions such as ``eol``, ``ident``, and
     ``working-tree-encoding`` can therefore affect the bytes copied into the export.
+    Operator/system Git configuration and attributes files are ignored or neutralized, and
+    arbitrary filters do not transform the export: the only configured driver is inert,
+    pass-through LFS.
 
     The ``standard`` profile writes exactly the export and the record this function has always
     written; ``blinding_map`` and ``snapshot_id`` play no part in it. ``metadata_blinded`` and
@@ -490,7 +493,9 @@ def export_tree(snapshot: CachedSnapshot, source: Path) -> ExportedTree:
 
     Files are copied byte for byte from the hardened immutable checkout, not read from raw Git
     blobs. Repository-owned checkout conversions such as ``eol``, ``ident``, and
-    ``working-tree-encoding`` can therefore affect the exported bytes.
+    ``working-tree-encoding`` can therefore affect the exported bytes. Operator/system Git
+    configuration and attributes files are ignored or neutralized, and arbitrary filters do not
+    transform the export: the only configured driver is inert, pass-through LFS.
 
     Controller and harness state and every ``.git`` path are stripped; submodule gitlinks,
     symbolic links, and anything else that is not a blob are skipped with a reason. Files keep
