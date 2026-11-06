@@ -148,10 +148,26 @@ def do_scan(argv):
     write(base / "project.json", {"projectId": project, "rootPath": root,
                                   "createdAt": "2026-09-25T12:00:00.000Z"})
     # ``scan_skip`` is a file no matcher hits: DeepSec writes no record for it.
-    skipped = set(control().get("scan_skip") or [])
+    settings = control()
+    skipped = set(settings.get("scan_skip") or [])
+    file_paths = settings.get("record_file_paths") or {}
+    missing_history = set(settings.get("omit_analysis_history") or [])
     for name in source_files(root):
         if name not in skipped:
-            write(base / "files" / (name + ".json"), scanned_record(name, project))
+            record = scanned_record(name, project)
+            if name in file_paths:
+                # Test-only divergence between the record's on-disk/source spelling and the
+                # FileRecord.filePath that 2.3.10's manifest predicate actually reads.
+                record["filePath"] = file_paths[name]
+            if name in missing_history:
+                # Deliberately malformed only for the test of absent-vs-empty fresh state.
+                record.pop("analysisHistory")
+            write(base / "files" / (name + ".json"), record)
+    for record_name, file_path in sorted((settings.get("extra_pending_records") or {}).items()):
+        # An exact, synthetic record spelling that need not correspond to source discovery.
+        record = scanned_record(record_name, project)
+        record["filePath"] = file_path
+        write(base / "files" / (record_name + ".json"), record)
     write_scan_run(base, project, root)
     print("scanned %d file(s)" % len(source_files(root)))
 
@@ -248,11 +264,13 @@ def investigate(argv, names, settings):
             # 2.3.10 divides the wall clock among the batch's files; an older one wrote the
             # whole batch clock onto each of them, which is what the knob reproduces.
             wall = 9000 if settings.get("duplicated_duration") else 9000.0 / share
+            findingless = name in set(settings.get("findingless_records") or [])
             entry = {"runId": run_id, "investigatedAt": "2026-09-25T12:01:00.000Z",
                      "durationMs": wall, "durationApiMs": 6000.0 / share,
                      "agentType": "claude-agent-sdk", "model": model,
                      "modelConfig": {"model": model}, "agentSessionId": session,
-                     "findingCount": 1, "numTurns": 4.0 / share, "phase": "process",
+                     "findingCount": 0 if findingless else 1,
+                     "numTurns": 4.0 / share, "phase": "process",
                      "costUsd": 0.12 / share,
                      "usage": {"inputTokens": 1000.0 / share, "outputTokens": 200.0 / share,
                                "cacheReadInputTokens": 40.0 / share,
@@ -261,7 +279,7 @@ def investigate(argv, names, settings):
                 entry["refusal"] = {"refused": True, "reason": "the file was not readable",
                                     "skipped": [{"filePath": name, "reason": "unreadable"}]}
             record["analysisHistory"].append(entry)
-            record["findings"] = [{
+            record["findings"] = [] if findingless else [{
                 "severity": "HIGH", "vulnSlug": "command-injection",
                 "title": "Shell command built from request input in " + name,
                 "description": "The handler passes request input to a shell.",
@@ -271,7 +289,7 @@ def investigate(argv, names, settings):
             record["status"] = "error" if (settings.get("file_error") and name == names[0]) else "analyzed"
             write(path, record)
             result["analyses"] += 1
-            result["findings"] += 1
+            result["findings"] += 0 if findingless else 1
     write(base / "runs" / (run_id + ".json"), {
         "runId": run_id, "projectId": project, "rootPath": root,
         "createdAt": "2026-09-25T12:01:00.000Z", "completedAt": "2026-09-25T12:02:00.000Z",
