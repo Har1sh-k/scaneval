@@ -5360,7 +5360,7 @@ def test_a_curated_run_that_selects_every_candidate_is_no_success_and_earns_no_q
 @pytest.mark.parametrize(("listed", "control"), [("README.md", {}), ("src/db.js", {"scan_skip": ["src/db.js"]})],
                          ids=["unscanned-extension", "no-matcher-hit"])
 def test_a_listed_path_without_a_regex_record_runs_no_ai_batch(tmp_path, monkeypatch, listed, control):
-    """The intersection is empty: native triage made no candidate there, which is not a model's miss."""
+    """The completed scan bounds why no exact readable record exists; none of those causes is a model miss."""
     bundle = curated_run(tmp_path, monkeypatch, [listed], control=control)
 
     result, execution = documents(bundle)
@@ -5372,19 +5372,26 @@ def test_a_listed_path_without_a_regex_record_runs_no_ai_batch(tmp_path, monkeyp
     assert result["status"] == "partial" and result["error"]["code"] == "scope_incomplete"
     assert result["omitted_paths"] == sorted(records)
     note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
-    assert f"1 listed path(s) got no file record ({listed})" in note
-    assert "no AI batch ran on them; that is native triage, not a model's miss" in note
+    assert (f"1 listed path lacks a readable FileRecord under the exact listed filePath spelling ({listed}). "
+            "For readable records, this can mean no matcher hit, an ignore-filter skip, native discovery did not "
+            "enumerate the path (dot-leading .storybook/main.js is a known example), or DeepSec recorded the "
+            "corresponding file under another spelling. These readable-record possibilities mean this exact "
+            "manifest assigned no AI batch for the listed spelling, and none is a model miss.") in note
 
 
 def test_a_curated_run_over_a_tree_with_no_regex_candidate_is_still_not_a_success(tmp_path, monkeypatch):
-    bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"],
+    bundle = curated_run(tmp_path, monkeypatch, ["src/db.js", "src/server.js"],
                          control={"scan_skip": ["src/db.js", "src/server.js"]})
 
-    result, _execution = documents(bundle)
+    result, execution = documents(bundle)
     assert bundle_records(bundle) == {}
     assert result["status"] == "partial" and result["error"]["code"] == "scope_incomplete"
     assert "no AI batch ran" in result["error"]["message"]
     assert result["claims"] == [] and result["omitted_paths"] == [] and result["bundles_resolved"] is False
+    note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
+    assert ("2 listed paths lack a readable FileRecord under the exact listed filePath spellings "
+            "(src/db.js, src/server.js).") in note
+    assert "batch for the listed spellings, and none is a model miss" in note
 
 
 def test_a_failed_selected_batch_keeps_its_own_failure_and_its_claims(tmp_path, monkeypatch):
@@ -5404,20 +5411,22 @@ def test_a_failed_selected_batch_keeps_its_own_failure_and_its_claims(tmp_path, 
 
 
 @pytest.mark.parametrize("control, timeout_seconds, status, said", [
-    ({"scan_exit": 3}, 300, "error", "Its regex scan exited 3 before it finished"),
-    ({"hang": "scan"}, 3, "timeout", "Its regex scan ran out of the shared time budget before it finished"),
+    ({"scan_exit": 3}, 300, "error", "Its regex scan exited 3 before process could run"),
+    ({"hang": "scan"}, 3, "timeout", "Its regex scan ran out of the shared time budget before process could run"),
 ], ids=["failed", "timed-out"])
 def test_a_curated_run_whose_scan_did_not_finish_blames_no_listed_path_on_native_triage(
         tmp_path, monkeypatch, control, timeout_seconds, status, said):
-    """With no completed scan, a listed path's missing record says nothing about DeepSec's triage of it."""
+    """The unfinished scan prevented process and batching; only the missing exact record's cause is unknown."""
     bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"], control=control, timeout_seconds=timeout_seconds)
 
     result, execution = documents(bundle)
     assert result["status"] == status
     note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
     assert said in note
-    assert ("1 listed path(s) have no file record (src/server.js), which says nothing about DeepSec's triage of "
-            "them, since no scan completed") in note
+    assert "process never ran, so no AI batch was assigned" in note
+    assert ("1 listed path lacks a readable FileRecord under the exact listed filePath spelling (src/server.js); "
+            "the cause cannot be inferred because the scan did not complete.") in note
+    assert "batch assignment cannot be inferred" not in note
     assert "native triage" not in note and "ignore filter" not in note
     assert note.endswith("A curated run is never a success and its bundles are unresolved, so it completes no "
                          "control and earns no quiet credit.")
@@ -5434,7 +5443,7 @@ def test_a_curated_run_s_exit_1_that_no_listed_record_explains_is_an_error(tmp_p
 
 
 def test_a_curated_note_does_not_call_a_listed_path_with_an_unreadable_record_native_triage(tmp_path, monkeypatch):
-    """A listed path whose record exists but cannot be read is not shown to have had no regex candidate."""
+    """An unreadable data record neither correlates to the listed path nor proves native triage."""
     original = deepsec_module.run_command
 
     def run_command(argv, **kwargs):
@@ -5452,9 +5461,12 @@ def test_a_curated_note_does_not_call_a_listed_path_with_an_unreadable_record_na
 
     _result, execution = documents(bundle)
     note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
-    assert "1 listed path(s) got no file record (src/server.js)" in note
-    assert ("that is native triage, not a model's miss, unless the record is one of the 1 DeepSec record(s) this "
-            "run could not read") in note
+    assert ("1 listed path lacks a readable FileRecord under the exact listed filePath spelling (src/server.js)."
+            ) in note
+    assert ("The run also has 1 unreadable DeepSec data record; that count alone does not say whether any is the "
+            "matching FileRecord. If one is, the absence is import loss and batch assignment cannot be inferred."
+            ) in note
+    assert "native triage" not in note
 
 
 def test_a_curated_run_whose_only_selected_batch_errored_is_an_error(tmp_path, monkeypatch):

@@ -401,7 +401,9 @@ def _check_blinding(config: dict, pack: dict, inputs: list[_InputSpec], systems:
                 raise ContractError(
                     f"{where} names {leaked[0]!r}, an original identity token of blinding map "
                     f"{spec.blinding_map['map_id']}, which would reach the scan of blinded input "
-                    f"{spec.input_id}; rename it, or leave that input standard")
+                    f"{spec.input_id}; change evaluator-controlled identifiers or configuration values when "
+                    "possible. Blinding never renames source paths, so scanner-facing configuration that must "
+                    "name such a path requires a standard input")
         if spec.profile == "identity_reduced" and "identity_policy" in spec.blinding_map:
             from .identity_policy import scanner_identity_gaps
             snapshot = cases.snapshot_by_id(pack, spec.snapshot_id)

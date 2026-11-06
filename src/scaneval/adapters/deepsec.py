@@ -117,13 +117,20 @@ not a sandbox: the agent still runs with the whole repository visible and may re
 files shown to be unread. Nothing is filtered out of the reconciliation: every record, status and
 exported claim counts as in an ordinary run, so the regex candidates the manifest did not list are
 assigned no AI batch, stay ``pending``, make the run ``scope_incomplete``, and are its
-``omitted_paths``. After a scan that ran to the end, a listed path with no record had no regex
-candidate, or was skipped by DeepSec's ignore filter, so no AI batch ran on it: native triage, not a
-model's miss; after a scan that failed or was killed, the note says only that no scan completed. An
+``omitted_paths``. ``listed_without_record`` means no readable FileRecord has a ``filePath`` with
+exactly the listed spelling. After a scan that ran to the end, a nonzero count has only a bounded
+account: there may have been no matcher hit, the ignore filter may have skipped the path, native
+discovery may not have enumerated it (dot-leading paths such as ``.storybook/main.js`` are a known
+example), DeepSec may have recorded it under another spelling, or a matching record may have been
+unreadable. The note preserves that last caveat rather than calling an unreadable matching record
+native triage; when the count is zero it states only the count. After a scan that failed or was
+killed, the note says that the scan ended before process, so process never ran and assigned no AI
+batch; only the cause of a nonzero missing exact-readable-record population remains unknown because
+the scan did not complete. An
 unlisted record carrying analysis, a finding or a status other than ``pending``, a claim on an unlisted
-path, or a manifest whose bytes changed is
-``process_manifest_not_honored``; its claims are kept. Every other failure keeps its precedence, and a
-curated run that would otherwise succeed is ``partial`` with ``scope_incomplete`` instead. Its bundles
+path, or a manifest whose bytes changed is ``process_manifest_not_honored``; its claims are kept. Every
+other failure keeps its precedence. A curated run that would otherwise succeed is ``partial`` with
+``scope_incomplete`` instead. Its bundles
 are never resolved, so it completes no control and earns no quiet credit. Every outcome a curated run
 returns, whatever its status, records ``processing: curated`` on its result, the selection marker that
 aggregation, comparison and the benchmark score show beside the adapter version; a full run records
@@ -495,9 +502,15 @@ def process_manifest_path_issue(entry: Any) -> str | None:
     or ``..`` segment. So an entry must already be that spelling. Nothing is rewritten into it,
     because what the configuration digest binds must be exactly what DeepSec's ``--manifest``
     reads; an entry that is not that spelling would select nothing, or, through a separator or
-    traversal, name something outside the tree. A backslash, a drive letter, a control character
-    and whitespace at either end are refused for the same reason: each is either outside the
-    native spelling or one DeepSec's own listing reads differently. The drive-letter test is any
+    traversal, name something outside the tree.
+
+    A NUL remains a separate impossibility: it is a NUL byte, which no filesystem path can contain.
+    As conservative evaluator policy, the evaluator additionally refuses the non-NUL C0 controls
+    U+0001-U+001F, DEL (U+007F), and whitespace at either end; this is not a claim that DeepSec
+    2.3.10 cannot record such strings. The control-character rule does not reject C1 code points
+    (U+0080-U+009F). A C1 code point that Python treats as leading or trailing whitespace may still
+    hit the separate edge-whitespace policy; other C1 code points retain their current acceptance.
+    A backslash and a drive letter remain outside the native spelling. The drive-letter test is any
     ASCII letter then ``:`` at the start, so it also refuses a valid POSIX name such as ``a:b``;
     that over-refusal is in the safe direction.
     """
@@ -506,9 +519,10 @@ def process_manifest_path_issue(entry: Any) -> str | None:
     if not entry:
         return "it is empty"
     if "\x00" in entry:
-        return "it holds a NUL byte"
-    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in entry):
-        return "it holds a control character"
+        return "it holds a NUL byte, which no filesystem path can contain"
+    if any(0 < ord(character) < 0x20 or ord(character) == 0x7F for character in entry):
+        return ("evaluator policy refuses non-NUL C0 control characters (U+0001-U+001F) and DEL "
+                "(U+007F) in manifest paths")
     if any(0xD800 <= ord(character) <= 0xDFFF for character in entry):
         # Python's spelling of an undecodable byte in a file name; DeepSec reads that name as
         # U+FFFD, so the two can never match.
@@ -520,7 +534,7 @@ def process_manifest_path_issue(entry: Any) -> str | None:
     if WINDOWS_DRIVE.match(entry):
         return "it starts with a drive letter"
     if entry != entry.strip():
-        return "it begins or ends with whitespace"
+        return "evaluator policy refuses leading or trailing whitespace in manifest paths"
     if any(part in ("", ".", "..") for part in entry.split("/")):
         return "it has an empty, '.' or '..' segment, so it is not the one spelling DeepSec records"
     return None
@@ -2927,8 +2941,10 @@ def process_manifest_tree_issue(source_dir: Path, path: str,
     listing rather than opened, so a case or Unicode-form alias that a case- or
     normalization-insensitive filesystem would resolve is refused: DeepSec selects by exact string,
     and such an alias would select nothing while appearing to name a file. A symbolic link in any
-    component is refused too, because the scan's record would sit at another spelling. *listings*
-    caches each directory's listing across the paths of one manifest.
+    component is refused too because this evaluator tree check does not follow links: a final link
+    is not accepted as a regular file, and a link in a directory component is not accepted as that
+    directory. This makes no claim about which spelling DeepSec would record. *listings* caches each
+    directory's listing across the paths of one manifest.
     """
     current = source_dir
     parts = path.split("/")
@@ -2942,7 +2958,7 @@ def process_manifest_tree_issue(source_dir: Path, path: str,
         if entry is None:
             return "the input tree holds no entry spelled exactly so"
         if entry.is_symlink():
-            return "a component of it is a symbolic link"
+            return "a component of it is a symbolic link, which the evaluator tree check does not follow"
         if index == len(parts) - 1:
             return None if entry.is_file(follow_symlinks=False) else "it is not a regular file"
         if not entry.is_dir(follow_symlinks=False):
@@ -2960,12 +2976,17 @@ class CuratedScope(NamedTuple):
     ``Set.has(record.filePath)`` would hold. ``unselected`` are the regex candidates assigned no AI
     batch, still as the scan left them, by record path; ``external`` counts those whose record name
     is not a path inside the tree. Every unlisted record is in exactly one of those and
-    ``unexpected``. ``listed_without_record`` are listed paths DeepSec's scan made no record for (no
-    matcher hit, its ignore filter, an empty file): no AI batch could run on them, which is native
-    triage, not a model's miss. ``unexpected`` are unselected records that are not in the state a
+    ``unexpected``. ``listed_without_record`` are listed paths for which no readable FileRecord has
+    an exactly matching ``filePath`` spelling. A nonzero population has only a bounded explanation:
+    no matcher hit, the ignore filter, native discovery not enumerating the path (dot-leading paths
+    such as ``.storybook/main.js`` are a known example), a FileRecord under another spelling, or a
+    matching record that could not be read. The last case is import loss, not evidence of native
+    triage. ``unexpected`` are unselected records that are not in the state a
     fresh scan leaves (``pending``, no analysis, no finding), and ``out_of_scope_claims`` imported
-    claims on a path the manifest does not list; either says verdicts were written outside the
-    declared batch assignment. None of this says which files the agent read: selection assigns
+    claims on a path the manifest does not list. Either means the recorded state or claims do not
+    conform to the declared batch assignment; an analyzed record with no finding is included, so
+    this does not imply that every unexpected record contains a verdict. None of this says which
+    files the agent read: selection assigns
     batches and does not restrict repository access, so an unselected file may still have been read.
     """
 
@@ -3120,8 +3141,9 @@ class DeepsecAdapter(Adapter):
             for listed_path in process_manifest:
                 issue = process_manifest_tree_issue(Path(source_dir), listed_path, listings)
                 if issue is not None:
-                    raise AdapterError(f"deepsec config.process_manifest_by_tree lists {listed_path!r} for input tree "
-                                       f"{tree_hash}, but {issue}; the map does not describe this tree"[:500])
+                    raise AdapterError(
+                        (f"deepsec config.process_manifest_by_tree cannot use a listed path: {issue}; "
+                         f"path {listed_path!r}, input tree {tree_hash}; the map does not describe this tree")[:500])
         # Read before DeepSec starts: its agent can run a shell in this workspace, ``.git`` included.
         changes = workspace_changes(Path(source_dir), pr) if pr is not None else ()
         project = project_id_for(request, config.project_id)
@@ -3520,14 +3542,42 @@ class DeepsecAdapter(Adapter):
         ] + notes + list(imported.notes) + finding_import_notes
         if scope is not None:
             left_out = len(scope.unselected) + scope.external
-            # A listed path's missing record is DeepSec's triage only when its scan ran to the end; a
-            # scan that failed or was killed leaves a record list that says nothing about any path.
+            # A completed scan permits only the bounded account below; an unreadable matching record
+            # remains import loss. A scan that failed or was killed says nothing about any path.
             scan_result = results.get("scan")
             scan_unfinished = ("never ran" if scan_result is None
                                else "ran out of the shared time budget" if scan_result.timed_out
                                else f"exited {scan_result.exit_code}" if scan_result.exit_code != 0
                                else None)
+            missing_count = len(scope.listed_without_record)
+            missing_subject = f"{missing_count} listed {'path' if missing_count == 1 else 'paths'}"
+            listed_spelling = "spelling" if missing_count == 1 else "spellings"
+            missing_account = (
+                f"{missing_subject} {'lacks' if missing_count == 1 else 'lack'} a readable FileRecord under the "
+                f"exact listed filePath {listed_spelling}"
+                + (f" ({_listed(scope.listed_without_record)})" if scope.listed_without_record else ""))
             if scan_unfinished is None:
+                if scope.listed_without_record:
+                    listed_object = "path" if missing_count == 1 else "paths"
+                    corresponding = "file" if missing_count == 1 else "files"
+                    missing_account += (
+                        f". For readable records, this can mean no matcher hit, an ignore-filter skip, native "
+                        f"discovery did not enumerate the {listed_object} (dot-leading .storybook/main.js is a "
+                        f"known example), or DeepSec recorded the corresponding {corresponding} under another "
+                        "spelling. These readable-record possibilities mean this exact manifest assigned no AI "
+                        f"batch for the listed {listed_spelling}, and none is a model miss."
+                    )
+                    if records.failures:
+                        failure_count = len(records.failures)
+                        missing_account += (
+                            f" The run also has {failure_count} unreadable DeepSec data "
+                            f"{'record' if failure_count == 1 else 'records'}; that count alone does not say "
+                            "whether any is the matching FileRecord. If one is, the absence is import loss and "
+                            "batch assignment cannot be inferred."
+                        )
+                else:
+                    missing_account += "."
+                missing_account += " "
                 scope_account = (
                     f"Its regex scan left {len(records.files)} file record(s); {len(scope.selected)} are on a listed "
                     "path, which are the only ones standard-mode process could assign to an AI batch, and "
@@ -3538,20 +3588,16 @@ class DeepsecAdapter(Adapter):
                     "their paths as omitted. Batch assignment does not restrict repository access: the agent still "
                     "sees the whole repository and may have read unlisted files, so an omitted path is a candidate "
                     "with no assigned verdict, not evidence that it was never read. "
-                    f"{len(scope.listed_without_record)} listed path(s) got no file record"
-                    + (f" ({_listed(scope.listed_without_record)})" if scope.listed_without_record else "")
-                    + ": DeepSec's scan found no regex candidate there or its ignore filter skipped them, so no AI "
-                    "batch ran on them; that is native triage, not a model's miss"
-                    + (f", unless the record is one of the {len(records.failures)} DeepSec record(s) this run could "
-                       "not read" if records.failures else "")
-                    + ". ")
+                    + missing_account)
             else:
+                if scope.listed_without_record:
+                    missing_account += "; the cause cannot be inferred because the scan did not complete"
+                missing_account += ". "
                 scope_account = (
-                    f"Its regex scan {scan_unfinished} before it finished, so no AI batch was assigned and the "
-                    f"{len(records.files)} file record(s) it left are not a full list of its candidates. "
-                    f"{len(scope.listed_without_record)} listed path(s) have no file record"
-                    + (f" ({_listed(scope.listed_without_record)})" if scope.listed_without_record else "")
-                    + ", which says nothing about DeepSec's triage of them, since no scan completed. ")
+                    f"Its regex scan {scan_unfinished} before process could run; process never ran, so no AI batch "
+                    f"was assigned. The {len(records.files)} file record(s) it left are not a full list of its "
+                    "candidates. "
+                    + missing_account)
             notes.append(
                 f"Curated diagnostic, not a blind full-repository benchmark: config.process_manifest_by_tree chose "
                 f"{len(scope.manifest)} repository-relative path(s) for input tree {tree_hash} before the run. The "
@@ -3566,8 +3612,9 @@ class DeepsecAdapter(Adapter):
                     "fresh scan leaves (status 'pending', no analysis, no finding)"
                     + (f" ({_listed(scope.unexpected)})" if scope.unexpected else "")
                     + f", and {scope.out_of_scope_claims} imported claim(s) are on a path the manifest does not "
-                    "list. All of them are kept in this run's records and claims, but they say DeepSec wrote "
-                    "verdicts outside the declared AI-batch assignment.")
+                    "list. All of them are kept in this run's records and claims. They show record-state changes "
+                    "or claims outside the declared AI-batch assignment; that includes findingless analyzed records "
+                    "and does not mean every unexpected record contains a verdict.")
             if manifest_changed:
                 notes.append(f"Process manifest integrity: {manifest_changed}.")
         exit_one_note = None
@@ -3822,8 +3869,9 @@ class DeepsecAdapter(Adapter):
                            "be read: "
                            + "; ".join(f"{name}: {reason}" for name, reason in statuses.invalid[:5]))
         if scope is not None and (scope.unexpected or scope.out_of_scope_claims or manifest_changed):
-            # The run cannot show its verdicts kept to the declared batch assignment, which is a stronger
-            # failure than a scope left incomplete. Every record and claim stays; only the status says so.
+            # The run's unlisted record state or claims do not conform to the declared batch assignment,
+            # which is a stronger failure than a scope left incomplete. Every record and claim stays;
+            # only the status says so.
             return stopped("process_manifest_not_honored",
                            f"config.process_manifest_by_tree declared {len(scope.manifest)} path(s) for DeepSec's AI "
                            f"batches, but {len(scope.unexpected)} unlisted file record(s) carry analysis, findings or "

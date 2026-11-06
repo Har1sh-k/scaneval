@@ -2344,6 +2344,11 @@ def test_three_profiles_share_a_run_but_keep_separate_maps_pairs_and_views(tmp_p
                           "identity_reduced": blinding.map_identity(reduced)}
 
 
+BLINDING_REMEDIATION = (
+    "; change evaluator-controlled identifiers or configuration values when possible. Blinding never renames "
+    "source paths, so scanner-facing configuration that must name such a path requires a standard input")
+
+
 LEAKS = {
     "run-id": {"run_id": "widget-nightly"},
     "system-id": {"systems": [{"system_id": "widget-scanner", "adapter": "fake", "config": {}}]},
@@ -2365,9 +2370,12 @@ def test_a_run_that_would_carry_an_original_token_to_a_blinded_scan_is_refused(t
     write_config(tmp_path / "run.json", [{"snapshot_id": "snap-a"}, BLINDED], **LEAKS[name])
     out = tmp_path / "out"
 
-    with pytest.raises(ContractError, match="an original identity token of blinding map widget-metadata"):
+    with pytest.raises(ContractError) as exc:
         run_from_config(tmp_path / "run.json", out, clock=CLOCK, adapters={"fake": adapter})
 
+    message = str(exc.value)
+    assert "an original identity token of blinding map widget-metadata" in message
+    assert message.endswith(BLINDING_REMEDIATION)
     assert not out.exists() and adapter.calls == 0
 
 
@@ -2413,11 +2421,14 @@ def test_a_path_naming_an_original_token_reaches_the_scan_so_the_run_is_refused(
     config = blinded_config(tmp_path, widget, directory=changes.pop("directory", "config"), **changes)
     adapter, out = FakeAdapter(), tmp_path / "out"
 
-    with pytest.raises(ContractError, match=rf"{label} \S+ names '{token}', an original identity token of "
-                                            "blinding map widget-metadata, which would reach the scan of blinded "
-                                            "input snap-a.blinded"):
+    with pytest.raises(ContractError) as exc:
         run_from_config(config, out, clock=CLOCK, workspace_root=workspace_root, adapters={"fake": adapter})
 
+    message = str(exc.value)
+    assert label in message
+    assert (f"names '{token}', an original identity token of blinding map widget-metadata, which would reach the "
+            "scan of blinded input snap-a.blinded") in message
+    assert message.endswith(BLINDING_REMEDIATION)
     assert not out.exists() and adapter.calls == 0
 
 
