@@ -3,6 +3,7 @@
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
+import os
 
 import pytest
 
@@ -10,6 +11,7 @@ from scaneval import blinding, cases, experiment, isolation
 from scaneval import experiment_execution as execution
 from scaneval.adapters import get_adapter
 from scaneval.contracts import ContractError, canonical_json, canonical_sha256, pack_anchor_digest
+from scaneval.cli import main
 from scaneval.adapters.base import AdapterError, SystemSpec
 from scaneval.execution import PreparedInput, run_invocation
 from scaneval.materialize import hash_exported_tree
@@ -93,6 +95,184 @@ def test_runtime_adapter_drift_refuses_before_any_output_or_scan(tmp_path, monke
     with pytest.raises(ContractError, match="adapter version changed"):
         execution.execute(tmp_path / "frozen.json", output)
     assert not output.exists()
+
+
+@pytest.mark.parametrize("leaf", ["file", "directory", "valid_symlink", "dangling_symlink", "fifo"])
+def test_every_existing_matrix_output_leaf_is_refused_before_staging_or_runner_work(
+        tmp_path, monkeypatch, leaf):
+    if leaf == "fifo" and not hasattr(os, "mkfifo"):
+        pytest.skip("no named pipes on this platform")
+    matrix = frozen_shell()
+    staged_executor(monkeypatch, matrix)
+    output = tmp_path / "occupied"
+    target = tmp_path / "leaf-target"
+    if leaf == "file":
+        output.write_text("keep\n", encoding="utf-8")
+    elif leaf == "directory":
+        output.mkdir()
+    elif leaf == "valid_symlink":
+        target.mkdir()
+        output.symlink_to(target, target_is_directory=True)
+    elif leaf == "dangling_symlink":
+        output.symlink_to(target, target_is_directory=True)
+    else:
+        os.mkfifo(output)
+
+    adapter_work = []
+    actual = get_adapter("semgrep")
+
+    class UntouchedAdapter:
+        @property
+        def name(self):
+            adapter_work.append("name")
+            return actual.name
+
+        @property
+        def adapter_version(self):
+            adapter_work.append("version")
+            return actual.adapter_version
+
+    runner_calls = []
+    monkeypatch.setattr(execution.runner, "run_from_config", lambda *_args, **_kwargs: runner_calls.append(True))
+    with pytest.raises(FileExistsError) as refused:
+        execution.execute(tmp_path / "frozen.json", output, adapters={"semgrep": UntouchedAdapter()})
+
+    assert str(refused.value) == f"matrix output directory already exists: {output}"
+    assert adapter_work == runner_calls == []
+    if leaf == "file":
+        assert output.read_text(encoding="utf-8") == "keep\n"
+    elif leaf == "directory":
+        assert list(output.iterdir()) == []
+    elif leaf == "valid_symlink":
+        assert output.is_symlink() and list(target.iterdir()) == []
+    elif leaf == "dangling_symlink":
+        assert output.is_symlink() and not target.exists()
+    else:
+        assert output.is_fifo()
+
+
+def test_a_raced_dangling_matrix_output_symlink_loses_to_exclusive_mkdir(tmp_path, monkeypatch):
+    matrix = frozen_shell()
+    staged_executor(monkeypatch, matrix)
+    output = tmp_path / "raced-output"
+    target = tmp_path / "must-not-be-created"
+    real_mkdir = type(output).mkdir
+    raced = False
+
+    def introduce_link(self, mode=0o777, parents=False, exist_ok=False):
+        nonlocal raced
+        if self == output and not raced:
+            assert parents is True and exist_ok is False
+            raced = True
+            self.symlink_to(target, target_is_directory=True)
+        return real_mkdir(self, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    runner_calls = []
+    monkeypatch.setattr(type(output), "mkdir", introduce_link)
+    monkeypatch.setattr(execution.runner, "run_from_config", lambda *_args, **_kwargs: runner_calls.append(True))
+    with pytest.raises(FileExistsError):
+        execution.execute(tmp_path / "frozen.json", output)
+
+    assert raced and output.is_symlink() and not target.exists()
+    assert runner_calls == []
+
+
+def test_matrix_output_ending_in_dot_dot_is_refused_without_creating_its_absent_parent(tmp_path, monkeypatch):
+    matrix = frozen_shell()
+    staged_executor(monkeypatch, matrix)
+    absent = tmp_path / "must-not-be-created"
+    runner_calls = []
+    monkeypatch.setattr(execution.runner, "run_from_config", lambda *_args, **_kwargs: runner_calls.append(True))
+
+    with pytest.raises(FileExistsError) as refused:
+        execution.execute(tmp_path / "frozen.json", absent / "..")
+
+    assert str(refused.value) == f"matrix output directory already exists: {tmp_path}"
+    assert not absent.exists() and runner_calls == []
+
+
+def test_a_matrix_output_beneath_a_symlinked_parent_executes_at_the_resolved_parent(tmp_path, monkeypatch):
+    matrix = frozen_shell()
+    staged_executor(monkeypatch, matrix)
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    requested = linked_parent / "matrix-run"
+    calls = []
+
+    def runner(config_path, out_dir, **_kwargs):
+        calls.append((config_path, out_dir))
+        return {"status": "completed"}
+
+    monkeypatch.setattr(execution.runner, "run_from_config", runner)
+    manifest = execution.execute(tmp_path / "frozen.json", requested)
+
+    actual = real_parent / "matrix-run"
+    assert requested.resolve() == actual and (actual / "matrix.json").is_file()
+    assert (actual / execution.EXECUTION_FILE).is_file()
+    assert [path.parent.name for path, _out in calls] == matrix["cell_order"]
+    assert all(config.is_relative_to(actual) and out.is_relative_to(actual) for config, out in calls)
+    assert manifest["status"] == "incomplete"
+
+
+def test_matrix_output_beneath_a_symlinked_parent_still_refuses_a_trial_boundary(
+        tmp_path, monkeypatch):
+    matrix = frozen_shell()
+    staged_executor(monkeypatch, matrix)
+    trial = tmp_path / "trial"
+    source = trial / "source"
+    source.mkdir(parents=True)
+    provenance = trial / "provenance.json"
+    provenance_bytes = b'{"trial":"materialized"}\n'
+    provenance.write_bytes(provenance_bytes)
+    alias = tmp_path / "source-alias"
+    alias.symlink_to(source, target_is_directory=True)
+    requested = alias / "matrix-run"
+    physical = source / "matrix-run"
+
+    adapter_accesses = []
+
+    class UntouchedAdapter:
+        @property
+        def name(self):
+            adapter_accesses.append("name")
+            return matrix["systems"][0]["adapter_identity"]["name"]
+
+        @property
+        def adapter_version(self):
+            adapter_accesses.append("version")
+            return matrix["systems"][0]["adapter_identity"]["version"]
+
+    runner_calls = []
+    monkeypatch.setattr(execution.runner, "run_from_config",
+                        lambda *_args, **_kwargs: runner_calls.append(True))
+
+    with pytest.raises(ContractError, match=r"refusing to write .* inside the trial directory") as refused:
+        execution.execute(tmp_path / "frozen.json", requested,
+                          adapters={"semgrep": UntouchedAdapter()})
+
+    assert str(physical) in str(refused.value) and str(trial) in str(refused.value)
+    assert not physical.exists() and not requested.exists()
+    assert provenance.read_bytes() == provenance_bytes and list(source.iterdir()) == []
+    assert alias.is_symlink() and alias.resolve() == source
+    assert adapter_accesses == runner_calls == []
+
+
+def test_matrix_cli_reports_an_existing_output_as_an_exit_2_diagnostic(tmp_path, monkeypatch, capsys):
+    matrix = frozen_shell()
+    staged_executor(monkeypatch, matrix)
+    output = tmp_path / "occupied"
+    output.mkdir()
+    runner_calls = []
+    monkeypatch.setattr(execution.runner, "run_from_config", lambda *_args, **_kwargs: runner_calls.append(True))
+
+    code = main(["matrix", "run", str(tmp_path / "frozen.json"), "--output", str(output), "--quiet"])
+    captured = capsys.readouterr()
+
+    assert code == 2 and captured.out == ""
+    assert captured.err == f"scaneval: matrix output directory already exists: {output}\n"
+    assert "Traceback" not in captured.err and runner_calls == []
 
 
 def test_result_binding_rejects_relabeling_and_changed_result_bytes(tmp_path):
