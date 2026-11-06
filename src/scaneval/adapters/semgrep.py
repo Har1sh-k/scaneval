@@ -965,6 +965,10 @@ class SemgrepAdapter(Adapter):
             claims, notes = imported.claims, imported.notes
             fatal, malformed_errors = _error_entries(payload)
             scanned, scanned_reported = _path_list(payload, "scanned")
+            # Status and messages describe paths Semgrep can actually have scanned, not the
+            # raw array's truthiness or length. Keep scanned_reported separate so an absent
+            # list remains distinct from one whose entries are all unusable.
+            scanned = sorted(_scanned_paths(scanned))
             skipped, _ = _path_list(payload, "skipped")
             reported_version = str(payload.get("version", ""))
         except (AdapterError, OSError, AttributeError, TypeError, LookupError, ValueError,

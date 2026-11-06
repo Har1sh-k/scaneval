@@ -73,12 +73,19 @@ def test_ignored_control_cannot_earn_quiet_credit_even_when_skips_are_suppressed
     assert control_metrics(outcome, "app.py")["resolved"] == 1
 
 
-@pytest.mark.parametrize("paths", [None, {}, {"scanned": None}, {"scanned": [7, {}, "../app.py"]}])
-def test_unknown_or_unusable_coverage_preserves_uncertainty(tmp_path, paths):
+@pytest.mark.parametrize("paths", [None, {}, {"scanned": None}],
+                         ids=["missing-paths", "missing-scanned", "null-scanned"])
+def test_missing_or_unknown_scanned_list_preserves_coverage_uncertainty(tmp_path, paths):
     outcome = run_scan(tmp_path, paths)
     assert outcome.omitted_paths == ["app.py", "control.py"]
     assert outcome.examined_nothing is True
     assert control_metrics(outcome, "app.py")["resolved"] == 0
+
+
+def test_reported_but_all_unusable_scanned_list_is_nothing_scanned(tmp_path):
+    outcome = run_scan(tmp_path, {"scanned": [7, {}, "../app.py"]})
+    assert outcome.status == "error" and outcome.error["code"] == "nothing_scanned"
+    assert outcome.omitted_paths is None and outcome.examined_nothing is None
 
 
 def test_full_coverage_control_retains_quiet_credit(tmp_path):

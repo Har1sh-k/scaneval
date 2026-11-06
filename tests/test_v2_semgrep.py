@@ -916,6 +916,67 @@ def test_semgrep_zero_exit_with_an_explicit_empty_scanned_list_is_nothing_scanne
     assert "ignore rules" in outcome.error["message"]
 
 
+def test_semgrep_zero_exit_with_only_unusable_scanned_entries_is_nothing_scanned(tmp_path):
+    native_scanned = [7, {}, "../app.py"]
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": native_scanned},
+                          "errors": []})
+
+    outcome, raw = scan_with_fake(tmp_path, payload, 0)
+
+    assert outcome.status == "error" and outcome.exit_code == 0 and outcome.claims == []
+    assert outcome.error["code"] == "nothing_scanned"
+    assert "scanned no files" in outcome.error["message"]
+    assert (raw / "semgrep.json").read_text(encoding="utf-8") == payload, \
+        "classifying usable paths must not rewrite the native payload"
+
+
+def test_semgrep_nonzero_exit_with_only_unusable_scanned_entries_is_error_not_partial(tmp_path):
+    payload = json.dumps({"version": "9.9.9", "results": [],
+                          "paths": {"scanned": [7, {}, "../app.py"]}, "errors": []})
+
+    outcome, _ = scan_with_fake(tmp_path, payload, 1)
+
+    assert outcome.status == "error" and outcome.exit_code == 1 and outcome.claims == []
+    assert outcome.error["code"] == "exit_1"
+    assert "no scanned paths and no results" in outcome.error["message"]
+
+
+def test_semgrep_fatal_diagnostic_with_only_unusable_scanned_entries_is_scan_error(tmp_path):
+    payload = json.dumps({"version": "9.9.9", "results": [],
+                          "paths": {"scanned": [7, {}, "../app.py"]},
+                          "errors": [{"level": "error", "message": "rule failed"}]})
+
+    outcome, _ = scan_with_fake(tmp_path, payload, 0)
+
+    assert outcome.status == "error" and outcome.exit_code == 0 and outcome.claims == []
+    assert outcome.error["code"] == "scan_errors"
+    assert "no scanned paths and no results" in outcome.error["message"]
+
+
+def test_semgrep_nonzero_exit_counts_unique_usable_normalized_scanned_paths(tmp_path):
+    payload = json.dumps({"version": "9.9.9", "results": [],
+                          "paths": {"scanned": [7, {}, "../app.py", "./app.py", "app.py"]},
+                          "errors": []})
+
+    outcome, _ = scan_with_fake(tmp_path, payload, 1)
+
+    assert outcome.status == "partial" and outcome.error["code"] == "exit_1"
+    assert "after scanning 1 paths" in outcome.error["message"]
+    assert outcome.omitted_paths == [] and outcome.examined_nothing is False
+
+
+def test_semgrep_fatal_diagnostic_counts_unique_usable_normalized_scanned_paths(tmp_path):
+    payload = json.dumps({"version": "9.9.9", "results": [],
+                          "paths": {"scanned": [7, {}, "../app.py", "./app.py", "app.py"]},
+                          "errors": [{"level": "error", "message": "rule failed"}]})
+
+    outcome, _ = scan_with_fake(tmp_path, payload, 0)
+
+    assert outcome.status == "partial" and outcome.error["code"] == "scan_errors"
+    assert "after scanning 1 paths with 1 error-level diagnostics" in outcome.error["message"]
+    assert outcome.omitted_paths == [] and outcome.examined_nothing is False
+
+
 def test_semgrep_zero_exit_without_a_paths_key_stays_success_with_a_note(tmp_path):
     payload = json.dumps({"version": "9.9.9", "results": [], "errors": []})
     outcome, _ = scan_with_fake(tmp_path, payload, 0)
