@@ -940,7 +940,8 @@ def _packet_id(findings: list[dict[str, Any]], grouping: str, canonical: str) ->
                                                 _normalize(item["filePath"]), _normalize(item.get("sourceSymbol")),
                                                 _normalize(item.get("sinkSymbol")), _normalize(item.get("patternSignature"))))
                                  for item in findings))
-        identity = f"{grouping}\0{canonical_finding['rootCauseKey']}\0{'\n'.join(anchors)}"
+        joined_anchors = "\n".join(anchors)
+        identity = f"{grouping}\0{canonical_finding['rootCauseKey']}\0{joined_anchors}"
     else:
         return None
     return "RCP-" + _sha(identity)[:24]
