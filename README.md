@@ -105,7 +105,7 @@ python -m pytest -q
 npm test --prefix sdk/typescript
 ```
 
-Tests use local fixtures and mock model runners. They do not launch paid model evaluations. CI checks Python 3.11 and 3.13, the TypeScript SDK, and demo/replay from an installed wheel.
+Tests use local fixtures and mock model runners. They do not launch paid model evaluations. CI checks Python 3.11, 3.13, and 3.14, the TypeScript SDK, and demo/replay from an installed wheel.
 
 | Path | Contents |
 |---|---|

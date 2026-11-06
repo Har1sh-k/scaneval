@@ -1096,12 +1096,51 @@ def test_a_json_edit_that_would_change_the_structure_or_cannot_be_verified_is_re
     assert reason in refusal(tmp_path, "display.json", content, pseudonyms)
 
 
-def test_a_json_file_nested_too_deeply_to_read_is_refused_and_does_not_crash(tmp_path):
+def test_a_json_original_parser_recursion_uses_the_stable_too_deep_refusal(tmp_path, monkeypatch):
+    def recursive_parse(_text):
+        raise RecursionError("interpreter-specific original parser wording")
+
+    monkeypatch.setitem(blinding._PARSERS, "json", ("JSON", "strict JSON", recursive_parse))
+
+    assert refusal(tmp_path, "display.json", '{"title": "Widget"}\n') == (
+        " is nested too deeply for its structure to be compared")
+
+
+def test_a_json_rewrite_recursion_uses_the_stable_too_deep_refusal(tmp_path, monkeypatch):
+    def recursive_rewrite(value, _rewrite, _where, _path=()):
+        assert isinstance(value, blinding._Pairs), "the original parser succeeded before rewriting"
+        raise RecursionError("comparison recursion wording")
+
+    monkeypatch.setattr(blinding, "_rewritten", recursive_rewrite)
+
+    assert refusal(tmp_path, "display.json", '{"title": "Widget"}\n') == (
+        " is nested too deeply for its structure to be compared")
+
+
+def test_a_json_transformed_parser_recursion_uses_the_stable_too_deep_refusal(tmp_path, monkeypatch):
+    parse = blinding._PARSERS["json"][2]
+    calls = 0
+
+    def recursive_second_parse(text):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RecursionError("interpreter-specific transformed parser wording")
+        return parse(text)
+
+    monkeypatch.setitem(blinding._PARSERS, "json", ("JSON", "strict JSON", recursive_second_parse))
+
+    assert refusal(tmp_path, "display.json", '{"title": "Widget"}\n') == (
+        " is nested too deeply for its structure to be compared")
+    assert calls == 2, "the original parse succeeded before the transformed parser recursed"
+
+
+def test_a_json_file_nested_too_deeply_is_refused_with_a_stable_reason_and_does_not_crash(tmp_path):
     content = "[" * 100_000 + '"Widget"' + "]" * 100_000
 
     reason = refusal(tmp_path, "display.json", content)
 
-    assert " is not strict JSON, so an edit of it cannot be verified to keep its structure (nested too deeply" in reason
+    assert reason == " is nested too deeply for its structure to be compared"
 
 
 TOML_ACCEPTED = {

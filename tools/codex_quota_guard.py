@@ -498,42 +498,47 @@ class Containers:
 
     def control(self, args: list[str], deadline: float) -> tuple[int | None, bytes, bytes]:
         """Bound Docker control output/time; never persist raw diagnostic text."""
+        failed = (None, b"", b"")
+        result = failed
         owned = None
         output = [bytearray(), bytearray()]
         deadline = min(deadline, time.monotonic() + 5)
+        aborted = False
         try:
-            if time.monotonic() >= deadline:
-                return None, b"", b""
-            owned = OwnedProcess([self.docker, *args], stdin=subprocess.DEVNULL,
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
-            with selectors.DefaultSelector() as selector:
-                for index, stream in enumerate((owned.process.stdout, owned.process.stderr)):
-                    os.set_blocking(stream.fileno(), False)
-                    selector.register(stream, selectors.EVENT_READ, index)
-                while selector.get_map() or owned.exit_code() is None:
-                    if time.monotonic() >= deadline:
-                        return None, b"", b""
-                    if not selector.get_map():
-                        time.sleep(min(.05, max(0, deadline - time.monotonic())))
-                        continue
-                    for key, _ in selector.select(min(.05, max(0, deadline - time.monotonic()))):
-                        try:
-                            chunk = os.read(key.fd, 8192)
-                        except BlockingIOError:
+            if time.monotonic() < deadline:
+                owned = OwnedProcess([self.docker, *args], stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+                with selectors.DefaultSelector() as selector:
+                    for index, stream in enumerate((owned.process.stdout, owned.process.stderr)):
+                        os.set_blocking(stream.fileno(), False)
+                        selector.register(stream, selectors.EVENT_READ, index)
+                    while not aborted and (selector.get_map() or owned.exit_code() is None):
+                        if time.monotonic() >= deadline:
+                            aborted = True
+                            break
+                        if not selector.get_map():
+                            time.sleep(min(.05, max(0, deadline - time.monotonic())))
                             continue
-                        if not chunk:
-                            selector.unregister(key.fileobj)
-                            continue
-                        output[key.data].extend(chunk)
-                        if sum(map(len, output)) > MAX_DOCKER_OUTPUT_BYTES:
-                            return None, b"", b""
-            return owned.exit_code(), bytes(output[0]), bytes(output[1])
+                        for key, _ in selector.select(min(.05, max(0, deadline - time.monotonic()))):
+                            try:
+                                chunk = os.read(key.fd, 8192)
+                            except BlockingIOError:
+                                continue
+                            if not chunk:
+                                selector.unregister(key.fileobj)
+                                continue
+                            output[key.data].extend(chunk)
+                            if sum(map(len, output)) > MAX_DOCKER_OUTPUT_BYTES:
+                                aborted = True
+                                break
+                if not aborted:
+                    result = owned.exit_code(), bytes(output[0]), bytes(output[1])
         except OSError:
-            return None, b"", b""
+            pass
         finally:
-            if owned is not None:
-                if not owned.stop(min(self.grace, .2)):
-                    return None, b"", b""
+            if owned is not None and not owned.stop(min(self.grace, .2)):
+                result = failed
+        return result
 
     def inspection_states(self, code: int | None, out: bytes, err: bytes) -> dict[str, str]:
         """Account for every exact ID once across a single batch's two output streams."""

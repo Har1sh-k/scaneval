@@ -415,6 +415,26 @@ def test_docker_cleanup_failure_is_reported(tmp_path):
     assert containers.stop() == (1, 1)
 
 
+def test_control_cleanup_failure_overrides_an_otherwise_successful_result(monkeypatch):
+    observed = {}
+    original_stop = guard.OwnedProcess.stop
+
+    def fail_cleanup(owned, grace):
+        observed["exit_code"] = owned.exit_code()
+        observed["unreaped"] = owned.process.returncode is None
+        observed["grace"] = grace
+        observed["native_cleanup"] = original_stop(owned, grace)
+        return False
+
+    monkeypatch.setattr(guard.OwnedProcess, "stop", fail_cleanup)
+    containers = guard.Containers([], [], sys.executable, 1)
+    result = containers.control(["-c", "import sys; sys.stdout.write('ok'); sys.stderr.write('note')"],
+                                time.monotonic() + 5)
+
+    assert observed == {"exit_code": 0, "unreaped": True, "grace": .2, "native_cleanup": True}
+    assert result == (None, b"", b""), "failed owned-process cleanup must override successful output"
+
+
 def test_docker_cleanup_timeout_is_bounded(tmp_path):
     docker = tmp_path / "docker"
     marker = tmp_path / "docker-pid"
