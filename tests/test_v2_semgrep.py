@@ -15,6 +15,7 @@ import sys
 
 import pytest
 
+from scaneval import materialize as materialize_module
 from scaneval.adapters import base as base_module
 from scaneval.adapters import semgrep as semgrep_module
 from scaneval.adapters.base import AdapterError, CommandResult, SystemSpec
@@ -664,6 +665,29 @@ def test_semgrep_prepare_wraps_an_unreachable_ruleset_url_in_an_adapter_error(tm
     with pytest.raises(AdapterError, match="ruleset could not be materialized") as raised:
         SemgrepAdapter().prepare(spec, tmp_path / "cache")
     assert "git fetch" in str(raised.value)
+
+
+def test_semgrep_prepare_wraps_undecodable_git_output_with_materialization_context(tmp_path, monkeypatch):
+    rules, commit = pinned_rules_repo(tmp_path)
+    spec = SystemSpec("s", "semgrep", {"ruleset": {"url": str(rules), "commit": commit, "paths": ["python"]}})
+    decoder = UnicodeDecodeError("utf-8", b"fatal: \xff", 7, 8, "invalid start byte")
+    real_run = subprocess.run
+
+    def fail_fetch(argv, *args, **kwargs):
+        if "fetch" in argv:
+            raise decoder
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(materialize_module.subprocess, "run", fail_fetch)
+    with pytest.raises(AdapterError, match="ruleset could not be materialized") as raised:
+        SemgrepAdapter().prepare(spec, tmp_path / "cache")
+
+    message = str(raised.value)
+    assert "git fetch" in message and "not valid UTF-8" in message
+    materialization = raised.value.__cause__
+    assert isinstance(materialization, materialize_module.MaterializationError)
+    assert materialization.__cause__ is decoder
+    assert not list((tmp_path / "cache").glob("*.partial-*"))
 
 
 def test_semgrep_prepare_wraps_a_modified_cache_entry_in_an_adapter_error(tmp_path):

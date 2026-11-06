@@ -170,6 +170,82 @@ def test_no_output_in_runs_trials_existing_directories_or_symlink_aliases(tmp_pa
     assert not (run / "view").exists()
 
 
+@pytest.mark.parametrize("leaf", ["file", "directory", "valid_symlink", "dangling_symlink"])
+def test_investigation_refuses_every_existing_output_leaf_without_following_it(tmp_path, upstream, leaf):
+    run = make_run(tmp_path, upstream)
+    before = fingerprints(run)
+    output = tmp_path / "occupied"
+    target = tmp_path / "leaf-target"
+    if leaf == "file":
+        output.write_text("keep\n", encoding="utf-8")
+    elif leaf == "directory":
+        output.mkdir()
+    elif leaf == "valid_symlink":
+        target.mkdir()
+        output.symlink_to(target, target_is_directory=True)
+    else:
+        output.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(InvestigationError, match="new directory"):
+        export_investigation(run, output)
+
+    assert fingerprints(run) == before
+    if leaf == "file":
+        assert output.read_text(encoding="utf-8") == "keep\n"
+    elif leaf == "directory":
+        assert list(output.iterdir()) == []
+    elif leaf == "valid_symlink":
+        assert output.is_symlink() and list(target.iterdir()) == []
+    else:
+        assert output.is_symlink() and not target.exists()
+
+
+def test_investigation_output_ending_in_dot_dot_does_not_create_its_absent_parent(tmp_path, upstream):
+    run = make_run(tmp_path, upstream)
+    absent = tmp_path / "must-not-be-created"
+
+    with pytest.raises(InvestigationError, match="new directory"):
+        export_investigation(run, absent / "..")
+
+    assert not absent.exists()
+
+
+def test_investigation_output_under_a_symlinked_parent_succeeds(tmp_path, upstream):
+    run = make_run(tmp_path, upstream)
+    real = tmp_path / "real"
+    real.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+
+    document = export_investigation(run, alias / "view")
+
+    assert document["run"]["data"]["run_id"] == "run-pilot"
+    assert (real / "view" / "investigation.json").is_file()
+    assert (real / "view" / "index.html").is_file()
+
+
+def test_investigation_raced_dangling_symlink_is_an_investigation_error(tmp_path, upstream, monkeypatch):
+    run = make_run(tmp_path, upstream)
+    output = tmp_path / "raced-output"
+    target = tmp_path / "must-not-be-created"
+    real_mkdir = Path.mkdir
+    raced = False
+
+    def introduce_link(self, mode=0o777, parents=False, exist_ok=False):
+        nonlocal raced
+        if self == output and not raced:
+            raced = True
+            self.symlink_to(target, target_is_directory=True)
+        return real_mkdir(self, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", introduce_link)
+    with pytest.raises(InvestigationError, match="new directory") as raised:
+        export_investigation(run, output)
+
+    assert isinstance(raised.value.__cause__, FileExistsError)
+    assert raced and output.is_symlink() and not target.exists()
+
+
 def test_nested_symlinks_and_traversal_are_refused(tmp_path, upstream):
     run = make_run(tmp_path, upstream)
     bundle = next((run / "invocations").iterdir())

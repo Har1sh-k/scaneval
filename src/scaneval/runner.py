@@ -63,6 +63,8 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import errno
+import os
 from pathlib import Path
 import threading
 import tempfile
@@ -241,6 +243,14 @@ def _relative(path: Path, out_dir: Path) -> str:
 def _resolved(path: Path) -> Path:
     """The absolute, symlink-resolved form of *path*. Nothing needs to exist yet."""
     return Path(path).expanduser().resolve()
+
+
+def _resolved_new_leaf(path: Path) -> Path:
+    """Resolve a create-only path without following an ordinary final component."""
+    expanded = Path(path).expanduser()
+    if expanded.name in {"", ".", ".."}:
+        return expanded.resolve()
+    return expanded.parent.resolve() / expanded.name
 
 
 def _inside(child: Path, parent: Path) -> bool:
@@ -1007,12 +1017,13 @@ def run_from_config(
     manifest and the schedule. ``out_dir`` must not exist, and ``workspace_root`` must be outside
     it.
 
-    ``out_dir`` is resolved once before anything is written, so every recorded path is relative
-    to the same real directory. The schedule is built from the configuration and the pack as
-    supplied before the output directory exists, and written to ``evaluator/schedule.json`` before
-    the first input is fetched. The manifest's planning notes and per-input label states are
-    derived after every input has been checked and the pack has been frozen, which is what the
-    invocations then plan against.
+    ``out_dir``'s parent is resolved once before anything is written while its create-only leaf
+    is left unfollowed, so every recorded path is relative to the same real directory without
+    following an existing or raced output symlink. The schedule is built from the configuration
+    and the pack as supplied before the output directory exists, and written to
+    ``evaluator/schedule.json`` before the first input is fetched. The manifest's planning notes
+    and per-input label states are derived after every input has been checked and the pack has
+    been frozen, which is what the invocations then plan against.
 
     ``progress`` receives concise operator messages about preparation, invocation state, and
     output paths. Long invocations receive a heartbeat every ``progress_interval_seconds``.
@@ -1060,9 +1071,12 @@ def run_from_config(
     directory under ``workspace_root``, which must therefore be one the Docker daemon can see.
     """
     config_path = Path(config_path)
-    # Resolved once, here: every path recorded, compared, or handed on below is built from this
-    # one, so a run under a symlinked prefix (/tmp on macOS) stays consistent end to end.
-    out_dir = _resolved(out_dir)
+    # Resolve the parent once, but never follow the create-only leaf. This keeps a run under a
+    # symlinked prefix (/tmp on macOS) consistent while making every existing leaf, including a
+    # dangling symlink, an ordinary create-only collision rather than a target to follow.
+    out_dir = _resolved_new_leaf(out_dir)
+    if os.path.lexists(out_dir):
+        raise FileExistsError(errno.EEXIST, "File exists", str(out_dir))
     config = load_document(config_path, "run-config")
     repetitions = int(config["repetitions"])
     base = config_path.resolve().parent

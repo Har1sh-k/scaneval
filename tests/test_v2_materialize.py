@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import unicodedata
 
 import pytest
 
@@ -99,6 +100,36 @@ def test_fetch_pins_exact_commit_and_second_fetch_verifies_cache(tmp_path, upstr
     again = fetch_snapshot(str(repo), first, cache)
     assert again.fetch_method == "cached"
     assert again.git_tree == snapshot.git_tree
+
+
+def test_a_warm_cache_read_does_not_rewrite_its_precompose_setting(tmp_path, upstream):
+    repo, first = upstream
+    cache = tmp_path / "cache"
+    snapshot = fetch_snapshot(str(repo), first, cache)
+    git("config", "--local", "core.precomposeunicode", "true", cwd=snapshot.path)
+
+    again = fetch_snapshot(str(repo), first, cache)
+
+    assert again.fetch_method == "cached"
+    assert git("config", "--local", "--get", "core.precomposeunicode", cwd=snapshot.path) == "true"
+
+
+def test_precompose_setting_is_pinned_before_fetch_and_checkout(tmp_path, upstream, monkeypatch):
+    repo, first = upstream
+    calls = []
+    real_git = materialize_module._git
+
+    def recording_git(args, cwd, **kwargs):
+        calls.append(tuple(args))
+        return real_git(args, cwd, **kwargs)
+
+    monkeypatch.setattr(materialize_module, "_git", recording_git)
+    fetch_snapshot(str(repo), first, tmp_path / "cache")
+
+    configured = calls.index(("config", "--local", "core.precomposeunicode", "false"))
+    materializing = [index for index, args in enumerate(calls) if args[0] in {"fetch", "checkout"}]
+    assert {calls[index][0] for index in materializing} == {"fetch", "checkout"}
+    assert all(configured < index for index in materializing)
 
 
 @pytest.mark.parametrize("callers", [2, 4])
@@ -201,6 +232,69 @@ def test_export_refuses_existing_source_and_unavailable_blinding(tmp_path, upstr
     export_snapshot(snapshot, trial)
     with pytest.raises(MaterializationError, match="already exists"):
         export_snapshot(snapshot, trial)
+
+
+def test_fetch_preserves_one_nfd_filename_and_publishes_precompose_false(tmp_path):
+    name = "cafe\u0301.txt"
+    assert unicodedata.normalize("NFD", name) == name
+    assert unicodedata.normalize("NFC", name) != name
+    repo = tmp_path / "upstream"
+    repo.mkdir()
+    git("init", "-q", cwd=repo)
+    git("config", "uploadpack.allowAnySHA1InWant", "true", cwd=repo)
+    git("config", "core.precomposeunicode", "false", cwd=repo)
+    (repo / name).write_text("decomposed name\n", encoding="utf-8")
+    git("add", "--", name, cwd=repo)
+    git("commit", "-q", "-m", "NFD path", cwd=repo)
+    commit = git("rev-parse", "HEAD", cwd=repo)
+
+    snapshot = fetch_snapshot(str(repo), commit, tmp_path / "cache")
+    record = export_snapshot(snapshot, tmp_path / "trial")
+
+    assert set(walk_regular_files(snapshot.path)) == {name}
+    assert set(walk_regular_files(tmp_path / "trial" / "source")) == {name}
+    assert record["trial"]["file_count"] == 1
+    assert git("config", "--local", "--get", "core.precomposeunicode", cwd=snapshot.path) == "false"
+
+
+@pytest.mark.parametrize(("names", "contents"), [
+    (("Name.py", "name.py"), (b"upper-case path\n", b"lower-case path\n")),
+    (("caf\u00e9.txt", "cafe\u0301.txt"), (b"composed path\n", b"decomposed path\n")),
+], ids=["case", "unicode-normalization"])
+def test_path_collision_pairs_survive_or_have_the_staged_collision_diagnostic(tmp_path, names, contents):
+    repo = tmp_path / "upstream"
+    repo.mkdir()
+    git("init", "-q", cwd=repo)
+    git("config", "uploadpack.allowAnySHA1InWant", "true", cwd=repo)
+    git("config", "core.precomposeunicode", "false", cwd=repo)
+    git("config", "core.ignorecase", "false", cwd=repo)
+    blobs = [subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"], cwd=repo, input=content,
+        check=True, capture_output=True,
+    ).stdout.decode("ascii").strip() for content in contents]
+    for name, blob in zip(names, blobs, strict=True):
+        git("update-index", "--add", "--cacheinfo", f"100644,{blob},{name}", cwd=repo)
+    git("commit", "-q", "-m", "path collision pair", cwd=repo)
+    commit = git("rev-parse", "HEAD", cwd=repo)
+    cache = tmp_path / "cache"
+    target = cache / cache_key(str(repo), commit)
+
+    try:
+        snapshot = fetch_snapshot(str(repo), commit, cache)
+    except MaterializationError as exc:
+        message = str(exc)
+        assert str(repo) in message and commit in message
+        assert "likely case/Unicode-normalization collision" in message
+        assert ".partial-" not in message
+        assert not list(cache.glob("*.partial-*"))
+        assert not target.exists()
+    else:
+        listed = git("-c", "core.quotepath=false", "ls-files", cwd=snapshot.path).splitlines()
+        assert set(listed) == set(names)
+        assert len({name.encode("utf-8") for name in listed}) == len(names)
+        assert set(walk_regular_files(snapshot.path)) == set(names)
+        assert {name: (snapshot.path / name).read_bytes() for name in names} == dict(zip(names, contents))
+        assert git("config", "--local", "--get", "core.precomposeunicode", cwd=snapshot.path) == "false"
 
 
 @pytest.mark.parametrize("paths", [("Name.py", "name.py"), ("Dir/a.py", "dir/b.py")])
@@ -389,6 +483,62 @@ def test_an_export_strips_every_harness_state_directory(tmp_path):
 
 
 # --- area B: one hermetic environment for every git call ----------------------------------
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_git_decode_failure_is_a_materialization_error_with_command_and_cwd(tmp_path, monkeypatch, stream):
+    decoder = UnicodeDecodeError("utf-8", b"ok\xff", 2, 3, f"invalid byte in {stream}")
+    captured = {}
+    monkeypatch.setenv("SCANEVAL_TEST_SECRET", "must-not-leak")
+
+    def undecodable(*_args, **kwargs):
+        captured.update(kwargs)
+        raise decoder
+
+    monkeypatch.setattr(materialize_module.subprocess, "run", undecodable)
+    with pytest.raises(MaterializationError) as raised:
+        materialize_module._git(["status", "--porcelain"], tmp_path)
+
+    message = str(raised.value)
+    assert "git status --porcelain" in message
+    assert str(tmp_path) in message
+    assert "not valid UTF-8" in message
+    assert "must-not-leak" not in message
+    assert captured["encoding"] == "utf-8" and captured["errors"] == "strict"
+    assert raised.value.__cause__ is decoder
+
+
+def test_fetch_reports_staged_collision_context_and_cleans_without_publishing(
+        tmp_path, upstream, monkeypatch):
+    repo, commit = upstream
+    cache = tmp_path / "cache"
+    target = cache / cache_key(str(repo), commit)
+    real_git = materialize_module._git
+    checkout_finished = False
+    forced_statuses = 0
+
+    def dirty_after_checkout(args, cwd, **kwargs):
+        nonlocal checkout_finished, forced_statuses
+        result = real_git(args, cwd, **kwargs)
+        if args[:1] == ["checkout"] and ".partial-" in cwd.name:
+            checkout_finished = True
+        if args == ["status", "--porcelain", "--untracked-files=all"] and ".partial-" in cwd.name:
+            assert checkout_finished
+            forced_statuses += 1
+            return " M app.py\n"
+        return result
+
+    monkeypatch.setattr(materialize_module, "_git", dirty_after_checkout)
+    with pytest.raises(MaterializationError) as raised:
+        fetch_snapshot(str(repo), commit, cache)
+
+    message = str(raised.value)
+    assert str(repo) in message and commit in message
+    assert "likely case/Unicode-normalization collision" in message
+    assert ".partial-" not in message
+    assert forced_statuses == 1
+    assert not list(cache.glob("*.partial-*"))
+    assert not target.exists()
 
 
 def test_every_git_invocation_is_built_hermetically(monkeypatch):

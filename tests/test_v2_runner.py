@@ -270,6 +270,65 @@ def test_existing_output_directory_and_unknown_filters_are_refused(tmp_path, pil
     assert not (tmp_path / "other").exists()
 
 
+@pytest.mark.parametrize("leaf", ["file", "directory", "valid_symlink", "dangling_symlink"])
+def test_every_existing_output_leaf_is_refused_without_following_it(tmp_path, pilot, leaf):
+    out = tmp_path / "occupied"
+    target = tmp_path / "leaf-target"
+    if leaf == "file":
+        out.write_text("keep\n", encoding="utf-8")
+    elif leaf == "directory":
+        out.mkdir()
+    elif leaf == "valid_symlink":
+        target.mkdir()
+        out.symlink_to(target, target_is_directory=True)
+    else:
+        out.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(FileExistsError):
+        run(pilot, out)
+
+    assert pilot["adapter"].prepared == pilot["adapter"].calls == 0
+    if leaf == "file":
+        assert out.read_text(encoding="utf-8") == "keep\n"
+    elif leaf == "directory":
+        assert list(out.iterdir()) == []
+    elif leaf == "valid_symlink":
+        assert out.is_symlink() and list(target.iterdir()) == []
+    else:
+        assert out.is_symlink() and not target.exists()
+
+
+def test_output_ending_in_dot_dot_is_refused_without_creating_its_absent_parent(tmp_path, pilot):
+    absent = tmp_path / "must-not-be-created"
+
+    with pytest.raises(FileExistsError):
+        run(pilot, absent / "..")
+
+    assert not absent.exists()
+    assert pilot["adapter"].prepared == pilot["adapter"].calls == 0
+
+
+def test_a_raced_dangling_output_symlink_loses_to_exclusive_mkdir(tmp_path, pilot, monkeypatch):
+    out = tmp_path / "raced-output"
+    target = tmp_path / "must-not-be-created"
+    real_mkdir = Path.mkdir
+    raced = False
+
+    def introduce_link(self, mode=0o777, parents=False, exist_ok=False):
+        nonlocal raced
+        if self == out and not raced:
+            raced = True
+            self.symlink_to(target, target_is_directory=True)
+        return real_mkdir(self, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", introduce_link)
+    with pytest.raises(FileExistsError):
+        run(pilot, out)
+
+    assert raced and out.is_symlink() and not target.exists()
+    assert pilot["adapter"].prepared == pilot["adapter"].calls == 0
+
+
 def test_a_declared_tree_hash_that_does_not_match_the_export_is_refused(tmp_path, upstream):
     """The input is refused, and the refusal is recorded against it rather than failing the run.
 
