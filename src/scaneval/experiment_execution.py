@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import Callable
@@ -319,10 +320,12 @@ def execute(frozen_path: Path, out_dir: Path, *, workspace_root: Path | None = N
                             "and a cell executed now would save a plan that places them, which its report would "
                             "mark as drift; freeze its declaration again with scaneval matrix freeze and execute the "
                             "new matrix")
-    out = Path(out_dir).expanduser().resolve()
-    refuse_trial_path(out)
-    if out.exists():
+    requested = Path(out_dir).expanduser()
+    out = (requested.resolve() if requested.name in {"", ".", ".."}
+           else requested.parent.resolve() / requested.name)
+    if os.path.lexists(out):
         raise FileExistsError(f"matrix output directory already exists: {out}")
+    refuse_trial_path(out)
     if workspace_root is not None:
         workspace_root = Path(workspace_root).expanduser().resolve()
         if not workspace_root.is_dir() or workspace_root == out or workspace_root.is_relative_to(out):
