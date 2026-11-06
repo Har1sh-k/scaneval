@@ -382,18 +382,24 @@ def build_investigation(run_dir: Path, *, filters: dict[str, list[str]] | None =
 
 def export_investigation(run_dir: Path, output_dir: Path, *, filters: dict | None = None) -> dict:
     """Write a new standalone HTML/JSON directory outside runs and materialized trials."""
-    source, output = Path(run_dir).expanduser().resolve(), Path(output_dir).expanduser().resolve()
+    source = Path(run_dir).expanduser().resolve()
+    requested = Path(output_dir).expanduser()
+    output = (requested.resolve() if requested.name in {"", ".", ".."}
+              else requested.parent.resolve() / requested.name)
+    if os.path.lexists(output):
+        raise InvestigationError("investigation output must be a new directory")
     if output == source or output.is_relative_to(source):
         raise InvestigationError("investigation output must stay outside the source run")
     for parent in (output, *output.parents):
         if (parent / "run-manifest.json").exists() or ((parent / "provenance.json").exists() and (parent / "source").is_dir()):
             raise InvestigationError("investigation output must stay outside saved runs and materialized trials")
-    if output.exists():
-        raise InvestigationError("investigation output must be a new directory")
     document = build_investigation(run_dir, filters=filters)
     from .investigation_html import render_investigation
     rendered = render_investigation(document)
-    output.mkdir(parents=True, exist_ok=False, mode=0o700)
+    try:
+        output.mkdir(parents=True, exist_ok=False, mode=0o700)
+    except FileExistsError as exc:
+        raise InvestigationError("investigation output must be a new directory") from exc
     (output / "investigation.json").write_text(json.dumps(document, ensure_ascii=True, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     (output / "index.html").write_text(rendered, encoding="utf-8")
     return document
