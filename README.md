@@ -6,10 +6,11 @@ ScanEval evaluates security scanners on versioned cases and records how instrume
 
 ## Python alpha package
 
-The planned PyPI release is `scaneval==2.0.0a1`; publication is pending. The Python distribution includes the evaluation API, CLI, and optional tracing through `scaneval.observer`. After publication, install the alpha:
+The [PyPI alpha `2.0.0a1`](https://pypi.org/project/scaneval/2.0.0a1/) is available. The Python distribution includes the evaluation API, CLI, and optional tracing through `scaneval.observer`. Install the alpha:
 
 ```bash
-python -m pip install scaneval==2.0.0a1
+python -m pip install scaneval
+# Or pin this alpha: python -m pip install scaneval==2.0.0a1
 ```
 
 ```python
