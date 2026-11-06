@@ -199,6 +199,7 @@ def test_successful_invocation_writes_validated_bundle_and_captures_state(tmp_pa
     assert request["input"]["tree_hash"] == result["input_hash"] == execution["provenance"]["tree_hash"]
     assert "targets" not in json.dumps(request)
     assert result["status"] == "success" and result["claims"][0]["kind"] == "command_injection"
+    assert result["bundles_resolved"] is True, "successful adapter outcomes keep their resolved claim set"
     assert result["usage"]["cost_usd"] is None and result["usage"]["setup_seconds"] == 2
     assert result["raw_artifacts"] == [{"id": "native", "path": "raw/native.json", "sha256": execution["raw_artifacts"][0]["sha256"]}]
     assert (bundle / "raw" / "harness-state" / "fakestate" / "notes.md").read_text(encoding="utf-8") == "harness state\n"
@@ -268,18 +269,22 @@ def test_unsupported_language_is_not_executed_and_stays_visible(tmp_path, langua
     result = json.loads((bundle / "result.json").read_text(encoding="utf-8"))
     assert adapter.calls == 0
     assert result["status"] == "unsupported" and result["error"]["code"] == "unsupported_language"
+    assert result["bundles_resolved"] is False
     execution = json.loads((bundle / "execution.json").read_text(encoding="utf-8"))
     assert execution["unsupported_languages"] == [language]
 
 
-def test_adapter_failure_and_contract_violation_never_become_empty_success(tmp_path):
+def test_an_adapter_error_is_unresolved_and_never_becomes_empty_success(tmp_path):
     bundle = run(tmp_path, FakeAdapter("raise"))
     result = json.loads((bundle / "result.json").read_text(encoding="utf-8"))
-    assert result["status"] == "error"
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["bundles_resolved"] is False
     assert result["error"] == {"code": "adapter_failure", "message": "AdapterError: binary exploded"}
     assert (bundle / "raw" / "native.json").exists()
 
-    bundle = run(tmp_path / "second", FakeAdapter("bad-claim"))
+
+def test_an_invalid_adapter_claim_never_becomes_empty_success(tmp_path):
+    bundle = run(tmp_path, FakeAdapter("bad-claim"))
     result = json.loads((bundle / "result.json").read_text(encoding="utf-8"))
     execution = json.loads((bundle / "execution.json").read_text(encoding="utf-8"))
     assert result["status"] == "error" and result["claims"] == []
@@ -295,6 +300,7 @@ def test_an_unexpected_adapter_exception_is_an_error_with_its_raw_directory_pres
     result = json.loads((bundle / "result.json").read_text(encoding="utf-8"))
     execution = json.loads((bundle / "execution.json").read_text(encoding="utf-8"))
     assert result["status"] == "error" and result["claims"] == []
+    assert result["bundles_resolved"] is False
     assert result["error"] == {"code": "adapter_failure",
                                "message": "RuntimeError: the harness died mid scan"}
     assert execution["status"] == "error" and execution["error"] == result["error"]
@@ -3159,6 +3165,7 @@ def test_an_adapter_that_does_not_declare_pr_yields_unsupported_and_is_never_cal
     execution = load_document(bundle / "execution.json", "execution-record")
     assert adapter.calls == 0, "scan() is never called for a mode the adapter does not declare"
     assert result["status"] == execution["status"] == "unsupported" and result["claims"] == []
+    assert result["bundles_resolved"] is False
     assert result["error"]["code"] == execution["error"]["code"] == "unsupported_mode"
     assert "does not declare support for pr scans; it carries out: full" in result["error"]["message"]
     assert any("stays in the denominator" in note for note in execution["notes"])
@@ -3179,6 +3186,10 @@ def test_an_unsupported_mode_stays_in_the_denominator_and_earns_no_quiet_credit(
 
     assert evaluation["status"] == "unsupported" and evaluation["metrics"]["completed"] is False
     assert evaluation["metrics"]["targets_assigned"] == 1 and evaluation["metrics"]["targets_detected"] == 0
+    assert evaluation["metrics"]["known_target_recall"] == 0.0
+    assert evaluation["metrics"]["claims_delivered"] is None
+    assert evaluation["metrics"]["random_order_expected_recall"] is None
+    assert "Unresolved bundles: claim budgets and total atomic-claim burden are pending." in evaluation["warnings"]
     control = evaluation["metrics"]["controls"]["capability_safe"]
     assert control["assigned"] == 1 and control["completed"] == 0 and control["resolved"] == 0, \
         "an unsupported invocation completes no control, so silence earns nothing"

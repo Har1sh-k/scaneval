@@ -1324,6 +1324,7 @@ def test_semgrep_pr_mode_is_refused_under_the_oci_backend_with_the_reason_record
             spec=SystemSpec("semgrep-oci", "semgrep", {}), preparation=fake_preparation(tmp_path),
             timeout_seconds=60, trace_mode="off", trace_dir=None)
     assert outcome.status == "unsupported" and outcome.claims == [] and outcome.command == []
+    assert outcome.bundles_resolved is False
     assert outcome.error["code"] == "unsupported_mode"
     assert "oci backend" in outcome.error["message"] and "read-only" in outcome.error["message"]
     assert "--baseline-commit" in outcome.error["message"]

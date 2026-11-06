@@ -905,7 +905,7 @@ class SemgrepAdapter(Adapter):
         if pr is not None:
             if getattr(active_backend(), "name", None) == "oci":
                 return NativeOutcome(
-                    status="unsupported", exit_code=None, command=[],
+                    status="unsupported", exit_code=None, command=[], bundles_resolved=False,
                     error={"code": "unsupported_mode",
                            "message": "semgrep does not run a PR review under the oci backend: --baseline-commit "
                                       "resets the scanned tree to the merge base and restores it in place, and "

@@ -1341,6 +1341,7 @@ def run_invocation(
             raise ExecutionError(f"the exported history could not be audited: {_failure_message(exc)}") from exc
         if mode_unsupported:
             outcome = NativeOutcome(status="unsupported", exit_code=None, command=[],
+                                    bundles_resolved=False,
                                     error={"code": "unsupported_mode",
                                            "message": f"{adapter.name} does not declare support for "
                                                       f"{prepared.mode} scans; it carries out: "
@@ -1349,6 +1350,7 @@ def run_invocation(
                                            "mode is never run in its place."])
         elif unsupported:
             outcome = NativeOutcome(status="unsupported", exit_code=None, command=[],
+                                    bundles_resolved=False,
                                     error={"code": "unsupported_language",
                                            "message": f"{adapter.name} does not declare support for: {', '.join(unsupported)}"},
                                     notes=["Unsupported work stays in the denominator; nothing was executed."])
@@ -1362,6 +1364,7 @@ def run_invocation(
                 # Any failure inside the adapter is a recorded error with its own type name,
                 # never an empty successful scan and never a crash of the whole run.
                 outcome = NativeOutcome(status="error", exit_code=None, command=[],
+                                        bundles_resolved=False,
                                         error={"code": "adapter_failure", "message": _failure_message(exc)})
             else:
                 # An outcome this module cannot read is a recorded failure too, checked here so
