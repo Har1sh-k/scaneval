@@ -8,10 +8,11 @@ The language-neutral event contract is [`schema/v2/trace-event.schema.json`](../
 
 ## Installation and import
 
-**Python.** The emitter ships inside the `scaneval` distribution and has no dependencies of its own. The planned PyPI alpha is `2.0.0a1`; publication is pending. After publication, install the distribution below, or use `python -m pip install -e .` from a repository checkout for development:
+**Python.** The emitter ships inside the `scaneval` distribution and has no dependencies of its own. The [PyPI alpha `2.0.0a1`](https://pypi.org/project/scaneval/2.0.0a1/) is available. Install the distribution below, or use `python -m pip install -e .` from a repository checkout for development:
 
 ```sh
-python -m pip install scaneval==2.0.0a1
+python -m pip install scaneval
+# Or pin this alpha: python -m pip install scaneval==2.0.0a1
 ```
 
 Import the emitter directly:
