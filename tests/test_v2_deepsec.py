@@ -1,10 +1,11 @@
 """Third-party DeepSec adapter: a fake CLI, the records it writes, and what the run may claim.
 
-Nothing here calls a model. The fake DeepSec below writes the records the real 2.3.10 writes
-(``FileRecord`` with candidates, findings and an append-only ``analysisHistory`` whose numbers
-are per-file *shares* of a batch, ``RunMeta``, parse-failure dumps, and the ``export --format
-json`` payload) and is driven by a control file beside it, so every failure mode the adapter
-classifies can be produced on demand.
+Nothing here calls a model. The fake DeepSec below writes native-like records shaped like those
+from real DeepSec 2.3.10 (``FileRecord`` with candidates, findings and an append-only
+``analysisHistory`` whose numbers are per-file *shares* of a batch, ``RunMeta``, parse-failure
+dumps, and the ``export --format json`` payload), while its scan discovery is synthetic rather
+than a reproduction of native dot, ignore, or content matching. It is driven by a control file
+beside it to produce the failure modes deliberately covered by these tests.
 
 The control file replaces the environment variable such a switch would normally be: the
 adapter builds its child environment with :func:`~scaneval.adapters.base.build_env`, which
@@ -69,10 +70,10 @@ ROOT = Path(__file__).resolve().parents[1]
 CAPTURE_MATRIX = ROOT / "tests" / "fixtures" / "deepsec-capture-matrix.json"
 CLOCK = lambda: datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)  # noqa: E731
 
-# A fake ``deepsec`` executable. It writes the records the real one writes and reads a control
-# file beside itself for the failure modes a test wants. It never writes outside its working
-# directory, and it refuses to run without the generated config, so a run that forgot to build
-# the private workspace fails loudly here rather than producing an empty scan.
+# A fake ``deepsec`` executable. It writes native-like records with the real 2.3.10 shapes, but
+# its source-file discovery is synthetic. A control file beside it drives the failure modes a
+# test wants. It refuses to run without the generated config, so a run that forgot to build the
+# private workspace fails loudly here rather than producing an empty scan.
 FAKE_CLI = '''
 import json, os, re, subprocess, sys, time
 from pathlib import Path
@@ -5562,6 +5563,9 @@ def test_manifest_selection_uses_record_file_path_not_the_record_s_on_disk_spell
     assert aliased["filePath"] == "src/server.js" and aliased["status"] == "analyzed"
     assert len(aliased["analysisHistory"]) == 1, "the manifest selected the aliased FileRecord"
     assert [claim["primary_location"]["path"] for claim in result["claims"]] == ["src/server.js"]
+    scope = curated_scope(("src/server.js",), tuple(records.items()), result["claims"], ())
+    assert scope.selected == ("src/db.js.json",)
+    assert scope.unexpected == ()
     assert result["omitted_paths"] == []
 
 
