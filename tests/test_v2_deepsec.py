@@ -5905,6 +5905,89 @@ def test_a_curated_configuration_refused_before_anything_runs_leaves_an_error_re
     assert "processing" not in result
 
 
+def test_the_curated_design_pins_its_bounded_path_and_version_limits():
+    """Pin the complete limiting claims whose reversal would overstate this diagnostic."""
+    text = (ROOT / "docs" / "designs" / "deepsec-curated-processing.md").read_text(encoding="utf-8")
+    configuration = text.split("## Configuration\n", 1)[1].split("## What runs\n", 1)[0]
+    refused = text.split("## Refused before anything runs\n", 1)[1].split("## What the run reports\n", 1)[0]
+    reporting = text.split("## What the run reports\n", 1)[1].split("## Limits\n", 1)[0]
+    limits = text.split("## Limits\n", 1)[1]
+    configuration_compact = " ".join(configuration.split())
+    refused_compact = " ".join(refused.split())
+    reporting_compact = " ".join(reporting.split())
+    limits_compact = " ".join(limits.split())
+
+    assert ("Issues: [#117](https://github.com/Har1sh-k/scaneval/issues/117) and follow-up "
+            "[#124](https://github.com/Har1sh-k/scaneval/issues/124).") in " ".join(text.split())
+    assert "adapter_version_drift" not in text
+    assert ("Frozen matrix execution rejects an adapter-identity or adapter-version mismatch before creating "
+            "output or starting a scanner; the matrix must be deliberately refrozen. With matching adapter "
+            "identity, matrix orchestration can proceed. Every matrix cell requires OCI, and DeepSec is not "
+            "OCI-compatible, so each cell's runner skips DeepSec before its prepare phase. No DeepSec scanner "
+            "invocation or DeepSec execution record is produced. The matrix output, and any report generated "
+            "from it, carry skipped assignments, incomplete cell statuses, and incomplete overall execution, "
+            "with no adapter-version-drift reason.") \
+        in configuration_compact
+    assert "Ordinary frozen execution" not in text
+    assert "matrix cannot execute" not in text
+    assert ("`scaneval aggregate` and `scaneval compare` refuse to pool runs under the same system id when those "
+            "runs record two adapter versions; a run that ran nothing for it pools whatever version it recorded.") \
+        in configuration_compact
+    assert ("Runs kept under distinct system ids can be compared across versions, with `adapter_version` listed "
+            "as a configuration difference.") in configuration_compact
+
+    assert ("A path containing NUL. NUL is a filesystem impossibility: no filesystem path can contain that byte. "
+            "- As separate conservative ScanEval policy, a path containing a non-NUL C0 control U+0001-U+001F "
+            "or DEL U+007F, or beginning or ending with whitespace.") in refused_compact
+    assert ("The control predicate does not reject C1 U+0080-U+009F. A C1 code point that Python treats as leading "
+            "or trailing whitespace still meets the separate edge-whitespace policy; an internal C1 code point, "
+            "or an edge C1 code point Python does not treat as whitespace, is not refused by either rule.") \
+        in refused_compact
+    assert ("Symbolic-link components are also refused because the evaluator's tree check deliberately does not "
+            "follow links: a final link is not accepted as a regular file, and a link in a directory component is "
+            "not accepted as that directory. This refusal does not claim which spelling DeepSec would record for "
+            "a followed link.") in refused_compact
+
+    assert ("After a completed scan, for readable records this can mean no matcher hit, an ignore-filter skip, "
+            "native discovery did not enumerate the path, or DeepSec recorded the corresponding file under "
+            "another spelling.") in reporting_compact
+    assert ("A listed path without an exactly spelled readable `FileRecord` has only the bounded readable-record "
+            "explanations in the population table: no matcher hit, an ignore-filter skip, native non-enumeration, "
+            "or an alternate recorded spelling.") in limits_compact
+    unreadable_rule = ("The run may also have N unreadable DeepSec data records; that count alone does not establish "
+                       "that any is the matching FileRecord. If one is, the absence is import loss and batch "
+                       "assignment cannot be inferred.")
+    alternate_spelling_rule = ("For every one of these readable-record possibilities, each affected exact manifest "
+                               "entry selected no readable FileRecord; that fact alone is not a model miss. When the "
+                               "readable record uses another spelling, that same FileRecord may still be selected if "
+                               "the other spelling is also a manifest entry.")
+    for section in (reporting_compact, limits_compact):
+        assert unreadable_rule in section
+        assert alternate_spelling_rule in section
+
+    assert ("`.storybook/main.js` is a known DeepSec 2.3.10 non-enumeration example from discovery with `dot: "
+            "false`. That example does not establish that every dot-leading path is omitted.") in limits_compact
+    assert ("In the public issue evidence, the tree path is `.GitHub/Workflows/ci.yml`, while DeepSec recorded "
+            "`.github/workflows/ci.yml`. The mixed-case spelling passes the evaluator's exact tree check but does "
+            "not match the record, while the lowercase spelling matches the record but fails the evaluator's exact "
+            "tree check. Neither spelling safely satisfies both exact checks.") in limits_compact
+    assert ".GitHub/Workflows/ci.js" not in text and ".github/workflows/ci.js" not in text
+    assert ("Manifest path policy refuses filesystem-impossible NUL, and separately refuses non-NUL C0 "
+            "U+0001-U+001F, DEL U+007F, and leading or trailing whitespace. C1 U+0080-U+009F is outside the "
+            "control predicate. The separate edge-whitespace policy still refuses a leading or trailing C1 code "
+            "point that Python treats as whitespace.") in limits_compact
+    assert ("Blinded profiles never rename source paths. If a curated path itself contains an original identity "
+            "token, ScanEval refuses that scanner-facing configuration for the transformed input; the curated "
+            "diagnostic is unavailable on that transformed input. If the path must be named, use the standard "
+            "input.") in limits_compact
+    assert ("If the scan failed or was killed, process never ran and no AI batch was assigned, while the cause of "
+            "the missing exact-spelling readable `FileRecord` remains unknown because the scan was unfinished.") \
+        in reporting_compact
+    assert ("An unfinished scan proves that process did not run and assigned no batch, while the cause of the "
+            "missing exact-spelling readable `FileRecord` remains unknown.") in reporting_compact
+    assert "curated condition" not in text
+
+
 def test_the_documented_curated_configuration_is_one_the_adapter_accepts(tmp_path):
     """The design document's fabricated example, with only its installation path pointed at the fake CLI."""
     text = (ROOT / "docs" / "designs" / "deepsec-curated-processing.md").read_text(encoding="utf-8")
