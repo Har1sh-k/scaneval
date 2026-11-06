@@ -5345,6 +5345,11 @@ def test_a_curated_run_that_selects_every_candidate_is_no_success_and_earns_no_q
     assert "every regex candidate" in result["error"]["message"]
     assert result["omitted_paths"] == [] and result["bundles_resolved"] is False
     assert len(result["claims"]) == 2
+    note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
+    assert ("0 listed paths lack a readable FileRecord under the exact listed filePath spellings. "
+            "A curated run is never a success") in note
+    assert "this can mean" not in note
+    assert "unreadable DeepSec data" not in note
 
     observation, record = curated_scoring(result, accept={"T1": "src/server.js"})
     # The positive claim stays usable for detection; no control is completed or resolved by silence.

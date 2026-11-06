@@ -120,13 +120,13 @@ assigned no AI batch, stay ``pending``, make the run ``scope_incomplete``, and a
 ``omitted_paths``. ``listed_without_record`` means no readable FileRecord has a ``filePath`` with
 exactly the listed spelling. After a scan that ran to the end, a nonzero count has only a bounded
 account: there may have been no matcher hit, the ignore filter may have skipped the path, native
-discovery may not have enumerated it (dot-leading paths such as ``.storybook/main.js`` are a known
-example), DeepSec may have recorded it under another spelling, or a matching record may have been
-unreadable. The note preserves that last caveat rather than calling an unreadable matching record
-native triage; when the count is zero it states only the count. After a scan that failed or was
-killed, the note says that the scan ended before process, so process never ran and assigned no AI
-batch; only the cause of a nonzero missing exact-readable-record population remains unknown because
-the scan did not complete. An
+discovery may not have enumerated it (``.storybook/main.js`` is one known ``dot: false`` example;
+not every dot-leading path is omitted), DeepSec may have recorded it under another spelling, or a
+matching record may have been unreadable. The note preserves that last caveat rather than calling an
+unreadable matching record native triage; when the count is zero it states only the count. After a
+scan that failed or was killed, the note says that the scan ended before process, so process never
+ran and assigned no AI batch; only the cause of a nonzero missing exact-readable-record population
+remains unknown because the scan did not complete. An
 unlisted record carrying analysis, a finding or a status other than ``pending``, a claim on an unlisted
 path, or a manifest whose bytes changed is ``process_manifest_not_honored``; its claims are kept. Every
 other failure keeps its precedence. A curated run that would otherwise succeed is ``partial`` with
@@ -2977,10 +2977,11 @@ class CuratedScope(NamedTuple):
     batch, still as the scan left them, by record path; ``external`` counts those whose record name
     is not a path inside the tree. Every unlisted record is in exactly one of those and
     ``unexpected``. ``listed_without_record`` are listed paths for which no readable FileRecord has
-    an exactly matching ``filePath`` spelling. A nonzero population has only a bounded explanation:
-    no matcher hit, the ignore filter, native discovery not enumerating the path (dot-leading paths
-    such as ``.storybook/main.js`` are a known example), a FileRecord under another spelling, or a
-    matching record that could not be read. The last case is import loss, not evidence of native
+    an exactly matching ``filePath`` spelling. After a completed scan, a nonzero population has only
+    a bounded explanation: no matcher hit, the ignore filter, native discovery not enumerating the
+    path (``.storybook/main.js`` is one known ``dot: false`` example; not every dot-leading path is
+    omitted), a FileRecord under another spelling, or a matching record that could not be read. After
+    an unfinished scan, its cause is unknown. The last case is import loss, not evidence of native
     triage. ``unexpected`` are unselected records that are not in the state a
     fresh scan leaves (``pending``, no analysis, no finding), and ``out_of_scope_claims`` imported
     claims on a path the manifest does not list. Either means the recorded state or claims do not
