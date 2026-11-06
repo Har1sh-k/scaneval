@@ -52,6 +52,7 @@ from scaneval.adapters.deepsec import (
     kind_for_slug,
     line_span,
     native_export_population,
+    process_manifest_path_issue,
     project_id_for,
     read_process_output,
     sessions_from,
@@ -5344,6 +5345,11 @@ def test_a_curated_run_that_selects_every_candidate_is_no_success_and_earns_no_q
     assert "every regex candidate" in result["error"]["message"]
     assert result["omitted_paths"] == [] and result["bundles_resolved"] is False
     assert len(result["claims"]) == 2
+    note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
+    assert ("0 listed paths lack a readable FileRecord under the exact listed filePath spellings. "
+            "A curated run is never a success") in note
+    assert "this can mean" not in note
+    assert "unreadable DeepSec data" not in note
 
     observation, record = curated_scoring(result, accept={"T1": "src/server.js"})
     # The positive claim stays usable for detection; no control is completed or resolved by silence.
@@ -5360,7 +5366,7 @@ def test_a_curated_run_that_selects_every_candidate_is_no_success_and_earns_no_q
 @pytest.mark.parametrize(("listed", "control"), [("README.md", {}), ("src/db.js", {"scan_skip": ["src/db.js"]})],
                          ids=["unscanned-extension", "no-matcher-hit"])
 def test_a_listed_path_without_a_regex_record_runs_no_ai_batch(tmp_path, monkeypatch, listed, control):
-    """The intersection is empty: native triage made no candidate there, which is not a model's miss."""
+    """The completed scan bounds why no exact readable record exists; none of those causes is a model miss."""
     bundle = curated_run(tmp_path, monkeypatch, [listed], control=control)
 
     result, execution = documents(bundle)
@@ -5372,19 +5378,90 @@ def test_a_listed_path_without_a_regex_record_runs_no_ai_batch(tmp_path, monkeyp
     assert result["status"] == "partial" and result["error"]["code"] == "scope_incomplete"
     assert result["omitted_paths"] == sorted(records)
     note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
-    assert f"1 listed path(s) got no file record ({listed})" in note
-    assert "no AI batch ran on them; that is native triage, not a model's miss" in note
+    assert (f"1 listed path lacks a readable FileRecord under the exact listed filePath spelling ({listed}). "
+            "For readable records, this can mean no matcher hit, an ignore-filter skip, native discovery did not "
+            "enumerate the path (dot-leading .storybook/main.js is a known example), or DeepSec recorded the "
+            "corresponding file under another spelling. For every one of these readable-record possibilities, "
+            "each affected exact manifest entry selected no readable FileRecord; that fact alone is not a model "
+            "miss. A FileRecord under another spelling may still be selected if that spelling is also a manifest "
+            "entry.") in note
+    assert "assigned no AI batch for the listed spelling" not in note
+
+
+def test_a_dot_leading_listed_file_with_no_record_has_only_bounded_native_explanations(tmp_path, monkeypatch):
+    """The fake's scan_skip synthetically models non-enumeration; it does not reproduce native discovery."""
+    listed = ".storybook/main.js"
+    bundle = curated_run(tmp_path, monkeypatch, [listed], extra_files={listed: "exec(x);\n"},
+                         control={"scan_skip": [listed]})
+
+    result, execution = documents(bundle)
+    assert listed not in bundle_records(bundle), "scan_skip, not fake discovery, creates the absent record"
+    assert result["claims"] == [] and result["usage"]["cost_usd"] == 0
+    note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
+    assert ("native discovery did not enumerate the path (dot-leading .storybook/main.js is a known example)"
+            in note)
+    assert "this can mean" in note, "native non-enumeration is one bounded possibility, not a reproduced cause"
+    assert ("each affected exact manifest entry selected no readable FileRecord; that fact alone is not a model "
+            "miss") in note
+    assert "may still be selected if that spelling is also a manifest entry" in note
+    assert "assigned no AI batch for the listed spelling" not in note
+    assert "the fake" not in note and "reproduced" not in note
+
+
+def test_an_alternate_record_filepath_spelling_stays_unselected_without_becoming_native_triage(tmp_path, monkeypatch):
+    """Synthetic discovery writes the mixed-case file; only FileRecord.filePath is deliberately aliased."""
+    listed = ".GitHub/Workflows/ci.js"
+    recorded = ".github/workflows/ci.js"
+    bundle = curated_run(
+        tmp_path, monkeypatch, [listed], extra_files={listed: "exec(x);\n"},
+        control={"record_file_paths": {listed: recorded}},
+    )
+
+    result, execution = documents(bundle)
+    records = dict(bundle_file_records(bundle))
+    aliased = records[listed + ".json"]
+    assert (aliased["filePath"], aliased["status"], aliased["analysisHistory"], aliased["findings"]) == (
+        recorded, "pending", [], [])
+    scope = curated_scope((listed,), tuple(records.items()), result["claims"], ())
+    assert scope.selected == ()
+    assert listed in scope.listed_without_record
+    assert listed in scope.unselected
+
+    # The lowercase spelling cannot pass this tree's exact preflight, so exercise only the
+    # record-selection helper with both entries: the lowercase FileRecord is selected without
+    # making the mixed-case entry acquire an exact readable record or creating an unselected one.
+    both_spellings = curated_scope(
+        (listed, recorded), ((listed + ".json", aliased),), result["claims"], ())
+    assert both_spellings.selected == (listed + ".json",)
+    assert both_spellings.listed_without_record == (listed,)
+    assert both_spellings.unselected == ()
+
+    note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
+    assert f"exact listed filePath spelling ({listed})" in note
+    assert "DeepSec recorded the corresponding file under another spelling" in note
+    assert ("each affected exact manifest entry selected no readable FileRecord; that fact alone is not a model "
+            "miss") in note
+    assert "may still be selected if that spelling is also a manifest entry" in note
+    assert "assigned no AI batch for the listed spelling" not in note
+    assert "native triage" not in note
 
 
 def test_a_curated_run_over_a_tree_with_no_regex_candidate_is_still_not_a_success(tmp_path, monkeypatch):
-    bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"],
+    bundle = curated_run(tmp_path, monkeypatch, ["src/db.js", "src/server.js"],
                          control={"scan_skip": ["src/db.js", "src/server.js"]})
 
-    result, _execution = documents(bundle)
+    result, execution = documents(bundle)
     assert bundle_records(bundle) == {}
     assert result["status"] == "partial" and result["error"]["code"] == "scope_incomplete"
     assert "no AI batch ran" in result["error"]["message"]
     assert result["claims"] == [] and result["omitted_paths"] == [] and result["bundles_resolved"] is False
+    note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
+    assert ("2 listed paths lack a readable FileRecord under the exact listed filePath spellings "
+            "(src/db.js, src/server.js).") in note
+    assert ("each affected exact manifest entry selected no readable FileRecord; that fact alone is not a model "
+            "miss") in note
+    assert "may still be selected if that spelling is also a manifest entry" in note
+    assert "assigned no AI batch for the listed spelling" not in note
 
 
 def test_a_failed_selected_batch_keeps_its_own_failure_and_its_claims(tmp_path, monkeypatch):
@@ -5404,20 +5481,22 @@ def test_a_failed_selected_batch_keeps_its_own_failure_and_its_claims(tmp_path, 
 
 
 @pytest.mark.parametrize("control, timeout_seconds, status, said", [
-    ({"scan_exit": 3}, 300, "error", "Its regex scan exited 3 before it finished"),
-    ({"hang": "scan"}, 3, "timeout", "Its regex scan ran out of the shared time budget before it finished"),
+    ({"scan_exit": 3}, 300, "error", "Its regex scan exited 3 before process could run"),
+    ({"hang": "scan"}, 3, "timeout", "Its regex scan ran out of the shared time budget before process could run"),
 ], ids=["failed", "timed-out"])
 def test_a_curated_run_whose_scan_did_not_finish_blames_no_listed_path_on_native_triage(
         tmp_path, monkeypatch, control, timeout_seconds, status, said):
-    """With no completed scan, a listed path's missing record says nothing about DeepSec's triage of it."""
+    """The unfinished scan prevented process and batching; only the missing exact record's cause is unknown."""
     bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"], control=control, timeout_seconds=timeout_seconds)
 
     result, execution = documents(bundle)
     assert result["status"] == status
     note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
     assert said in note
-    assert ("1 listed path(s) have no file record (src/server.js), which says nothing about DeepSec's triage of "
-            "them, since no scan completed") in note
+    assert "process never ran, so no AI batch was assigned" in note
+    assert ("1 listed path lacks a readable FileRecord under the exact listed filePath spelling (src/server.js); "
+            "the cause cannot be inferred because the scan did not complete.") in note
+    assert "batch assignment cannot be inferred" not in note
     assert "native triage" not in note and "ignore filter" not in note
     assert note.endswith("A curated run is never a success and its bundles are unresolved, so it completes no "
                          "control and earns no quiet credit.")
@@ -5434,7 +5513,7 @@ def test_a_curated_run_s_exit_1_that_no_listed_record_explains_is_an_error(tmp_p
 
 
 def test_a_curated_note_does_not_call_a_listed_path_with_an_unreadable_record_native_triage(tmp_path, monkeypatch):
-    """A listed path whose record exists but cannot be read is not shown to have had no regex candidate."""
+    """An unreadable data record neither correlates to the listed path nor proves native triage."""
     original = deepsec_module.run_command
 
     def run_command(argv, **kwargs):
@@ -5452,9 +5531,12 @@ def test_a_curated_note_does_not_call_a_listed_path_with_an_unreadable_record_na
 
     _result, execution = documents(bundle)
     note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
-    assert "1 listed path(s) got no file record (src/server.js)" in note
-    assert ("that is native triage, not a model's miss, unless the record is one of the 1 DeepSec record(s) this "
-            "run could not read") in note
+    assert ("1 listed path lacks a readable FileRecord under the exact listed filePath spelling (src/server.js)."
+            ) in note
+    assert ("The run also has 1 unreadable DeepSec data record; that count alone does not say whether any is the "
+            "matching FileRecord. If one is, the absence is import loss and batch assignment cannot be inferred."
+            ) in note
+    assert "native triage" not in note
 
 
 def test_a_curated_run_whose_only_selected_batch_errored_is_an_error(tmp_path, monkeypatch):
@@ -5512,7 +5594,12 @@ def test_a_findingless_unlisted_analysis_still_proves_the_manifest_was_not_honor
     assert "0 imported claim(s) are on unlisted paths" in result["error"]["message"]
     assert [claim["primary_location"]["path"] for claim in result["claims"]] == ["src/server.js"]
     assert result["omitted_paths"] == [], "an analyzed unlisted record is not an ordinary curation omission"
-    assert any("1 file record(s) the manifest does not list" in note for note in execution["notes"])
+    note = next(note for note in execution["notes"]
+                if note.startswith("1 file record(s) the manifest does not list"))
+    assert "They show record-state changes or claims outside the declared AI-batch assignment" in note
+    assert "that includes findingless analyzed records" in note
+    assert "does not mean every unexpected record contains a verdict" in note
+    assert "wrote verdicts" not in note
 
 
 def test_a_pending_unlisted_record_with_analysis_history_absent_is_unexpected_not_omitted(tmp_path, monkeypatch):
@@ -5623,6 +5710,22 @@ def test_an_unsafe_or_non_native_process_manifest_path_is_refused(tmp_path, entr
         settings(system_spec(fake_deepsec_root(tmp_path), process_manifest_by_tree={TREE: [entry]}))
 
 
+def test_process_manifest_path_policy_distinguishes_filesystem_impossibility_controls_and_whitespace():
+    control_policy = ("evaluator policy refuses non-NUL C0 control characters (U+0001-U+001F) and DEL "
+                      "(U+007F) in manifest paths")
+    whitespace_policy = "evaluator policy refuses leading or trailing whitespace in manifest paths"
+
+    assert process_manifest_path_issue("src/a\x00b.js") == (
+        "it holds a NUL byte, which no filesystem path can contain")
+    assert process_manifest_path_issue("src/a\x01b.js") == control_policy
+    assert process_manifest_path_issue("src/a\x7fb.js") == control_policy
+    assert process_manifest_path_issue(" src/a.js") == whitespace_policy
+    assert process_manifest_path_issue("src/a.js ") == whitespace_policy
+    assert process_manifest_path_issue("src/a\x85b.js") is None, "internal C1 is not part of the control policy"
+    assert process_manifest_path_issue("\x85src/a.js") == whitespace_policy
+    assert process_manifest_path_issue("src/a.js\x85") == whitespace_policy
+
+
 def test_a_process_manifest_and_files_from_are_mutually_exclusive(tmp_path):
     listing = tmp_path / "files-from.txt"
     listing.write_text("src/server.js\n", encoding="utf-8")
@@ -5655,15 +5758,40 @@ def test_a_curated_run_for_a_tree_the_map_does_not_name_is_refused_unscoped_neve
     ("src/Server.js", "holds no entry spelled exactly so"),
     ("src", "is not a regular file"),
     ("README.md/x.js", "is not a directory"),
-    ("linked/server.js", "is a symbolic link"),
-], ids=["missing", "case-alias", "directory", "file-as-directory", "linked-directory"])
+    ("linked/server.js", "a component of it is a symbolic link, which the evaluator tree check does not follow"),
+    ("linked-file.js", "a component of it is a symbolic link, which the evaluator tree check does not follow"),
+], ids=["missing", "case-alias", "directory", "file-as-directory", "linked-directory", "linked-file"])
 def test_a_listed_path_that_is_not_a_file_of_the_tree_as_spelled_is_refused(tmp_path, listed, reason):
-    """DeepSec matches by exact string, so a path the tree does not hold as spelled would silently select nothing."""
+    """DeepSec matches by exact string; the evaluator check truthfully refuses links without following them."""
     prepared = prepared_input(tmp_path)
     (prepared.source_dir / "linked").symlink_to(prepared.source_dir / "src", target_is_directory=True)
-    with pytest.raises(AdapterError, match=reason):
+    (prepared.source_dir / "linked-file.js").symlink_to(prepared.source_dir / "src" / "server.js")
+    with pytest.raises(AdapterError) as exc:
         curated_scan(tmp_path, prepared, {prepared.tree_hash: [listed]})
+    assert reason in str(exc.value)
     assert list((tmp_path / "raw").iterdir()) == []
+
+
+def test_a_very_long_missing_manifest_path_has_a_bounded_refusal_before_anything_runs(tmp_path, monkeypatch):
+    """Every component is filesystem-safe; only absence from this exact tree makes the path unusable."""
+    prepared = prepared_input(tmp_path)
+    components = [f"missing-{index:02d}-" + "a" * 40 for index in range(20)]
+    listed = "src/" + "/".join(components) + "/file.js"
+    assert all(0 < len(component.encode("utf-8")) <= 255 for component in listed.split("/"))
+    assert process_manifest_path_issue(listed) is None
+    commands = []
+    monkeypatch.setattr(deepsec_module, "run_command", lambda *args, **kwargs: commands.append((args, kwargs)))
+
+    with pytest.raises(AdapterError) as exc:
+        curated_scan(tmp_path, prepared, {prepared.tree_hash: [listed]})
+
+    message = str(exc.value)
+    reason = "cannot use a listed path: the input tree holds no entry spelled exactly so; path "
+    assert len(message) <= 500
+    assert reason in message
+    assert message.index(reason) < message.index(repr(listed)[:40])
+    assert listed not in message, "the valid but very long path is truncated after the exact reason"
+    assert commands == [] and list((tmp_path / "raw").iterdir()) == []
 
 
 def test_a_unicode_normalization_alias_is_refused_by_exact_directory_entry_spelling(tmp_path, monkeypatch):
@@ -5780,6 +5908,89 @@ def test_a_curated_configuration_refused_before_anything_runs_leaves_an_error_re
     assert result["status"] == "error" and result["error"]["code"] == "adapter_failure"
     assert "no entry for input tree" in result["error"]["message"]
     assert "processing" not in result
+
+
+def test_the_curated_design_pins_its_bounded_path_and_version_limits():
+    """Pin the complete limiting claims whose reversal would overstate this diagnostic."""
+    text = (ROOT / "docs" / "designs" / "deepsec-curated-processing.md").read_text(encoding="utf-8")
+    configuration = text.split("## Configuration\n", 1)[1].split("## What runs\n", 1)[0]
+    refused = text.split("## Refused before anything runs\n", 1)[1].split("## What the run reports\n", 1)[0]
+    reporting = text.split("## What the run reports\n", 1)[1].split("## Limits\n", 1)[0]
+    limits = text.split("## Limits\n", 1)[1]
+    configuration_compact = " ".join(configuration.split())
+    refused_compact = " ".join(refused.split())
+    reporting_compact = " ".join(reporting.split())
+    limits_compact = " ".join(limits.split())
+
+    assert ("Issues: [#117](https://github.com/Har1sh-k/scaneval/issues/117) and follow-up "
+            "[#124](https://github.com/Har1sh-k/scaneval/issues/124).") in " ".join(text.split())
+    assert "adapter_version_drift" not in text
+    assert ("Frozen matrix execution rejects an adapter-identity or adapter-version mismatch before creating "
+            "output or starting a scanner; the matrix must be deliberately refrozen. With matching adapter "
+            "identity, matrix orchestration can proceed. Every matrix cell requires OCI, and DeepSec is not "
+            "OCI-compatible, so each cell's runner skips DeepSec before its prepare phase. No DeepSec scanner "
+            "invocation or DeepSec execution record is produced. The matrix output, and any report generated "
+            "from it, carry skipped assignments, incomplete cell statuses, and incomplete overall execution, "
+            "with no adapter-version-drift reason.") \
+        in configuration_compact
+    assert "Ordinary frozen execution" not in text
+    assert "matrix cannot execute" not in text
+    assert ("`scaneval aggregate` and `scaneval compare` refuse to pool runs under the same system id when those "
+            "runs record two adapter versions; a run that ran nothing for it pools whatever version it recorded.") \
+        in configuration_compact
+    assert ("Runs kept under distinct system ids can be compared across versions, with `adapter_version` listed "
+            "as a configuration difference.") in configuration_compact
+
+    assert ("A path containing NUL. NUL is a filesystem impossibility: no filesystem path can contain that byte. "
+            "- As separate conservative ScanEval policy, a path containing a non-NUL C0 control U+0001-U+001F "
+            "or DEL U+007F, or beginning or ending with whitespace.") in refused_compact
+    assert ("The control predicate does not reject C1 U+0080-U+009F. A C1 code point that Python treats as leading "
+            "or trailing whitespace still meets the separate edge-whitespace policy; an internal C1 code point, "
+            "or an edge C1 code point Python does not treat as whitespace, is not refused by either rule.") \
+        in refused_compact
+    assert ("Symbolic-link components are also refused because the evaluator's tree check deliberately does not "
+            "follow links: a final link is not accepted as a regular file, and a link in a directory component is "
+            "not accepted as that directory. This refusal does not claim which spelling DeepSec would record for "
+            "a followed link.") in refused_compact
+
+    assert ("After a completed scan, for readable records this can mean no matcher hit, an ignore-filter skip, "
+            "native discovery did not enumerate the path, or DeepSec recorded the corresponding file under "
+            "another spelling.") in reporting_compact
+    assert ("A listed path without an exactly spelled readable `FileRecord` has only the bounded readable-record "
+            "explanations in the population table: no matcher hit, an ignore-filter skip, native non-enumeration, "
+            "or an alternate recorded spelling.") in limits_compact
+    unreadable_rule = ("The run may also have N unreadable DeepSec data records; that count alone does not establish "
+                       "that any is the matching FileRecord. If one is, the absence is import loss and batch "
+                       "assignment cannot be inferred.")
+    alternate_spelling_rule = ("For every one of these readable-record possibilities, each affected exact manifest "
+                               "entry selected no readable FileRecord; that fact alone is not a model miss. When the "
+                               "readable record uses another spelling, that same FileRecord may still be selected if "
+                               "the other spelling is also a manifest entry.")
+    for section in (reporting_compact, limits_compact):
+        assert unreadable_rule in section
+        assert alternate_spelling_rule in section
+
+    assert ("`.storybook/main.js` is a known DeepSec 2.3.10 non-enumeration example from discovery with `dot: "
+            "false`. That example does not establish that every dot-leading path is omitted.") in limits_compact
+    assert ("In the public issue evidence, the tree path is `.GitHub/Workflows/ci.yml`, while DeepSec recorded "
+            "`.github/workflows/ci.yml`. The mixed-case spelling passes the evaluator's exact tree check but does "
+            "not match the record, while the lowercase spelling matches the record but fails the evaluator's exact "
+            "tree check. Neither spelling safely satisfies both exact checks.") in limits_compact
+    assert ".GitHub/Workflows/ci.js" not in text and ".github/workflows/ci.js" not in text
+    assert ("Manifest path policy refuses filesystem-impossible NUL, and separately refuses non-NUL C0 "
+            "U+0001-U+001F, DEL U+007F, and leading or trailing whitespace. C1 U+0080-U+009F is outside the "
+            "control predicate. The separate edge-whitespace policy still refuses a leading or trailing C1 code "
+            "point that Python treats as whitespace.") in limits_compact
+    assert ("Blinded profiles never rename source paths. If a curated path itself contains an original identity "
+            "token, ScanEval refuses that scanner-facing configuration for the transformed input; the curated "
+            "diagnostic is unavailable on that transformed input. If the path must be named, use the standard "
+            "input.") in limits_compact
+    assert ("If the scan failed or was killed, process never ran and no AI batch was assigned, while the cause of "
+            "the missing exact-spelling readable `FileRecord` remains unknown because the scan was unfinished.") \
+        in reporting_compact
+    assert ("An unfinished scan proves that process did not run and assigned no batch, while the cause of the "
+            "missing exact-spelling readable `FileRecord` remains unknown.") in reporting_compact
+    assert "curated condition" not in text
 
 
 def test_the_documented_curated_configuration_is_one_the_adapter_accepts(tmp_path):

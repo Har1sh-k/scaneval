@@ -2344,6 +2344,27 @@ def test_three_profiles_share_a_run_but_keep_separate_maps_pairs_and_views(tmp_p
                           "identity_reduced": blinding.map_identity(reduced)}
 
 
+BLINDING_REMEDIATION = (
+    "; change evaluator-controlled identifiers or configuration values when possible. Blinding never renames "
+    "source paths, so scanner-facing configuration that must name such a path requires a standard input")
+
+
+def test_the_byoc_guide_tracks_the_blinded_run_leak_remediation():
+    guide = (Path(__file__).resolve().parents[1] / "docs" / "BRING_YOUR_OWN_CORPUS.md").read_text(
+        encoding="utf-8")
+    command = '$ $SB run "$BYOC/run-leaky.json" --output "$BYOC/runs/leaky" --workspace-root "$BYOC/workspaces"'
+    before, after = guide.split(command + "\n")
+    assert before.endswith("```\n")
+    transcript, _ = after.split("\n```\n", 1)
+    error = (
+        "scaneval: the run id names 'Acme', an original identity token of blinding map "
+        "acme-reporting-service, which would reach the scan of blinded input reporting-main.blinded"
+        + BLINDING_REMEDIATION)
+
+    assert transcript.split("\n") == [error, "exit=2"]
+    assert "; rename it, or leave that input standard" not in guide
+
+
 LEAKS = {
     "run-id": {"run_id": "widget-nightly"},
     "system-id": {"systems": [{"system_id": "widget-scanner", "adapter": "fake", "config": {}}]},
@@ -2354,6 +2375,11 @@ LEAKS = {
     "config-value": {"systems": [{"system_id": "fake-a", "adapter": "fake",
                                   "config": {"prompts": ["Review the WIDGET service."]}}]},
     "config-key": {"systems": [{"system_id": "fake-a", "adapter": "fake", "config": {"widget": {"depth": 2}}}]},
+    "source-manifest-path": {"systems": [{
+        "system_id": "fake-a", "adapter": "fake", "config": {
+            "process_manifest_by_tree": {"sha256:" + "a" * 64: ["src/Widget/handler.js"]},
+        },
+    }]},
 }
 
 
@@ -2365,9 +2391,15 @@ def test_a_run_that_would_carry_an_original_token_to_a_blinded_scan_is_refused(t
     write_config(tmp_path / "run.json", [{"snapshot_id": "snap-a"}, BLINDED], **LEAKS[name])
     out = tmp_path / "out"
 
-    with pytest.raises(ContractError, match="an original identity token of blinding map widget-metadata"):
+    with pytest.raises(ContractError) as exc:
         run_from_config(tmp_path / "run.json", out, clock=CLOCK, adapters={"fake": adapter})
 
+    message = str(exc.value)
+    assert "an original identity token of blinding map widget-metadata" in message
+    assert "change evaluator-controlled identifiers or configuration values when possible" in message
+    assert ("Blinding never renames source paths, so scanner-facing configuration that must name such a path "
+            "requires a standard input") in message
+    assert message.endswith(BLINDING_REMEDIATION)
     assert not out.exists() and adapter.calls == 0
 
 
@@ -2413,11 +2445,14 @@ def test_a_path_naming_an_original_token_reaches_the_scan_so_the_run_is_refused(
     config = blinded_config(tmp_path, widget, directory=changes.pop("directory", "config"), **changes)
     adapter, out = FakeAdapter(), tmp_path / "out"
 
-    with pytest.raises(ContractError, match=rf"{label} \S+ names '{token}', an original identity token of "
-                                            "blinding map widget-metadata, which would reach the scan of blinded "
-                                            "input snap-a.blinded"):
+    with pytest.raises(ContractError) as exc:
         run_from_config(config, out, clock=CLOCK, workspace_root=workspace_root, adapters={"fake": adapter})
 
+    message = str(exc.value)
+    assert label in message
+    assert (f"names '{token}', an original identity token of blinding map widget-metadata, which would reach the "
+            "scan of blinded input snap-a.blinded") in message
+    assert message.endswith(BLINDING_REMEDIATION)
     assert not out.exists() and adapter.calls == 0
 
 

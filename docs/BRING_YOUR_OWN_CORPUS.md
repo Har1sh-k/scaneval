@@ -862,7 +862,7 @@ check does not read. A run id like the one this guide used earlier,
 
 ```
 $ $SB run "$BYOC/run-leaky.json" --output "$BYOC/runs/leaky" --workspace-root "$BYOC/workspaces"
-scaneval: the run id names 'Acme', an original identity token of blinding map acme-reporting-service, which would reach the scan of blinded input reporting-main.blinded; rename it, or leave that input standard
+scaneval: the run id names 'Acme', an original identity token of blinding map acme-reporting-service, which would reach the scan of blinded input reporting-main.blinded; change evaluator-controlled identifiers or configuration values when possible. Blinding never renames source paths, so scanner-facing configuration that must name such a path requires a standard input
 exit=2
 ```
 
