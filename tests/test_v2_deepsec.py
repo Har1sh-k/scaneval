@@ -44,6 +44,7 @@ from scaneval.adapters.deepsec import (
     capture_status,
     candidates_from,
     claim_path,
+    curated_scope,
     finding_ids,
     git_prints_quoted,
     import_export,
@@ -5261,12 +5262,18 @@ def curated_run(tmp_path: Path, monkeypatch, paths: list[str], *, control: dict 
                           network_policy="model_provider_only", clock=CLOCK)
 
 
-def bundle_records(bundle: Path) -> dict[str, dict]:
-    """Every FileRecord the bundle kept, by source path, read from the saved raw artifacts."""
+def bundle_file_records(bundle: Path) -> tuple[tuple[str, dict], ...]:
+    """Every saved FileRecord as its exact relative record name and payload."""
     execution = load_document(bundle / "execution.json", "execution-record")
-    return {artifact["id"][len("deepsec-file/"):-len(".json")]:
-            json.loads((bundle / artifact["path"]).read_text(encoding="utf-8"))
-            for artifact in execution["raw_artifacts"] if artifact["id"].startswith("deepsec-file/")}
+    return tuple((artifact["id"][len("deepsec-file/"):],
+                  json.loads((bundle / artifact["path"]).read_text(encoding="utf-8")))
+                 for artifact in execution["raw_artifacts"]
+                 if artifact["id"].startswith("deepsec-file/"))
+
+
+def bundle_records(bundle: Path) -> dict[str, dict]:
+    """Every FileRecord the bundle kept, by its on-disk source-path stem."""
+    return {name[:-len(".json")]: record for name, record in bundle_file_records(bundle)}
 
 
 def process_argv(command: list[str]) -> list[str]:
@@ -5488,6 +5495,76 @@ def test_an_ai_stage_that_did_not_keep_to_the_manifest_is_reported_with_every_cl
     assert any("outside the declared AI-batch assignment" in note for note in execution["notes"])
 
 
+def test_a_findingless_unlisted_analysis_still_proves_the_manifest_was_not_honored(tmp_path, monkeypatch):
+    """The unexpected-record guard is independent of imported out-of-scope claims."""
+    bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"], control={
+        "ignore_manifest": True, "findingless_records": ["src/db.js"]})
+
+    result, execution = documents(bundle)
+    unlisted = bundle_records(bundle)["src/db.js"]
+    assert unlisted["status"] == "analyzed"
+    assert len(unlisted["analysisHistory"]) == 1
+    assert unlisted["analysisHistory"][0]["findingCount"] == 0
+    assert unlisted["findings"] == [], "the fake knob must leave no claim that could mask the record guard"
+    assert (result["status"], result["error"]["code"]) == ("partial", "process_manifest_not_honored")
+    assert "1 unlisted file record(s)" in result["error"]["message"]
+    assert "0 imported claim(s) are on unlisted paths" in result["error"]["message"]
+    assert [claim["primary_location"]["path"] for claim in result["claims"]] == ["src/server.js"]
+    assert result["omitted_paths"] == [], "an analyzed unlisted record is not an ordinary curation omission"
+    assert any("1 file record(s) the manifest does not list" in note for note in execution["notes"])
+
+
+def test_a_pending_unlisted_record_with_analysis_history_absent_is_unexpected_not_omitted(tmp_path, monkeypatch):
+    """Fresh state requires an actual empty analysisHistory array, not merely a falsey lookup."""
+    bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"],
+                         control={"omit_analysis_history": ["src/db.js"]})
+
+    result, _execution = documents(bundle)
+    records = dict(bundle_file_records(bundle))
+    malformed = records["src/db.js.json"]
+    assert malformed["status"] == "pending" and malformed["findings"] == []
+    assert "analysisHistory" not in malformed, "the fake knob must produce absence rather than an empty list"
+    scope = curated_scope(("src/server.js",), tuple(records.items()), result["claims"], ())
+    assert scope.unexpected == ("src/db.js.json",)
+    assert scope.unselected == () and scope.external == 0
+    assert result["omitted_paths"] == [], "the malformed record must not become an ordinary unselected path"
+
+
+def test_a_fresh_external_record_is_counted_external_and_never_reported_as_an_omission(tmp_path, monkeypatch):
+    """The record named ``...json`` has stem ``..`` and cannot be published as a tree-relative path."""
+    bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"],
+                         control={"extra_pending_records": {"..": ".."}})
+
+    result, execution = documents(bundle)
+    records = dict(bundle_file_records(bundle))
+    external = records["...json"]
+    assert (external["filePath"], external["status"], external["analysisHistory"], external["findings"]) == (
+        "..", "pending", [], [])
+    scope = curated_scope(("src/server.js",), tuple(records.items()), result["claims"], ())
+    assert scope.external == 1 and scope.unexpected == ()
+    assert scope.unselected == ("src/db.js",)
+    assert result["omitted_paths"] == ["src/db.js"] and "external:.." not in result["omitted_paths"]
+    note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
+    assert "1 of them under a record name outside the tree" in note
+
+
+def test_manifest_selection_uses_record_file_path_not_the_record_s_on_disk_spelling(tmp_path, monkeypatch):
+    """A record stored for db.js is selected as server.js because its FileRecord says server.js."""
+    bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"], control={
+        "record_file_paths": {"src/db.js": "src/server.js"},
+        "scan_skip": ["src/server.js"],
+    })
+
+    result, _execution = documents(bundle)
+    records = dict(bundle_file_records(bundle))
+    assert set(records) == {"src/db.js.json"}, "the native server.js record was deliberately skipped"
+    aliased = records["src/db.js.json"]
+    assert aliased["filePath"] == "src/server.js" and aliased["status"] == "analyzed"
+    assert len(aliased["analysisHistory"]) == 1, "the manifest selected the aliased FileRecord"
+    assert [claim["primary_location"]["path"] for claim in result["claims"]] == ["src/server.js"]
+    assert result["omitted_paths"] == []
+
+
 def test_a_manifest_changed_during_the_run_is_reported(tmp_path, monkeypatch):
     bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"], control={"tamper_manifest": ["src/db.js"]})
 
@@ -5547,12 +5624,14 @@ def test_a_process_manifest_and_files_from_are_mutually_exclusive(tmp_path):
                              process_manifest_by_tree={TREE: ["src/server.js"]}))
 
 
-def curated_scan(tmp_path: Path, prepared: PreparedInput, mapping: dict):
-    """The adapter's own scan() of *prepared* as a full request, with an empty raw directory."""
+def curated_scan(tmp_path: Path, prepared: PreparedInput, mapping: dict, *, raw_setup=None):
+    """The adapter's own scan() of *prepared* as a full request, with a caller-controlled raw directory."""
     adapter = get_adapter("deepsec")
     spec = system_spec(fake_deepsec_root(tmp_path), process_manifest_by_tree=mapping)
     raw = tmp_path / "raw"
     raw.mkdir()
+    if raw_setup is not None:
+        raw_setup(raw)
     request = build_request("run-deepsec", prepared, spec, timeout_seconds=30, trace_mode="off")
     return adapter.scan(request=request, source_dir=prepared.source_dir, raw_dir=raw, spec=spec,
                         preparation={}, timeout_seconds=30, trace_mode="off", trace_dir=None)
@@ -5578,6 +5657,61 @@ def test_a_listed_path_that_is_not_a_file_of_the_tree_as_spelled_is_refused(tmp_
     with pytest.raises(AdapterError, match=reason):
         curated_scan(tmp_path, prepared, {prepared.tree_hash: [listed]})
     assert list((tmp_path / "raw").iterdir()) == []
+
+
+def test_a_unicode_normalization_alias_is_refused_by_exact_directory_entry_spelling(tmp_path, monkeypatch):
+    """The listing seam makes NFC-vs-NFD deterministic even on normalization-insensitive filesystems."""
+    nfc = "src/caf\u00e9.js"
+    nfd = "src/cafe\u0301.js"
+    prepared = prepared_input(tmp_path, {nfc: "exec(x);\n"})
+    original = deepsec_module.list_directory
+    listed_names: list[str] = []
+
+    class ExactEntry:
+        def __init__(self, name: str, path: Path):
+            self.name = name
+            self.path = str(path)
+
+        def is_symlink(self):
+            return False
+
+        def is_file(self, *, follow_symlinks=True):
+            return True
+
+        def is_dir(self, *, follow_symlinks=True):
+            return False
+
+    def exact_listing(path):
+        path = Path(path)
+        if path == prepared.source_dir / "src":
+            listed_names.append(nfc.split("/", 1)[1])
+            return [ExactEntry(nfc.split("/", 1)[1], path / nfc.split("/", 1)[1])]
+        return original(path)
+
+    commands = []
+    monkeypatch.setattr(deepsec_module, "list_directory", exact_listing)
+    monkeypatch.setattr(deepsec_module, "run_command", lambda *args, **kwargs: commands.append((args, kwargs)))
+    with pytest.raises(AdapterError, match="holds no entry spelled exactly so"):
+        curated_scan(tmp_path, prepared, {prepared.tree_hash: [nfd]})
+    assert listed_names == ["caf\u00e9.js"] and listed_names[0] != nfd.split("/", 1)[1]
+    assert commands == [] and list((tmp_path / "raw").iterdir()) == []
+
+
+def test_a_preexisting_dangling_manifest_symlink_is_refused_without_following_or_running(tmp_path, monkeypatch):
+    """Exclusive creation fails closed instead of writing through an attacker-planted raw path."""
+    prepared = prepared_input(tmp_path)
+    outside = tmp_path / "outside-manifest.json"
+    commands = []
+    monkeypatch.setattr(deepsec_module, "run_command", lambda *args, **kwargs: commands.append((args, kwargs)))
+
+    def plant(raw: Path):
+        (raw / "deepsec-process-manifest.json").symlink_to(outside)
+
+    with pytest.raises(AdapterError, match="process manifest could not be written"):
+        curated_scan(tmp_path, prepared, {prepared.tree_hash: ["src/server.js"]}, raw_setup=plant)
+    manifest = tmp_path / "raw" / "deepsec-process-manifest.json"
+    assert manifest.is_symlink() and not outside.exists()
+    assert commands == [], "no DeepSec child command may run after the manifest path is refused"
 
 
 def test_a_process_manifest_is_refused_for_a_pr_review_before_anything_runs(tmp_path):
