@@ -456,6 +456,10 @@ def export_snapshot(
 ) -> dict:
     """Copy the tracked regular files of *snapshot* into ``trial_dir/source`` and record provenance.
 
+    The bytes come from the hardened immutable checkout, not directly from raw Git blobs.
+    Repository-owned checkout conversions such as ``eol``, ``ident``, and
+    ``working-tree-encoding`` can therefore affect the bytes copied into the export.
+
     The ``standard`` profile writes exactly the export and the record this function has always
     written; ``blinding_map`` and ``snapshot_id`` play no part in it. ``metadata_blinded`` and
     ``identity_reduced`` need a reviewed transformation map and the pack snapshot id its variants
@@ -483,6 +487,10 @@ def export_snapshot(
 
 def export_tree(snapshot: CachedSnapshot, source: Path) -> ExportedTree:
     """Write the tracked regular files of *snapshot* under *source*, which must not exist yet.
+
+    Files are copied byte for byte from the hardened immutable checkout, not read from raw Git
+    blobs. Repository-owned checkout conversions such as ``eol``, ``ident``, and
+    ``working-tree-encoding`` can therefore affect the exported bytes.
 
     Controller and harness state and every ``.git`` path are stripped; submodule gitlinks,
     symbolic links, and anything else that is not a blob are skipped with a reason. Files keep
