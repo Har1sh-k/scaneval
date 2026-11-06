@@ -19,14 +19,16 @@ Assignments that delivered nothing (skipped, or never recorded by a failed run) 
 
 ## The frame
 
-`precision sample` reads each run directory's 2.1 `run-manifest.json`, the frozen `evaluator/schedule.json` it names, and the `result.json` of every bundle. It reads no plan, decision, or review record. The view is chosen by `--system` (repeatable; default every scheduled system), `--mode`, and `--profile`. Every assignment in the view becomes an invocation row, including one that delivered nothing.
+`precision sample` reads each run directory's 2.1 `run-manifest.json`, the frozen `evaluator/schedule.json` it names, the run's `run-config.json`, and the `result.json` of every bundle. It validates the reopened run configuration and refuses unless its canonical digest is the configuration digest shared by the schedule and manifest. It reads no plan, decision, or review record. The view is chosen by `--system` (repeatable; default every scheduled system), `--mode`, and `--profile`. Every assignment in the view becomes an invocation row, including one that delivered nothing.
 
-The frame binds each run by the canonical digests of its manifest and schedule, and each result by its digest. Units are sorted by id and runs are read in run-id order. The order run directories are named in, or listed by a filesystem, changes nothing.
+The frame binds each run by the canonical digests of its manifest and schedule, after binding both to the validated configuration, and binds each result by its digest. Units are sorted by id and runs are read in run-id order. The order run directories are named in, or listed by a filesystem, changes nothing.
 
 Refused:
 
 - a 2.0 manifest, which predates frozen schedules;
 - a run read twice;
+- a schedule and manifest that bind different configuration digests;
+- a validated `run-config.json` whose canonical digest is not the one its schedule froze;
 - a manifest row its schedule never assigned;
 - a bundle outside its run;
 - a result that is unreadable or names another run, system, or input;
@@ -57,7 +59,7 @@ scaneval precision record reviews.json --sample sample.json --item item-0001 \
 scaneval precision estimate sample.json --reviews reviews.json --output estimate.json
 ```
 
-- **Queue.** Reviewers get `queue.json`, not the sample. Each item carries:
+- **Queue.** Reviewers get `queue.json`, not the sample. `precision queue` reads that self-contained sample only: it has no run-directory argument and does not reopen `run-config.json`. Each item carries:
   - an item id, from a seeded permutation, so the order reveals nothing;
   - the system's alias, such as `system-2`;
   - the input id, snapshot id, and input hash;

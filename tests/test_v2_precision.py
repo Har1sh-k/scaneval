@@ -1,10 +1,11 @@
 """Precision sampling and human review: the frame, the seeded draw, the chained reviews, the estimate.
 
-Most run directories here are built in ``tmp_path`` from fixture documents: a frozen schedule, a 2.1
-manifest, and a saved result per invocation that ran, which is everything a precision frame reads.
-The end-to-end tests run the real runner with a scripted fake adapter over a local ``git init``
-fixture instead. Every reviewer is explicitly fictional. No network, no model calls, and no clock
-reaches a derived document.
+Most run directories here are built in ``tmp_path`` from fixture documents: a validated 2.0
+``run-config.json``, its frozen schedule, a 2.1 manifest, and a saved result per invocation that ran.
+Precision reopens and binds the configuration before reading assignments. The end-to-end tests run
+the real runner with a scripted fake adapter over a local ``git init`` fixture instead. Queue tests
+use only the self-contained sample, because that CLI has no run-directory input. Every reviewer is
+explicitly fictional. No network, no model calls, and no clock reaches a derived document.
 
 The hand-computed figures are in each test's docstring; the assertions compare against the same
 fractions, so a figure that is exact on paper is checked exactly.
@@ -44,7 +45,6 @@ from scaneval.runner import run_from_config
 CLOCK = lambda: datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)  # noqa: E731
 LATER = lambda: datetime(2026, 9, 21, 9, 30, tzinfo=timezone.utc)  # noqa: E731
 CREATED_AT = "2026-09-20T15:00:00+00:00"
-CONFIG_HASH = "sha256:" + "c" * 64
 PACK_HASH = "sha256:" + "e" * 64
 MAP_IDENTITY = {"map_id": "widget-metadata", "map_version": "1", "map_sha256": "sha256:" + "d" * 64}
 REVIEWER_A = "Fixture Reviewer A (fictional)"
@@ -89,18 +89,31 @@ def write_document(path: Path, kind: str, document: dict) -> None:
 
 def write_run(root: Path, run_id: str, outputs: dict[tuple[str, str], dict | None], *,
               profiles: dict[str, str] | None = None) -> Path:
-    """One run directory: a frozen schedule, a 2.1 manifest, and a saved result per invocation that ran.
+    """One run directory with a bound config, schedule, manifest, and each saved result that ran.
 
-    *outputs* maps (input id, system id) to an :func:`output`, or to ``None`` for an assignment that
-    was skipped; every other pairing of the inputs and systems it names is skipped too. One
-    repetition. Native claims get ranks in list order, as the scan-result contract requires.
+    The validated 2.0 ``run-config.json`` is built for this run id, its input profiles, and its
+    systems; the schedule and manifest carry its real canonical digest, and schedule systems carry
+    their real configuration digests. *outputs* maps (input id, system id) to an :func:`output`, or
+    to ``None`` for an assignment that was skipped; every other pairing of the inputs and systems it
+    names is skipped too. One repetition. Native claims get ranks in list order, as required.
     """
     profiles = profiles or {}
     inputs = sorted({input_id for input_id, _ in outputs})
     systems = sorted({system_id for _, system_id in outputs})
     run_dir = root / run_id
+    system_entries = [{"system_id": system_id, "adapter": "fake",
+                       "config": {"fixture_system": system_id}} for system_id in systems]
+    config = validate_document("run-config", {
+        "schema_version": "2.0", "run_id": run_id, "pack": "pack.json", "cache_root": "cache",
+        "inputs": [{"snapshot_id": input_id, "profile": profiles.get(input_id, "standard")}
+                   for input_id in inputs],
+        "systems": system_entries, "repetitions": 1, "timeout_seconds": 60,
+        "trace_mode": "off", "network_policy": "none",
+    })
+    config_sha256 = canonical_sha256(config)
     schedule = {
-        "schema_version": "2.1", "run_id": run_id, "created_at": CREATED_AT, "config_sha256": CONFIG_HASH,
+        "schema_version": "2.1", "run_id": run_id, "created_at": CREATED_AT,
+        "config_sha256": config_sha256,
         "pack": {"namespace": "org.example", "pack_id": "precision", "version": "1", "sha256": PACK_HASH},
         "repetitions": 1,
         "inputs": [{"input_id": input_id, "mode": "full", "profile": profiles.get(input_id, "standard"),
@@ -110,10 +123,11 @@ def write_run(root: Path, run_id: str, outputs: dict[tuple[str, str], dict | Non
                     "component_role": "application", "declared_tree_hash": None,
                     "plan": {"state": "unavailable", "reason": "fixture: no plan is needed to sample claims"}}
                    for input_id in inputs],
-        "systems": [{"system_id": system_id, "adapter": "fake", "model_id": None, "model_revision": None,
-                     "config_sha256": CONFIG_HASH, "network_policy": "none",
+        "systems": [{"system_id": entry["system_id"], "adapter": entry["adapter"],
+                     "model_id": None, "model_revision": None,
+                     "config_sha256": canonical_sha256(entry["config"]), "network_policy": "none",
                      "execution": {"backend": "local", "enforced_expected": False, "image": None}}
-                    for system_id in systems],
+                    for entry in system_entries],
         "assignments": [{"assignment_id": f"{input_id}__{system_id}__r1", "input_id": input_id,
                          "system_id": system_id, "repetition": 1}
                         for input_id in inputs for system_id in systems],
@@ -143,10 +157,11 @@ def write_run(root: Path, run_id: str, outputs: dict[tuple[str, str], dict | Non
                                 "plan_scope": "draft", "targets_assigned": 0, "targets_detected": 0,
                                 "pending_matching_count": 0, "bundle_path": f"invocations/{invocation_id}",
                                 "review_state": "draft", "skipped_reason": None})
+    write_document(run_dir / "run-config.json", "run-config", config)
     write_document(run_dir / "evaluator" / "schedule.json", "evaluation-schedule", schedule)
     write_document(run_dir / "run-manifest.json", "run-manifest", {
         "schema_version": "2.1", "run_id": run_id, "status": "completed", "created_at": CREATED_AT,
-        "config_sha256": CONFIG_HASH,
+        "config_sha256": config_sha256,
         "pack": {"namespace": "org.example", "pack_id": "precision", "version": "1", "status": "draft",
                  "snapshots": len(inputs), "cases": 0,
                  "review_states": {"draft": 0, "mechanically_checked": 0, "human_approved": 0},
@@ -333,6 +348,44 @@ def test_a_frame_refuses_what_it_cannot_bind_to(tmp_path):
         precision.build_frame([run_dir], population="full")
 
 
+def test_a_schedule_and_manifest_bound_to_different_configurations_are_refused(tmp_path):
+    """The manifest and validated run config stay bound; only the schedule names another digest."""
+    run_dir = one_system_run(tmp_path, 3)
+    config = load_document(run_dir / "run-config.json", "run-config")
+    manifest = load_document(run_dir / "run-manifest.json", "run-manifest")
+    assert manifest["config_sha256"] == canonical_sha256(config)
+    schedule_path = run_dir / "evaluator" / "schedule.json"
+    schedule = load_document(schedule_path, "evaluation-schedule")
+    assert schedule["config_sha256"] == manifest["config_sha256"]
+    schedule["config_sha256"] = canonical_sha256({"different": "configuration"})
+    write_document(schedule_path, "evaluation-schedule", schedule)
+
+    with pytest.raises(ContractError, match=(
+            "the schedule and the manifest of run run-one bind to different configurations")):
+        precision.build_frame([run_dir], population="full")
+
+
+def test_a_run_config_changed_after_the_schedule_was_frozen_is_refused_by_the_cli(tmp_path, capsys):
+    """A valid timeout edit breaks the frozen-config binding, exits 2, and writes no sample."""
+    run_dir = one_system_run(tmp_path, 3)
+    config_path = run_dir / "run-config.json"
+    config = load_document(config_path, "run-config")
+    schedule = load_document(run_dir / "evaluator" / "schedule.json", "evaluation-schedule")
+    manifest = load_document(run_dir / "run-manifest.json", "run-manifest")
+    assert schedule["config_sha256"] == manifest["config_sha256"] == canonical_sha256(config)
+    config["timeout_seconds"] = 61
+    write_document(config_path, "run-config", config)
+    assert canonical_sha256(config) != schedule["config_sha256"]
+    output_path = tmp_path / "sample.json"
+
+    code, out, err = cli(capsys, "precision", "sample", str(run_dir), "--population", "full",
+                         "--size", "1", "--seed", "7", "--output", str(output_path))
+
+    assert code == 2 and out == ""
+    assert "run-config.json of run run-one is not the configuration its schedule froze" in err
+    assert not output_path.exists()
+
+
 def test_an_empty_population_cannot_be_sampled(tmp_path):
     run_dir = write_run(tmp_path, "run-empty", {("snap-a", "sys-a"): output([])})
     frame = precision.build_frame([run_dir], population="full")
@@ -515,8 +568,8 @@ def test_a_sample_edited_after_its_draw_is_refused(tmp_path):
     with pytest.raises(ContractError, match=r"not what seed 4 and its design draw from its frame \(selected differ\)"):
         precision.verify_sample(swapped)
 
-    reseeded = {**deepcopy(sample), "design": {**sample["design"], "seed": 5}}
-    with pytest.raises(ContractError, match="not what seed 5"):
+    reseeded = {**deepcopy(sample), "design": {**sample["design"], "seed": 6}}
+    with pytest.raises(ContractError, match="not what seed 6"):
         precision.verify_sample(reseeded)
 
     rewritten = deepcopy(sample)
@@ -587,7 +640,7 @@ def review_all(sample: dict, outcomes: dict[str, str], *, reviewers=(REVIEWER_A,
 
 
 def test_the_review_queue_blinds_system_identity_and_keeps_the_mapping_in_the_sample(tmp_path):
-    """Nothing a reviewer receives names a system, a run, an invocation, a claim id, or a rule id."""
+    """The self-contained sample is enough; its queue names no system, run, invocation, claim, or rule."""
     run_dir = write_run(tmp_path, "run-queue", {
         ("snap-a", "tool-alpha"): output([claim(f"alpha-claim-{index}", f"unsafe shell call number {index}",
                                                 line=index, rule="vendor.alpha.rule",
