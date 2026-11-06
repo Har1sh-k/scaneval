@@ -5458,7 +5458,7 @@ def test_a_curated_note_does_not_call_a_listed_path_with_an_unreadable_record_na
 
 
 def test_a_curated_run_whose_only_selected_batch_errored_is_an_error(tmp_path, monkeypatch):
-    """The real curated probe: the listed file's batch failed, the unlisted one stayed pending, and process exited 1."""
+    """The modeled curated failure: the listed file's batch failed, the unlisted one stayed pending, and process exited 1."""
     bundle = curated_run(tmp_path, monkeypatch, ["src/db.js"], control={"fail_batches": [0]})
 
     result, _execution = documents(bundle)
