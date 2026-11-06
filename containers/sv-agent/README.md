@@ -11,7 +11,8 @@ state and output mounts, and the credentials declared for that run.
 |---|---|---|
 | `/opt/scaneval/harness` | Clean upstream SV-Agent checkout (`.git` kept: shallow when fetched online, full history from a bundle) with `npm ci` dependencies | `HARNESS_COMMIT` (default `f959cbcf010c7e41f780c718b65b1724d3aecb43`) and the harness's own `package-lock.json` |
 | `/opt/scaneval/harness/node_modules/.bin/tsx` | The tsx the driver runs under | harness lockfile (tsx 4.21.0) |
-| `/opt/scaneval/node_modules` | `@earendil-works/pi-coding-agent` 1.4.0 and dependencies; `pi` is on `PATH` | `package.json` / `package-lock.json` in this directory |
+| `/opt/scaneval/node_modules` | Upstream unbundled `@earendil-works/pi-coding-agent` 1.4.0 and patched dependencies; the unused release bundle is excluded | `package.json` / `package-lock.json` in this directory |
+| `/opt/scaneval/bin/pi`, `/opt/scaneval/pi-cli.mjs` | Image-owned launcher for upstream `dist/cli.js`; `bin/pi` is first on `PATH` | launcher and entrypoint hashes in `runtime.json` |
 | `/opt/scaneval/observer/` | Built `sdk/typescript` dist (`index.js`, `index.d.ts`, `package.json`) | `sdk/typescript/package-lock.json` |
 | `/opt/scaneval/*.mts`, `*.mjs` | `llm_harness_driver.mts`, `pi_oci_runner.mts`, `pi_open_context.mts` and any sibling Node helpers from `src/scaneval/adapters/` | the commit the image is built from |
 | `/opt/scaneval/runtime.json` | Build receipt read by the driver | written at build time from installed files |
@@ -34,7 +35,12 @@ timestamps; identical inputs produce identical bytes.
                "repository": "https://github.com/anshumanbh/securevibes-agent.git", "history": "shallow",
                "lockfile_sha256": "sha256:…", "tsx_version": "4.21.0" },
   "pi": { "package": "@earendil-works/pi-coding-agent", "version": "1.4.0",
-          "integrity": "sha512-…", "lockfile_sha256": "sha256:…" },
+          "integrity": "sha512-…", "lockfile_sha256": "sha256:…",
+          "cli": { "mode": "upstream_unbundled", "executable": "/opt/scaneval/bin/pi",
+                   "launcher": "/opt/scaneval/pi-cli.mjs", "launcher_sha256": "sha256:…",
+                   "entrypoint": "/opt/scaneval/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+                   "entrypoint_sha256": "sha256:…", "release_bundle_present": false },
+          "dependency_versions": { "minimatch": "11.0.3", "undici": "8.12.4", "protobufjs": "7.6.6" } },
   "node": { "version": "v26.7.0", "platform": "linux", "arch": "arm64",
             "base_image": "node:26.7.0-trixie-slim@sha256:…",
             "base_os": { "id": "debian", "version_id": "13", "codename": "trixie" } },
@@ -47,7 +53,27 @@ timestamps; identical inputs produce identical bytes.
 
 The build fails if the harness `HEAD` differs from `HARNESS_COMMIT`, the installed Pi version
 differs from 1.4.0 or from the lockfile, `node --version` is not v26.7.0, or any of the three
-required adapter files is missing.
+required adapter files is missing. It also checks the launcher target, confirms the unused
+release bundle is absent, and binds installed dependency versions to the lockfile.
+
+### Dependency security and the Pi entrypoint
+
+Pi 1.4.0's published CLI bundle embeds its own copies of minimatch and undici. npm overrides
+update installed dependencies but cannot patch that bundle. The image therefore launches the
+upstream unbundled `dist/cli.js`, whose imports use the patched packages, and excludes the
+unused `dist/bundle` directory and bundled CLI link. No upstream source file is patched.
+The bundled RPC export is unavailable in this image; the adapter uses the native CLI's JSON mode.
+
+The root overrides pin minimatch 11.0.3 and undici 8.12.4 to resolve the reported glob denial
+of service and HTTP/TLS/redirect vulnerabilities. Pi stays at 1.4.0 because 1.5.0 also changes
+tool-argument validation and coercion. The Observer SDK separately pins tsx 4.22.0 with
+esbuild 0.28.2 for the Windows development-server file-read fix.
+
+CI audits both lockfiles and exercises the real Pi CLI, model-glob selection, and proxy
+transport against local fixtures. Its module-load guard rejects any fallback into the
+prebuilt bundle. These checks use no model and establish dependency integration, not scan
+completion or detection quality. Existing images must be rebuilt and pinned by their new
+image ID to receive the fixes.
 
 ## Building
 
@@ -199,8 +225,9 @@ lives under `/tmp` and disappears with the container.
 - **Pinned exactly:** the Node base (digest), the harness commit and its npm lockfile, Pi and
   every transitive package (this directory's lockfile, verified by `npm ci`), the observer
   SDK's dev toolchain (its lockfile), and the adapter sources (the build commit, hashed into
-  `runtime.json`). Pi's own `protobufjs` 7.6.6 override is repeated in `package.json`, because
-  npm applies overrides only from the root manifest.
+  `runtime.json`). Root overrides pin `protobufjs` 7.6.6, `minimatch` 11.0.3 and `undici` 8.12.4;
+  npm applies overrides only from the root manifest. The receipt also binds the unbundled CLI
+  and image-owned launcher to their actual bytes.
 - **Not individually reproducible:** the Debian packages `git`, `ca-certificates`, `ripgrep`
   and `fd-find` come from the live archive at build time. Their installed versions are
   recorded in `runtime.json`.
