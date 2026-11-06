@@ -2349,6 +2349,22 @@ BLINDING_REMEDIATION = (
     "source paths, so scanner-facing configuration that must name such a path requires a standard input")
 
 
+def test_the_byoc_guide_tracks_the_blinded_run_leak_remediation():
+    guide = (Path(__file__).resolve().parents[1] / "docs" / "BRING_YOUR_OWN_CORPUS.md").read_text(
+        encoding="utf-8")
+    command = '$ $SB run "$BYOC/run-leaky.json" --output "$BYOC/runs/leaky" --workspace-root "$BYOC/workspaces"'
+    before, after = guide.split(command + "\n")
+    assert before.endswith("```\n")
+    transcript, _ = after.split("\n```\n", 1)
+    error = (
+        "scaneval: the run id names 'Acme', an original identity token of blinding map "
+        "acme-reporting-service, which would reach the scan of blinded input reporting-main.blinded"
+        + BLINDING_REMEDIATION)
+
+    assert transcript.split("\n") == [error, "exit=2"]
+    assert "; rename it, or leave that input standard" not in guide
+
+
 LEAKS = {
     "run-id": {"run_id": "widget-nightly"},
     "system-id": {"systems": [{"system_id": "widget-scanner", "adapter": "fake", "config": {}}]},
