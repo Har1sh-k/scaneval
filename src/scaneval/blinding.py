@@ -1325,6 +1325,7 @@ def _check_parsed(kind: str, where: str, text: str, new_text: str, originals: li
     """
     name, phrase, parse = _PARSERS[kind]
     label = f"{where} (a parsed string)"
+    too_deep = f"{where} is nested too deeply for its structure to be compared"
 
     def rewrite(string: str) -> str:
         return _replaced(string, [span for span in _spans(string, originals, label) if span[2] in listed],
@@ -1332,6 +1333,8 @@ def _check_parsed(kind: str, where: str, text: str, new_text: str, originals: li
 
     try:
         before = parse(text)
+    except RecursionError:
+        raise _refused(too_deep) from None
     except _PARSE_ERRORS as exc:
         raise _refused(f"{where} is not {phrase}, so an edit of it cannot be verified to keep its structure "
                        f"({_reason(exc)})") from exc
@@ -1345,7 +1348,7 @@ def _check_parsed(kind: str, where: str, text: str, new_text: str, originals: li
                            "quotation mark, a backslash, or another delimiter can break it") from exc
         difference = _difference(expected, after)
     except RecursionError:
-        raise _refused(f"{where} is nested too deeply for its structure to be compared") from None
+        raise _refused(too_deep) from None
     if difference:
         raise _refused(f"{where}: the transformed file does not keep the original's structure: it is not the "
                        f"original with only the reviewed replacements applied to its keys and strings ({difference})")

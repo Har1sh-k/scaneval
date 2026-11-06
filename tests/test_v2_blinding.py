@@ -1096,12 +1096,12 @@ def test_a_json_edit_that_would_change_the_structure_or_cannot_be_verified_is_re
     assert reason in refusal(tmp_path, "display.json", content, pseudonyms)
 
 
-def test_a_json_file_nested_too_deeply_to_read_is_refused_and_does_not_crash(tmp_path):
+def test_a_json_file_nested_too_deeply_is_refused_with_a_stable_reason_and_does_not_crash(tmp_path):
     content = "[" * 100_000 + '"Widget"' + "]" * 100_000
 
     reason = refusal(tmp_path, "display.json", content)
 
-    assert " is not strict JSON, so an edit of it cannot be verified to keep its structure (nested too deeply" in reason
+    assert reason == " is nested too deeply for its structure to be compared"
 
 
 TOML_ACCEPTED = {
