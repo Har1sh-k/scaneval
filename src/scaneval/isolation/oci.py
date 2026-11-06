@@ -98,7 +98,7 @@ _ISOLATED_GATEWAY = "com.docker.network.bridge.gateway_mode_ipv4"
 # The start time the engine reports for a container that never started, the zero time of Go.
 _NEVER_STARTED = "0001-01-01T00:00:00"
 _TRIAL_PREFIX = "scaneval-trial-"
-_STATE_NAME = re.compile(r"^[^/\x00]+$")
+_STATE_NAME = re.compile(r"^[^/\x00\n]+$")
 
 ENFORCED_NOTE = (
     "Each scanner process ran in a container created for it alone and removed after it: read-only "
@@ -687,7 +687,7 @@ class OciBackend:
 
     def _image_identity(self, reference: str | None, label: str) -> dict:
         """The pinned image as the engine holds it, or a refusal. Nothing is ever pulled."""
-        if not isinstance(reference, str) or not PINNED_IMAGE.match(reference):
+        if not isinstance(reference, str) or not PINNED_IMAGE.fullmatch(reference):
             raise IsolationError(f"the {label} {reference!r} is not pinned by digest")
         found = self._docker.run(["image", "inspect", reference], timeout=CONTROL_TIMEOUT)
         if found.returncode != 0:
@@ -744,7 +744,7 @@ class OciBackend:
         _open_for_reading(source)
         mounts = [_Mount(str(source), "ro", "source")]
         for state in self._state_dirs:
-            if not isinstance(state, str) or not _STATE_NAME.match(state) or state in (".", ".."):
+            if not isinstance(state, str) or not _STATE_NAME.fullmatch(state) or state in (".", ".."):
                 raise IsolationError(f"the adapter's state directory {state!r} is not one directory name")
             path = source / state
             if path.is_symlink() or (path.exists() and not path.is_dir()):

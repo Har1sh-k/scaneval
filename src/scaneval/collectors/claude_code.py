@@ -800,7 +800,7 @@ NO_ORIGIN = _Origin(None, None)
 
 def _origin(record: dict[str, Any], line: int | None) -> _Origin:
     value = record.get("timestamp")
-    timestamp = value if isinstance(value, str) and SOURCE_TIMESTAMP.match(value) else None
+    timestamp = value if isinstance(value, str) and SOURCE_TIMESTAMP.fullmatch(value) else None
     return _Origin(timestamp, line)
 
 

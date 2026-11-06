@@ -155,7 +155,7 @@ def pr_range(request: Any, adapter: Adapter) -> PrRange | None:
     named = []
     for key in ("base", "head"):
         value = pr.get(key)
-        if not isinstance(value, str) or not _COMMIT.match(value):
+        if not isinstance(value, str) or not _COMMIT.fullmatch(value):
             raise AdapterError(f"{adapter.name} was given a pr-mode request whose input.pr.{key} is not a full "
                                "lowercase commit id")
         named.append(value)

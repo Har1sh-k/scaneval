@@ -21,8 +21,8 @@
       "required": ["snapshot_id", "commit"],
       "properties": {
         "snapshot_id": {"type": "string", "minLength": 1},
-        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-        "git_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}(?![\\s\\S])"},
+        "git_tree": {"type": "string", "pattern": "^[0-9a-f]{40}(?![\\s\\S])"},
         "url": {"type": "string", "minLength": 1}
       }
     },
@@ -61,7 +61,7 @@
     }
   },
   "$defs": {
-    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"},
     "count": {"type": "integer", "minimum": 0},
     "path": {"type": "string", "minLength": 1},
     "lines": {"type": "array", "uniqueItems": true, "items": {"type": "integer", "minimum": 1}},

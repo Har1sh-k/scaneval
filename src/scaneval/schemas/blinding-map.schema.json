@@ -21,7 +21,7 @@
     },
     "map_id": {
       "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?![\\s\\S])",
       "description": "Stable id of this map. Related transformed inputs of one repository use one map id and content digest within each profile; different profiles can name different maps."
     },
     "map_version": {
@@ -89,11 +89,11 @@
           },
           "commit": {
             "type": "string",
-            "pattern": "^[0-9a-f]{40}$"
+            "pattern": "^[0-9a-f]{40}(?![\\s\\S])"
           },
           "tree_hash": {
             "type": "string",
-            "pattern": "^sha256:[0-9a-f]{64}$"
+            "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
           }
         }
       }
@@ -135,7 +135,7 @@
           "properties": {
             "category": {"enum": ["evaluator_evidence", "redaction_dictionary", "transformation_manifest"]},
             "path": {"type": "string", "minLength": 1},
-            "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+            "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"}
           }
         }}
       }
@@ -152,7 +152,7 @@
     },
     "reviews_sha256": {
       "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$",
+      "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
       "description": "Where the review chain ends: the chain_sha256 of the last review, present exactly when a review is recorded."
     },
     "notes": {
@@ -167,7 +167,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["edit_id", "path", "field_path", "replacement", "role_check", "rationale", "expected"],
       "properties": {
-        "edit_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "edit_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?![\\s\\S])"},
         "path": {"type": "string", "minLength": 1},
         "field_path": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
         "replacement": {"type": "string"},
@@ -183,7 +183,7 @@
       "required": ["snapshot_id", "state", "file_sha256", "original"],
       "properties": {
         "snapshot_id": {"type": "string", "minLength": 1}, "state": {"const": "present"},
-        "file_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "file_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"},
         "original": {"type": "string", "minLength": 1}, "raw_token": {"type": "string", "minLength": 1}
       }
     },
@@ -201,7 +201,7 @@
       "properties": {
         "edit_id": {
           "type": "string",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?![\\s\\S])"
         },
         "path": {
           "type": "string",
@@ -264,7 +264,7 @@
       "properties": {
         "removal_id": {
           "type": "string",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?![\\s\\S])"
         },
         "path": {
           "type": "string",
@@ -321,7 +321,7 @@
         },
         "file_sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         }
       }
     },
@@ -344,7 +344,7 @@
         },
         "file_sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         },
         "occurrences": {
           "type": "object",
@@ -412,12 +412,12 @@
         },
         "content_sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$",
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
           "description": "The digest of the map without its reviews, as the reviewer saw it."
         },
         "chain_sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$",
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
           "description": "This review's place in the chain: its own fields and the chain value of the review before it, computed by scaneval.contracts.chain_digest with kind blinding_review. Not a signature; it makes a quiet deletion visible."
         }
       }

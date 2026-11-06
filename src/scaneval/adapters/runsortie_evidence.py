@@ -307,7 +307,7 @@ def read_target_state(data: bytes | None, target: str) -> TargetState:
     heads = {}
     for key in ("repositoryHead", "productHead", "evidenceHead", "checkpoint"):
         head = record.get(key)
-        if head is not None and not (isinstance(head, str) and HEX40.match(head)):
+        if head is not None and not (isinstance(head, str) and HEX40.fullmatch(head)):
             issues.append(f"{key} is not a 40-hex commit")
             head = None
         heads[key] = head
@@ -345,7 +345,7 @@ def read_target_state(data: bytes | None, target: str) -> TargetState:
             if reason is not None and reason not in BASELINE_REASONS:
                 issues.append(f"baseline reason {reason!r} is not native")
             for name, head in (("attemptedHead", attempted), ("checkpoint", checkpoint)):
-                if head is not None and not (isinstance(head, str) and HEX40.match(head)):
+                if head is not None and not (isinstance(head, str) and HEX40.fullmatch(head)):
                     issues.append(f"baseline {name} is not a 40-hex commit")
             if reasons is not None and (not isinstance(reasons, list) or not all(_text(item) for item in reasons)):
                 issues.append("baseline acceptanceReasons is not a list of reasons")
@@ -403,7 +403,7 @@ def read_checkpoint(data: bytes | None, evaluated: str) -> Checkpoint:
     if failure or not isinstance(value, dict) or set(value) != {"lastBatchHead"}:
         return Checkpoint("invalid", None, ("the engine checkpoint is not a {lastBatchHead} record",))
     head = value["lastBatchHead"]
-    if not (isinstance(head, str) and HEX40.match(head)):
+    if not (isinstance(head, str) and HEX40.fullmatch(head)):
         return Checkpoint("invalid", None, ("the engine checkpoint head is not a 40-hex commit",))
     if head != evaluated:
         return Checkpoint("mismatch", head, (f"the engine checkpoint {head[:12]} is not the evaluated head",))
@@ -424,7 +424,7 @@ def _recovery_valid(record: Any) -> bool:
     hypotheses, items, limits = record.get("hypotheses"), record.get("workItems"), record.get("limits")
     status, reasons = record.get("status"), record.get("reasons")
     if (status not in ("complete", "retryable", "blocked") or not isinstance(record.get("planHash"), str)
-            or not HEX64.match(record["planHash"]) or not all(isinstance(part, dict) for part in (hypotheses, items, limits))
+            or not HEX64.fullmatch(record["planHash"]) or not all(isinstance(part, dict) for part in (hypotheses, items, limits))
             or not isinstance(reasons, list) or not all(_text(reason) for reason in reasons)):
         return False
     h = [hypotheses.get(key) for key in ("planned", "scheduled", "succeeded", "failed", "exhausted", "stillUnevaluated")]
@@ -2021,7 +2021,7 @@ class GitEvidence(NamedTuple):
 def classify_commit(*, evaluated: str, head: str | None, parents: tuple[str, ...] | None,
                     changed: tuple[str, ...] | None, worktree_matches: bool | None) -> GitEvidence:
     """Classify the history read by the adapter; this function only judges what was read."""
-    if head is None or not HEX40.match(head):
+    if head is None or not HEX40.fullmatch(head):
         return GitEvidence("invalid", None, (), ("the evaluated repository's HEAD could not be read",))
     if head == evaluated:
         return GitEvidence("unchanged", head, (), ())

@@ -2083,7 +2083,7 @@ def import_sarif(sarif_path: Path, *, pack: dict, snapshot_id: str, tree_hash: s
     real directory. The run id defaults to :func:`default_run_id`. The review is a machine draft:
     every decision is ``unresolved`` and the record's state is ``draft``.
     """
-    if not isinstance(tree_hash, str) or not _TREE_HASH.match(tree_hash):
+    if not isinstance(tree_hash, str) or not _TREE_HASH.fullmatch(tree_hash):
         raise SarifImportError(f"the tree hash must be a sha256:<64 hex digits> digest, not {tree_hash!r}")
     if not is_stated(system_id):
         raise SarifImportError("a system id is required: say which system produced the log")

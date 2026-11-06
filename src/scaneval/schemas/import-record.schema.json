@@ -371,7 +371,7 @@
   "$defs": {
     "sha256": {
       "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$"
+      "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
     },
     "text_or_null": {
       "type": [
@@ -382,7 +382,7 @@
     },
     "result_pointer": {
       "type": "string",
-      "pattern": "^/runs/[0-9]+/results/[0-9]+$"
+      "pattern": "^/runs/[0-9]+/results/[0-9]+(?![\\s\\S])"
     },
     "pointed": {
       "type": "object",
@@ -394,7 +394,7 @@
       "properties": {
         "pointer": {
           "type": "string",
-          "pattern": "^/runs/[0-9]+(/.*)?$"
+          "pattern": "^/runs/[0-9]+(/.*)?(?![\\s\\S])"
         },
         "reason": {
           "type": "string",
@@ -498,7 +498,7 @@
             },
             {
               "type": "string",
-              "pattern": "^/runs/[0-9]+/tool/(driver|extensions/[0-9]+)/rules/[0-9]+$"
+              "pattern": "^/runs/[0-9]+/tool/(driver|extensions/[0-9]+)/rules/[0-9]+(?![\\s\\S])"
             }
           ]
         },
@@ -599,7 +599,7 @@
       "properties": {
         "pointer": {
           "type": "string",
-          "pattern": "^/runs/[0-9]+/invocations/[0-9]+$"
+          "pattern": "^/runs/[0-9]+/invocations/[0-9]+(?![\\s\\S])"
         },
         "execution_successful": {
           "type": [
@@ -624,7 +624,7 @@
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^/runs/[0-9]+/invocations/[0-9]+/tool(Execution|Configuration)Notifications/[0-9]+$"
+            "pattern": "^/runs/[0-9]+/invocations/[0-9]+/tool(Execution|Configuration)Notifications/[0-9]+(?![\\s\\S])"
           }
         }
       }

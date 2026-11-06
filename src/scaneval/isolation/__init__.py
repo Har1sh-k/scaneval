@@ -131,14 +131,14 @@ def resolve_execution(execution: dict[str, Any] | None, network_policy: str) -> 
             raise IsolationError(f"the local backend enforces nothing, so it takes no {', '.join(extra)}")
         return ExecutionSettings("local", network_policy)
     image = execution.get("image")
-    if not isinstance(image, str) or not PINNED_IMAGE.match(image):
+    if not isinstance(image, str) or not PINNED_IMAGE.fullmatch(image):
         raise IsolationError(f"execution.image must be an image pinned by digest, not {image!r}")
     proxy_image = execution.get("proxy_image")
     raw_egress = execution.get("egress") or []
     if network_policy in ("model_provider_only", "public_research"):
         if not raw_egress:
             raise IsolationError(f"{network_policy} needs the egress it allows declared in execution.egress")
-        if not isinstance(proxy_image, str) or not PINNED_IMAGE.match(proxy_image):
+        if not isinstance(proxy_image, str) or not PINNED_IMAGE.fullmatch(proxy_image):
             raise IsolationError(
                 f"{network_policy} needs execution.proxy_image pinned by digest, not {proxy_image!r}")
     elif raw_egress or proxy_image:
@@ -146,7 +146,7 @@ def resolve_execution(execution: dict[str, Any] | None, network_policy: str) -> 
     egress: list[tuple[str, int]] = []
     for index, entry in enumerate(raw_egress):
         host, port = (entry or {}).get("host"), (entry or {}).get("port")
-        if not isinstance(host, str) or not _EGRESS_HOST.match(host) or len(host) > 253:
+        if not isinstance(host, str) or not _EGRESS_HOST.fullmatch(host) or len(host) > 253:
             raise IsolationError(f"execution.egress[{index}].host must be a host name or an IP literal, "
                                  f"not {host!r}")
         if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
@@ -160,7 +160,7 @@ def resolve_execution(execution: dict[str, Any] | None, network_policy: str) -> 
     credentials: list[tuple[str, str]] = []
     for index, entry in enumerate(execution.get("credentials") or []):
         name, provider = (entry or {}).get("env"), (entry or {}).get("provider")
-        if not isinstance(name, str) or not _ENV_NAME.match(name):
+        if not isinstance(name, str) or not _ENV_NAME.fullmatch(name):
             raise IsolationError(f"execution.credentials[{index}].env must name an environment "
                                  f"variable, not {name!r}")
         if network_policy == "public_research" and (name.startswith(("GIT_", "SCANEVAL_")) or name in
@@ -173,7 +173,7 @@ def resolve_execution(execution: dict[str, Any] | None, network_policy: str) -> 
         credentials.append((name, provider))
     limits = _limits(execution.get("limits") or {})
     user = execution.get("user", DEFAULT_USER)
-    match = _USER.match(user) if isinstance(user, str) else None
+    match = _USER.fullmatch(user) if isinstance(user, str) else None
     if match is None:
         raise IsolationError(f"execution.user must be numeric uid:gid, not {user!r}")
     if int(match.group(1)) == 0:

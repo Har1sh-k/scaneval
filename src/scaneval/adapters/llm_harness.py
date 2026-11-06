@@ -256,7 +256,7 @@ def image_settings(config: dict) -> dict[str, Any]:
         raise AdapterError("config.model (harness model route) is required")
     synthetic = model == SYNTHETIC_MODEL
     provider, _, model_id = model.partition("/")
-    if not synthetic and (provider not in IMAGE_PROVIDERS or not _MODEL_ID.match(model_id)):
+    if not synthetic and (provider not in IMAGE_PROVIDERS or not _MODEL_ID.fullmatch(model_id)):
         raise AdapterError(f"runtime oci_image supports the provider route(s) {', '.join(IMAGE_PROVIDERS)} as "
                            f"'<provider>/<model id>', not {model!r}; no other provider or model is substituted")
     thinking = config.get("thinking_level", "high")
@@ -266,7 +266,7 @@ def image_settings(config: dict) -> dict[str, Any]:
     if synthetic:
         if auth_env is not None:
             raise AdapterError("the synthetic diagnostic route takes no credential; remove config.pi_auth_env")
-    elif (not isinstance(auth_env, str) or not _ENV_NAME.match(auth_env)
+    elif (not isinstance(auth_env, str) or not _ENV_NAME.fullmatch(auth_env)
           or auth_env.startswith(("GIT_", "SCANEVAL_", "PI_"))
           or auth_env in {"HOME", "PATH", "TMPDIR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}):
         raise AdapterError("config.pi_auth_env must name an environment variable outside the GIT_, SCANEVAL_ and PI_ "
@@ -292,7 +292,7 @@ def image_settings(config: dict) -> dict[str, Any]:
     expected_commit = config.get("expected_harness_commit", None if synthetic else DEFAULT_IMAGE_HARNESS_COMMIT)
     if not synthetic and expected_commit is None:
         raise AdapterError("config.expected_harness_commit cannot be null on the real model route")
-    if expected_commit is not None and (not isinstance(expected_commit, str) or not _COMMIT.match(expected_commit)):
+    if expected_commit is not None and (not isinstance(expected_commit, str) or not _COMMIT.fullmatch(expected_commit)):
         raise AdapterError("config.expected_harness_commit must be a full 40-character commit id")
     expected_pi = config.get("expected_pi_version", None if synthetic else DEFAULT_IMAGE_PI_VERSION)
     if not synthetic and expected_pi is None:

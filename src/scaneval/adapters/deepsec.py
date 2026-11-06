@@ -297,7 +297,7 @@ def session_id_usable(session_id: Any) -> bool:
         helper = None
     if helper is not None:
         return bool(helper(session_id))
-    return bool(SESSION_ID.match(session_id)) and not SESSION_ID_FORBIDDEN.search(session_id)
+    return bool(SESSION_ID.fullmatch(session_id)) and not SESSION_ID_FORBIDDEN.search(session_id)
 
 
 def kind_for_slug(slug: str | None) -> str:
@@ -662,7 +662,7 @@ def settings(spec: SystemSpec) -> Settings:
         raise AdapterError(f"deepsec workspace root does not exist: {root}")
     binary = root / "node_modules" / ".bin" / "deepsec"
     project_id = _text(spec, "project_id")
-    if project_id is not None and not PROJECT_ID.match(project_id):
+    if project_id is not None and not PROJECT_ID.fullmatch(project_id):
         raise AdapterError(f"deepsec config.project_id {project_id!r} is not a project id DeepSec "
                            f"accepts (it must match {PROJECT_ID.pattern})")
     projects_dir = Path(_text(spec, "claude_projects_dir", DEFAULT_PROJECTS_DIR) or

@@ -24,7 +24,7 @@
     },
     "run_id": {
       "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?![\\s\\S])"
     },
     "created_at": {
       "type": "string",
@@ -32,7 +32,7 @@
     },
     "config_sha256": {
       "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$",
+      "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
       "description": "canonical_sha256 of the whole run configuration, as the run manifest records it."
     },
     "pack": {
@@ -60,7 +60,7 @@
         },
         "sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         }
       }
     },
@@ -102,7 +102,7 @@
   "$defs": {
     "sha256": {
       "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$"
+      "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
     },
     "id": {
       "type": "string",
@@ -137,7 +137,7 @@
         },
         "map_sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         }
       }
     },
@@ -362,7 +362,7 @@
       "properties": {
         "input_id": {
           "type": "string",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?![\\s\\S])"
         },
         "mode": {
           "enum": [
@@ -473,7 +473,7 @@
             "string",
             "null"
           ],
-          "pattern": "^sha256:[0-9a-f]{64}$",
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
           "description": "The export the pack's snapshot declares before this run exports it; null when it declares none."
         },
         "plan": {
@@ -503,7 +503,7 @@
       "properties": {
         "system_id": {
           "type": "string",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?![\\s\\S])"
         },
         "adapter": {
           "type": "string",
@@ -525,7 +525,7 @@
         },
         "config_sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$",
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
           "description": "canonical_sha256 of the system's config object."
         },
         "network_policy": {

@@ -8,14 +8,14 @@
   "properties": {
     "schema_version": {"const": "2.0"},
     "run_id": {"type": "string", "minLength": 1},
-    "decisions_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-    "plan_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "decisions_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"},
+    "plan_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"},
     "state": {"enum": ["draft", "human_approved"]},
     "created_at": {"type": "string", "minLength": 1},
     "reviews": {"type": "array", "items": {
       "type": "object", "additionalProperties": false, "required": ["reviewer", "at", "decisions_sha256", "note"],
       "properties": {"reviewer": {"type": "string", "minLength": 1}, "at": {"type": "string", "minLength": 1},
-                     "decisions_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "note": {"type": "string"}}}},
+                     "decisions_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"}, "note": {"type": "string"}}}},
     "notes": {"type": "array", "items": {"type": "string"}}
   }
 }
