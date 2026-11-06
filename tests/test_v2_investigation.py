@@ -160,6 +160,35 @@ def test_evaluation_binding_accepts_the_synchronized_fixture(tmp_path, upstream)
     assert build_investigation(run)["invocations"][0]["bindings"]["evaluation"] == "current"
 
 
+def test_evaluation_binding_checks_claim_count_against_bound_result(tmp_path, upstream):
+    run = make_run(tmp_path, upstream)
+    assert build_investigation(run)["invocations"][0]["bindings"]["evaluation"] == "current"
+
+    bundle = next((run / "invocations").iterdir())
+    result_path = bundle / "result.json"
+    result = json.loads(result_path.read_text())
+    claim_count = len(result["claims"])
+
+    evaluation_path = bundle / "evaluation.json"
+    evaluation = json.loads(evaluation_path.read_text())
+    evaluation["metrics"]["claim_records"] += 1
+
+    manifest_path = run / "run-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    row = next(row for row in manifest["invocations"]
+               if row["bundle_path"] == bundle.relative_to(run).as_posix())
+    row["claim_records"] += 1
+
+    assert evaluation["metrics"]["claim_records"] == row["claim_records"] == claim_count + 1
+    assert evaluation["result_sha256"] == canonical_sha256(result)
+    validate_document("run-manifest", manifest)
+    evaluation_path.write_text(json.dumps(evaluation))
+    manifest_path.write_text(json.dumps(manifest))
+    assert len(json.loads(result_path.read_text())["claims"]) == claim_count
+
+    assert build_investigation(run)["invocations"][0]["bindings"]["evaluation"] == "stale"
+
+
 def test_evaluation_binding_uses_scorer_order_for_a_current_unsorted_plan(tmp_path, upstream):
     run = make_run(tmp_path, upstream)
     bundle = next((run / "invocations").iterdir())

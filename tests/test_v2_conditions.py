@@ -125,6 +125,22 @@ def test_schema_2_1_without_condition_record_fails_closed_and_keeps_coverage_ide
     }]
 
 
+def test_schema_2_1_missing_condition_and_result_returns_both_early_gaps(tmp_path):
+    bundle, saved = invoke(tmp_path)
+    validate_document(conditions.KIND, saved)
+    assert saved["status"] == "attested"
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert execution["schema_version"] == "2.1"
+
+    (bundle / conditions.RECORD_FILE).unlink()
+    (bundle / "result.json").unlink()
+
+    record = conditions.classify_observation(bundle)
+
+    assert record["status"] == "unavailable"
+    assert codes(record) == {"missing_condition_record", "missing_result"}
+
+
 def test_initial_record_bypass_is_private_to_creation_and_public_reads_still_fail_closed(tmp_path):
     bundle, saved = invoke(tmp_path)
     with pytest.raises(ContractError, match="requires condition.json to be absent"):
