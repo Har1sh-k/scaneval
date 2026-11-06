@@ -8,7 +8,13 @@ The language-neutral event contract is [`schema/v2/trace-event.schema.json`](../
 
 ## Installation and import
 
-**Python.** The emitter ships inside the `scaneval` distribution and has no dependencies of its own. Install the project (`python -m pip install -e .` from the repository root) and import the package directly:
+**Python.** The emitter ships inside the `scaneval` distribution and has no dependencies of its own. Install the alpha distribution, or use `python -m pip install -e .` from a repository checkout for development:
+
+```sh
+python -m pip install scaneval==2.0.0a1
+```
+
+Import the emitter directly:
 
 ```python
 from scaneval.observer import CaptureState, MAX_PAYLOAD_DEPTH, Observer, create_jsonl_sink
@@ -16,21 +22,30 @@ from scaneval.observer import CaptureState, MAX_PAYLOAD_DEPTH, Observer, create_
 
 `scaneval.observer` deliberately imports nothing from the evaluator: not the contracts, scoring, runner, execution, review, report, or adapter modules. A harness can depend on the emitter without acquiring the machinery that judges it, and a test pins that boundary.
 
-**TypeScript.** `@scaneval/observer` is marked `private` in its `package.json` and is not published to a registry. Build it locally and consume it by path:
+**TypeScript.** The npm alpha is `@scaneval/observer@0.1.0-alpha.1`. It supports Node.js 22 and later and is ESM only. Install an exact alpha version, or select the `next` channel for the most recent alpha:
+
+```sh
+npm install @scaneval/observer@0.1.0-alpha.1
+# Or: npm install @scaneval/observer@next
+```
+
+For development, build the local package:
 
 ```sh
 cd sdk/typescript
-npm install
+npm ci
 npm run build
 ```
 
-The build output is conventional `dist/` JavaScript plus declarations (`dist/index.js`, `dist/index.d.ts`), and the package is ESM only (`"type": "module"`). Depend on it with a file specifier (`npm install file:../scaneval/sdk/typescript`) or import the build output directly:
+The package includes conventional `dist/` JavaScript plus declarations (`dist/index.js`, `dist/index.d.ts`). A local checkout can also be installed with a file specifier (`npm install file:../scaneval/sdk/typescript`). Both forms expose the same imports:
 
 ```ts
 import { MAX_PAYLOAD_DEPTH, Observer, createJsonlSink } from "@scaneval/observer";
 ```
 
 The package has no runtime dependencies.
+
+The package release process builds from a clean checkout and installs the actual wheel, source archive and npm tarball in isolated consumers. See [publishing alpha packages](RELEASING.md). The event contract is versioned independently from the package version; these alpha packages emit schema `2.0`.
 
 ## The shared parity contract
 

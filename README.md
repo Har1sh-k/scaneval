@@ -4,6 +4,17 @@ ScanEval evaluates security scanners on versioned cases and records how instrume
 
 > Alpha (`2.0.0a1`). No benchmark results are published. The [selected CVE corpus](corpus/diverse/README.md) contains 50 CVEs from 32 repositories across seven target languages: 9 Critical, 13 High, 20 Medium and 8 Low by the documented published-CVSS policy. Its 48 pinned vulnerable exports have mechanical checks and a separate machine-review workflow for static labels. Selection emphasizes contextual security reasoning; scanner miss rates remain unmeasured. Fixed controls remain unvalidated. Scanner outputs and traces stay local.
 
+## Alpha packages
+
+The Python distribution includes the CLI and `scaneval.observer`. The TypeScript Observer is a separate ESM package with no runtime dependencies; it supports Node.js 22 and later. Both emit the same versioned trace-event contract.
+
+```bash
+python -m pip install scaneval==2.0.0a1
+npm install @scaneval/observer@0.1.0-alpha.1
+```
+
+The npm `next` channel tracks alpha SDK releases. See the [Observer guide](docs/OBSERVER_SDK.md) for integration and privacy limits, and [release instructions](docs/RELEASING.md) for package verification and publishing. Use a source checkout for the corpus, examples, and development workflow below.
+
 ## Quick start
 
 Requires Git and Python 3.11+. Live runs also need the configured scanner.

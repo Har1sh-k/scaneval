@@ -1,0 +1,29 @@
+include LICENSE README.md README_PYPI.md pyproject.toml .gitignore
+recursive-include src *.py *.json *.mts *.mjs
+recursive-include docs *.md *.json
+recursive-include examples *.py *.mts *.md *.json *.toml
+recursive-include schema *.json *.jsonl
+recursive-include corpus *.md *.json
+recursive-include scripts *.py
+recursive-include tools *.py
+recursive-include tests *.py *.json *.sarif *.mjs
+recursive-include sdk/typescript *.json *.ts *.mjs *.md LICENSE
+include sdk/typescript/.gitignore
+recursive-include containers/sv-agent Dockerfile Dockerfile.dockerignore *.json *.mjs *.md *.sh
+recursive-include skills *.md *.yaml
+recursive-include .github *.yml
+
+# Source archives carry runnable examples and test fixtures, never local runs or caches.
+prune .git
+prune .repos
+prune results
+prune build
+prune dist
+prune .venv
+prune .pytest_cache
+prune .claude
+prune .securevibes
+prune sdk/typescript/node_modules
+prune sdk/typescript/dist
+prune containers/sv-agent/node_modules
+global-exclude __pycache__ *.py[cod] .DS_Store

@@ -1,8 +1,17 @@
 {
   "name": "@scaneval/observer",
-  "version": "0.1.0-experimental",
-  "private": true,
-  "description": "Experimental, opt-in observer protocol emitter for ScanEval harnesses",
+  "version": "0.1.0-alpha.1",
+  "description": "Opt-in observer protocol emitter for ScanEval harnesses",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Har1sh-k/scaneval.git",
+    "directory": "sdk/typescript"
+  },
+  "homepage": "https://github.com/Har1sh-k/scaneval/tree/main/sdk/typescript#readme",
+  "bugs": {"url": "https://github.com/Har1sh-k/scaneval/issues"},
+  "engines": {"node": ">=22"},
+  "publishConfig": {"access": "public", "tag": "next"},
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -12,10 +21,12 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": ["dist", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test test/*.test.mjs"
+    "prepack": "npm run build",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "test:package": "node test/package-smoke.mjs"
   },
   "devDependencies": {
     "tsx": "4.22.0",

@@ -1,0 +1,186 @@
+name: Alpha packages
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/publish-packages.yml'
+      - 'pyproject.toml'
+      - 'MANIFEST.in'
+      - 'README_PYPI.md'
+      - 'LICENSE'
+      - 'src/**'
+      - 'sdk/typescript/**'
+      - 'scripts/check_python_package.py'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-packages.yml'
+      - 'pyproject.toml'
+      - 'MANIFEST.in'
+      - 'README_PYPI.md'
+      - 'LICENSE'
+      - 'src/**'
+      - 'sdk/typescript/**'
+      - 'scripts/check_python_package.py'
+  workflow_dispatch:
+    inputs:
+      registry:
+        description: Registry to publish
+        type: choice
+        options: [both, npm, pypi]
+        default: both
+      publish:
+        description: Publish the verified artifacts (requires registry trusted-publisher setup)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alpha-packages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  python-artifacts:
+    name: Python wheel and source archive
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Build and validate distribution metadata
+        run: |
+          python -m pip install build twine
+          python - <<'PY'
+          import tomllib
+          from packaging.version import Version
+          with open('pyproject.toml', 'rb') as source:
+              project = tomllib.load(source)['project']
+          assert project['name'] == 'scaneval'
+          assert Version(project['version']).is_prerelease, 'This workflow publishes alpha releases only'
+          PY
+          python -m build --outdir "$RUNNER_TEMP/python-dist"
+          python -m twine check --strict "$RUNNER_TEMP"/python-dist/*
+      - name: Install and exercise the exact wheel and source archive
+        run: |
+          for artifact in "$RUNNER_TEMP"/python-dist/*; do
+            python scripts/check_python_package.py "$artifact"
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: python-dist-${{ github.sha }}
+          path: ${{ runner.temp }}/python-dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  sdk-artifact:
+    name: npm package on Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24', '26']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - name: Install and test the SDK
+        working-directory: sdk/typescript
+        run: |
+          node -e 'const p = require("./package.json"); if (!/^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$/.test(p.version)) throw new Error("An alpha version is required");'
+          npm ci --ignore-scripts
+          npm test
+      - name: Build and test the registry tarball
+        working-directory: sdk/typescript
+        run: |
+          mkdir "$RUNNER_TEMP/npm-dist"
+          npm pack --pack-destination "$RUNNER_TEMP/npm-dist"
+          npm run test:package -- "$RUNNER_TEMP"/npm-dist/*.tgz
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: npm-dist-${{ github.sha }}-node-${{ matrix.node }}
+          path: ${{ runner.temp }}/npm-dist/*.tgz
+          if-no-files-found: error
+          retention-days: 14
+
+  verified-main:
+    name: Require successful main CI before publishing
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Refuse publication outside main or before its CI passes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          test "$RELEASE_REF" = refs/heads/main
+          gh api --method GET "repos/$REPOSITORY/actions/workflows/ci.yml/runs" \
+            -f head_sha="$RELEASE_SHA" -f status=success -f event=push > "$RUNNER_TEMP/ci.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          runs = json.loads(Path(os.environ['RUNNER_TEMP'], 'ci.json').read_text())['workflow_runs']
+          assert any(run['head_sha'] == os.environ['RELEASE_SHA'] and run['conclusion'] == 'success'
+                     and run['event'] == 'push' for run in runs), 'Current main CI has not passed'
+          PY
+
+  publish-npm:
+    name: Publish npm alpha under next
+    needs: [sdk-artifact, python-artifacts, verified-main]
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.registry != 'pypi'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Use a known OIDC-capable npm CLI
+        run: npm install --global npm@11.19.0 --ignore-scripts
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-dist-${{ github.sha }}-node-24
+          path: npm-dist
+      - name: Publish the tested tarball with provenance
+        run: npm publish npm-dist/*.tgz --ignore-scripts --access public --tag next --provenance
+
+  publish-pypi:
+    name: Publish Python alpha to PyPI
+    needs: [python-artifacts, sdk-artifact, verified-main]
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.registry != 'npm'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: python-dist-${{ github.sha }}
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
