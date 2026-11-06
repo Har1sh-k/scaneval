@@ -117,11 +117,12 @@ test("unsupported stage argv fails without quoting prompt text, and another mode
   assert.equal(calls.length, 0);
 });
 
-test("a stage prompt already on stdin is refused rather than replaced by the last argv word", async () => {
+test("every own stage stdin value is refused without echoing it or reaching exec", async () => {
   const { raw, calls } = makeRunner();
-  for (const stdin of ["PIPED-SOURCE-PROMPT", ""]) {
+  const values = ["PIPED-SOURCE-PROMPT", "", new Uint8Array([83, 79, 85, 82, 67, 69]), null, 0];
+  for (const stdin of values) {
     await assert.rejects(raw.runPi({ args: STAGE, stdin, cwd: "/tmp", timeoutMs: 1 }),
-      (error) => /prompt on stdin/.test(error.message) && !error.message.includes("SOURCE"));
+      (error) => error.message === "the harness stage passed a prompt on stdin; the image runner takes the prompt only from argv");
   }
   assert.equal(calls.length, 0);
 });
