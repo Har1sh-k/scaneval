@@ -5376,8 +5376,11 @@ def test_a_listed_path_without_a_regex_record_runs_no_ai_batch(tmp_path, monkeyp
     assert (f"1 listed path lacks a readable FileRecord under the exact listed filePath spelling ({listed}). "
             "For readable records, this can mean no matcher hit, an ignore-filter skip, native discovery did not "
             "enumerate the path (dot-leading .storybook/main.js is a known example), or DeepSec recorded the "
-            "corresponding file under another spelling. These readable-record possibilities mean this exact "
-            "manifest assigned no AI batch for the listed spelling, and none is a model miss.") in note
+            "corresponding file under another spelling. For every one of these readable-record possibilities, "
+            "each affected exact manifest entry selected no readable FileRecord; that fact alone is not a model "
+            "miss. A FileRecord under another spelling may still be selected if that spelling is also a manifest "
+            "entry.") in note
+    assert "assigned no AI batch for the listed spelling" not in note
 
 
 def test_a_dot_leading_listed_file_with_no_record_has_only_bounded_native_explanations(tmp_path, monkeypatch):
@@ -5393,7 +5396,10 @@ def test_a_dot_leading_listed_file_with_no_record_has_only_bounded_native_explan
     assert ("native discovery did not enumerate the path (dot-leading .storybook/main.js is a known example)"
             in note)
     assert "this can mean" in note, "native non-enumeration is one bounded possibility, not a reproduced cause"
-    assert "this exact manifest assigned no AI batch for the listed spelling, and none is a model miss" in note
+    assert ("each affected exact manifest entry selected no readable FileRecord; that fact alone is not a model "
+            "miss") in note
+    assert "may still be selected if that spelling is also a manifest entry" in note
+    assert "assigned no AI batch for the listed spelling" not in note
     assert "the fake" not in note and "reproduced" not in note
 
 
@@ -5415,9 +5421,23 @@ def test_an_alternate_record_filepath_spelling_stays_unselected_without_becoming
     assert scope.selected == ()
     assert listed in scope.listed_without_record
     assert listed in scope.unselected
+
+    # The lowercase spelling cannot pass this tree's exact preflight, so exercise only the
+    # record-selection helper with both entries: the lowercase FileRecord is selected without
+    # making the mixed-case entry acquire an exact readable record or creating an unselected one.
+    both_spellings = curated_scope(
+        (listed, recorded), ((listed + ".json", aliased),), result["claims"], ())
+    assert both_spellings.selected == (listed + ".json",)
+    assert both_spellings.listed_without_record == (listed,)
+    assert both_spellings.unselected == ()
+
     note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
     assert f"exact listed filePath spelling ({listed})" in note
     assert "DeepSec recorded the corresponding file under another spelling" in note
+    assert ("each affected exact manifest entry selected no readable FileRecord; that fact alone is not a model "
+            "miss") in note
+    assert "may still be selected if that spelling is also a manifest entry" in note
+    assert "assigned no AI batch for the listed spelling" not in note
     assert "native triage" not in note
 
 
@@ -5433,7 +5453,10 @@ def test_a_curated_run_over_a_tree_with_no_regex_candidate_is_still_not_a_succes
     note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
     assert ("2 listed paths lack a readable FileRecord under the exact listed filePath spellings "
             "(src/db.js, src/server.js).") in note
-    assert "batch for the listed spellings, and none is a model miss" in note
+    assert ("each affected exact manifest entry selected no readable FileRecord; that fact alone is not a model "
+            "miss") in note
+    assert "may still be selected if that spelling is also a manifest entry" in note
+    assert "assigned no AI batch for the listed spelling" not in note
 
 
 def test_a_failed_selected_batch_keeps_its_own_failure_and_its_claims(tmp_path, monkeypatch):

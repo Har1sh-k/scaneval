@@ -3564,8 +3564,10 @@ class DeepsecAdapter(Adapter):
                         f". For readable records, this can mean no matcher hit, an ignore-filter skip, native "
                         f"discovery did not enumerate the {listed_object} (dot-leading .storybook/main.js is a "
                         f"known example), or DeepSec recorded the corresponding {corresponding} under another "
-                        "spelling. These readable-record possibilities mean this exact manifest assigned no AI "
-                        f"batch for the listed {listed_spelling}, and none is a model miss."
+                        "spelling. For every one of these readable-record possibilities, each affected exact "
+                        "manifest entry selected no readable FileRecord; that fact alone is not a model miss. A "
+                        "FileRecord under another spelling may still be selected if that spelling is also a "
+                        "manifest entry."
                     )
                     if records.failures:
                         failure_count = len(records.failures)
