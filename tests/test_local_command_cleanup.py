@@ -93,6 +93,75 @@ def test_normal_and_timeout_preserve_both_output_streams(tmp_path, timeout):
     assert (tmp_path/'err').read_text() == 'err\n'
 
 
+def test_opt_in_group_empty_check_stops_a_descendant_left_after_normal_exit(tmp_path):
+    """RunSortie's leader can exit while one of its native descendants remains in the session."""
+    script = r'''
+import pathlib, subprocess, sys, time
+root = pathlib.Path(sys.argv[1])
+child = subprocess.Popen([
+    sys.executable, '-c',
+    "import pathlib,sys,time; p=pathlib.Path(sys.argv[1]); exec('while True:\\n p.write_text(str(time.time()))\\n time.sleep(.02)')",
+    str(root / 'descendant-heartbeat'),
+])
+(root / 'descendant-pid').write_text(str(child.pid))
+time.sleep(.15)
+'''
+    result = run_command(
+        [sys.executable, '-c', script, str(tmp_path)], cwd=tmp_path, timeout_seconds=10,
+        env=build_env(), stdout_path=tmp_path/'out', stderr_path=tmp_path/'err', ensure_group_empty=True,
+    )
+    assert result.exit_code == 0 and result.timed_out is False
+    assert result.cleanup_succeeded is True
+    before = (tmp_path/'descendant-heartbeat').read_bytes()
+    time.sleep(.15)
+    assert (tmp_path/'descendant-heartbeat').read_bytes() == before
+
+
+def test_group_empty_cleanup_signals_only_while_leader_is_unreaped(tmp_path, monkeypatch):
+    """The leader's waitable zombie reserves the numeric PGID until every signal is done."""
+    real_killpg = os.killpg
+    signalled = []
+
+    def guarded_killpg(pid, sig):
+        if sig:
+            event = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            assert event is not None, "process group was signalled without an exited unreaped leader"
+            signalled.append(sig)
+        return real_killpg(pid, sig)
+
+    script = r'''
+import subprocess, sys
+subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+'''
+    monkeypatch.setattr(os, 'killpg', guarded_killpg)
+    result = run_command(
+        [sys.executable, '-c', script], cwd=tmp_path, timeout_seconds=10,
+        env=build_env(), stdout_path=tmp_path/'out', stderr_path=tmp_path/'err',
+        ensure_group_empty=True,
+    )
+    assert result.cleanup_succeeded is True
+    assert signal.SIGTERM in signalled
+    assert signal.SIGKILL in signalled
+
+
+def test_group_empty_cleanup_feeds_stdin_before_reaping_and_stops_descendants(tmp_path):
+    script = r'''
+import pathlib, subprocess, sys
+root = pathlib.Path(sys.argv[1])
+payload = sys.stdin.read()
+(root / 'received').write_text(payload)
+subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+'''
+    result = run_command(
+        [sys.executable, '-c', script, str(tmp_path)], cwd=tmp_path, timeout_seconds=10,
+        env=build_env(), stdout_path=tmp_path/'out', stderr_path=tmp_path/'err',
+        stdin_text='private-input\n', ensure_group_empty=True,
+    )
+    assert result.exit_code == 0 and result.timed_out is False
+    assert result.cleanup_succeeded is True
+    assert (tmp_path/'received').read_text() == 'private-input\n'
+
+
 @pytest.mark.parametrize('persistent_failure,bad_note', [(False, False), (True, False), (True, True)])
 def test_cleanup_interrupts_preserve_original_and_still_reap_and_close(tmp_path, monkeypatch, persistent_failure, bad_note):
     real_popen = subprocess.Popen

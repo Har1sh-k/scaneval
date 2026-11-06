@@ -683,8 +683,9 @@ def _input_tree(source_dir: Path, state_dirs: frozenset[str], *, created_git: bo
 
     Excluded, and why. Symbolic links and anything that is not a regular file, because they
     have no content of their own to hash. Each of the adapter's declared *state_dirs*, because
-    they are the scanner's private scratch space, are preserved separately under
-    ``raw/harness-state/``, and exist only because the scanner created them. A top-level
+    they are the scanner's private scratch space and exist only because the scanner created them.
+    They are normally preserved separately under ``raw/harness-state/``; an adapter may instead
+    declare the subset copied there when it already performs its own bounded evidence import. A top-level
     ``.git`` component only when *created_git* says this run wrote one
     (:func:`~scaneval.materialize.prepare_synthetic_history`), since counting the runner's own
     bookkeeping would report it as a scanner modification.
@@ -1244,6 +1245,8 @@ def run_invocation(
     _write_new(bundle / "request.json", request)
 
     state_dirs = frozenset(getattr(adapter, "state_dirs", ()))
+    declared_capture_dirs = getattr(adapter, "state_capture_dirs", None)
+    state_capture_dirs = state_dirs if declared_capture_dirs is None else frozenset(declared_capture_dirs)
     workspace = Path(tempfile.mkdtemp(prefix="scaneval-trial-", dir=str(workspace_root) if workspace_root else None))
     # The scanner writes into the workspace, never into the run directory; both staged
     # directories are moved into the bundle below, whether the scan returns or raises.
@@ -1381,7 +1384,7 @@ def run_invocation(
             except Exception as exc:
                 history_after = {"state": "unavailable", "error": _failure_message(exc)}
         try:
-            for name in sorted(state_dirs) if source_inside else ():
+            for name in sorted(state_capture_dirs) if source_inside else ():
                 state_path = source / name
                 if state_path.is_symlink():
                     # Checked before exists(), which follows the link and would report the

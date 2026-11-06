@@ -719,7 +719,8 @@ def _vet_adapter_identity(spec: SystemSpec, adapter: Adapter) -> None:
     verbatim, and both contracts require a non-empty string, so an adapter declaring anything
     else (a float version, say) would make each of its execution records unwritable. Every
     execution record also copies ``adapter.env_passthrough`` into its environment record and
-    walks ``adapter.state_dirs`` to capture harness state, so a value that is not a sequence of
+    walks ``adapter.state_dirs`` (or its ``state_capture_dirs`` subset) to capture harness state,
+    so a value that is not a sequence of
     non-empty strings fails every invocation of that system, or quietly means something else: the
     string ``"PATH"`` is a sequence of four one-letter names. Text UTF-8 cannot encode is refused
     here too, for the same reason :func:`_utf8` refuses it before a file exists. Checking the
@@ -754,6 +755,23 @@ def _vet_adapter_identity(spec: SystemSpec, adapter: Adapter) -> None:
                     f"{spec.adapter}.{attribute} must hold non-empty strings, not {item!r}; "
                     f"{carried}")
             _utf8(item, f"{spec.adapter}.{attribute}")
+    capture_dirs = getattr(adapter, "state_capture_dirs", None)
+    if capture_dirs is not None:
+        if not isinstance(capture_dirs, (tuple, list, set, frozenset)):
+            raise AdapterError(
+                f"{spec.adapter}.state_capture_dirs must be None or a tuple, list, or set of "
+                f"non-empty strings, not {capture_dirs!r}; every invocation walks it to capture harness state")
+        for item in capture_dirs:
+            if not isinstance(item, str) or not item:
+                raise AdapterError(
+                    f"{spec.adapter}.state_capture_dirs must hold non-empty strings, not {item!r}; "
+                    "every invocation walks it to capture harness state")
+            _utf8(item, f"{spec.adapter}.state_capture_dirs")
+        outside = sorted(set(capture_dirs) - set(getattr(adapter, "state_dirs", ())))
+        if outside:
+            raise AdapterError(
+                f"{spec.adapter}.state_capture_dirs must be a subset of state_dirs, not "
+                f"{', '.join(outside)}; copied state must also be excluded from the watched input tree")
     modes = getattr(adapter, "scan_modes", None)
     if not isinstance(modes, (tuple, list, set, frozenset)) or not modes:
         raise AdapterError(
