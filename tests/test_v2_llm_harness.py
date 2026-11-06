@@ -439,8 +439,9 @@ def test_mock_run_records_the_mock_route_and_its_policy_note(tmp_path):
     # adapter now reports different categories against different harnesses, which is a change a
     # reader of an old execution record must be able to date. 2.3.0 added the harness's pr mode;
     # 2.4.0 distinguishes a declared recovered planner timeout from an unresolved runner failure,
-    # and 2.6.0 consumes the additive review-workflow completion contract.
-    assert execution["adapter"]["version"] == "2.6.0"
+    # 2.6.0 consumes the additive review-workflow completion contract, and 2.7.0 records the
+    # effective Pi prompt transport before granting exact source mapping or retry correlation.
+    assert execution["adapter"]["version"] == "2.7.0"
 
 
 # Where an observation came from, as the trace event contract spells it. Two of these are this
@@ -515,7 +516,7 @@ def test_the_runner_hooks_make_every_cli_attempt_a_paired_request_and_response(t
     requests = [event for event in events if event["type"] == "model.request"]
     responses = [event for event in events if event["type"] == "model.response"]
 
-    assert output["driver_version"] == "2.6.0"
+    assert output["driver_version"] == "2.7.0"
     assert output["hooks"] == {"runner": 1, "engine": 1}
     assert len(requests) == output["model_attempts"] >= output["model_calls"] >= 1
     for event in requests + responses:
@@ -1014,6 +1015,66 @@ export function createDefaultPiRunner() {
   } };
 }
 """
+
+
+def test_unknown_pi_flags_do_not_disable_native_route_or_session_policy(tmp_path, monkeypatch):
+    """Conservative prompt parsing must not gate the runner's own route resolution."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    engine = r'''
+export async function runRuntimeScan(options: any): Promise<any> {
+  for (const [id, model, prompt] of [["new-pi", "pi-model", "pi prompt"],
+                                      ["new-claude", "claude-model", "claude prompt"]]) {
+    await options.llmRunner.runPi({
+      args: ["-p", "--no-session", "--model", model, "--future-flag", "future-value", prompt],
+      cwd: options.repoPath, timeoutMs: 1000, env: {}, meta: { invocationId: id, stage: "llm-static.file" },
+    });
+  }
+  return { newFindings: [], updatedFindings: [],
+    bootstrapScan: { llmCalls: 2, failedCalls: 0, status: "complete", hypothesisCoverage: 1 },
+    runtimeProfile: "full", degraded: false };
+}
+'''
+    runner = r'''
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+export function resolveRunnerBinary(args: string[]): string {
+  return args.includes("pi-model") ? "pi" : "claude";
+}
+export function createDefaultPiRunner() {
+  return { async runPi(invocation: any) {
+    const binary = resolveRunnerBinary(invocation.args);
+    if (binary === "pi") {
+      const dir = invocation.env.PI_CODING_AGENT_SESSION_DIR;
+      if (dir) { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, "session.jsonl"), JSON.stringify({ args: invocation.args }) + "\n"); }
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    const sessionId = "00000000-0000-4000-8000-000000000127";
+    const dir = join(process.env.HOME as string, ".claude", "projects", "-encoded-cwd");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${sessionId}.jsonl`), JSON.stringify({ args: invocation.args }) + "\n");
+    return { code: 0, stdout: "", stderr: "", outputFormat: "json", structured: { sessionId } };
+  } };
+}
+'''
+    root = _stub_harness(tmp_path, "unknown-flag-routes", engine=engine, runner=runner)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="unknown-flag-routes", runner="default")
+    output = json.loads((bundle / "raw/driver-output.json").read_text(encoding="utf-8"))
+    events = [json.loads(line) for line in (bundle / "trace/events.jsonl").read_text().splitlines()]
+    requests = {event["call_id"]: event for event in events if event["type"] == "model.request"}
+
+    assert output["observed_routes"] == ["claude", "pi"]
+    assert output["pi_session_calls"] == output["claude_session_calls"] == 1
+    assert requests["new-pi"]["metadata"]["route"] == "pi"
+    assert requests["new-claude"]["metadata"]["route"] == "claude"
+    assert requests["new-pi"]["metadata"]["prompt_chars"] is None
+    assert requests["new-claude"]["metadata"]["prompt_chars"] is None
+    pi_native = json.loads((bundle / "raw/pi-sessions/call-1/session.jsonl").read_text())
+    claude_native = json.loads((bundle / "raw/pi-sessions/call-2/00000000-0000-4000-8000-000000000127.jsonl").read_text())
+    for native in (pi_native, claude_native):
+        assert "--future-flag" in native["args"]
+        assert "--no-session" not in native["args"]
 
 
 def test_scaneval_only_pi_history_is_preserved_per_call_without_resumption(tmp_path):
@@ -1797,8 +1858,9 @@ export async function runRuntimeScan(options: any): Promise<any> {
     assert execution["status"] == "partial"
 
 
-# One invocation object reused for a declared timeout retry, with only its piped prompt set per
-# call. ``null`` leaves ``stdin`` absent, which is a different request from an empty string.
+# One invocation object reused for a declared timeout retry, with only its boundary stdin set per
+# call. ``null`` leaves ``stdin`` absent. Whether that boundary value was delivered is an explicit
+# runner-module capability, not something the driver infers from the field's presence.
 STDIN_RETRY_ENGINE = r'''
 export const HARNESS_OBSERVER_VERSION = 1;
 const STDINS: (string | null)[] = __STDINS__;
@@ -1820,20 +1882,26 @@ export async function runRuntimeScan(options: any): Promise<any> {
 '''
 
 
-@pytest.mark.parametrize(("stdins", "paired"), [
-    (["plan-a", "plan-b"], False),
-    ([None, ""], False),
-    (["", None], False),
-    (["plan", "plan "], False),
-    (["\ud800", "\udfff"], False),
-    (["plan", "plan"], True),
-    (["", ""], True),
-    ([None, None], True),
-], ids=["different", "absent-then-empty", "empty-then-absent", "untrimmed", "lone-surrogates",
-        "same", "same-empty", "argv-only"])
-def test_a_planner_retry_pairs_only_with_the_same_piped_prompt(tmp_path, stdins, paired):
+@pytest.mark.parametrize(("stdin_mode", "stdins", "paired"), [
+    (None, ["plan-a", "plan-b"], True),
+    (None, [None, ""], True),
+    (None, ["", " \n\t"], True),
+    ("pi-cli-2", ["plan-a", "plan-b"], True),
+    (False, ["plan-a", "plan-b"], True),
+    ("pi-cli-1", [None, ""], True),
+    ("pi-cli-1", ["", " \n\t"], True),
+    ("pi-cli-1", [" plan ", "plan"], True),
+    ("pi-cli-1", ["plan-a", "plan-b"], False),
+    ("pi-cli-1", ["plan", "plan"], True),
+], ids=["undeclared-ignored-change", "undeclared-absent-empty", "undeclared-empty-whitespace",
+        "unknown-declaration-ignored-change", "malformed-declaration-ignored-change",
+        "declared-absent-empty", "declared-empty-whitespace", "declared-trim-equivalent",
+        "declared-material-change", "declared-same"])
+def test_planner_retry_identity_uses_the_effective_delivered_prompt(tmp_path, stdin_mode, stdins, paired):
     engine = STDIN_RETRY_ENGINE.replace("__STDINS__", json.dumps(stdins))
     runner = DECLARED_RETRY_RUNNER.replace("__FAIL_ON__", "[1]")
+    if stdin_mode is not None:
+        runner = f'export const PI_RUNNER_STDIN_MODE = {json.dumps(stdin_mode)};\n' + runner
     root = _stub_harness(tmp_path, "stdin-planner-retry", engine=engine, runner=runner)
     bundle = _stub_harness_bundle(tmp_path, root, run_id="stdin-planner-retry", runner="default",
                                  capture_pi_sessions=False)
@@ -1845,14 +1913,7 @@ def test_a_planner_retry_pairs_only_with_the_same_piped_prompt(tmp_path, stdins,
     assert output["planner_timeout_retry_declarations"] == 1
     assert output["planner_timeout_failures_observed"] == 1
     requests = [event for event in events if event["type"] == "model.request"]
-    if any(isinstance(stdin, str) and any(0xD800 <= ord(char) <= 0xDFFF for char in stdin) for stdin in stdins):
-        # The trace sink refuses text that is not well-formed Unicode. The loss is reported,
-        # and the identity that pairs retries is computed before and apart from emission.
-        assert requests == []
-        assert output["trace"]["state"]["capture_gap"] is True
-        assert output["trace"]["state"]["dropped_events"] == 2
-    else:
-        assert [event["content"].get("stdin", None) for event in requests] == stdins
+    assert [event["content"].get("stdin", None) for event in requests] == stdins
     if paired:
         assert output["planner_timeout_recoveries"] == [{
             "invocation_id": "planner-1", "failed_runner_call_id": "call-1",
@@ -1870,11 +1931,15 @@ def test_a_planner_retry_pairs_only_with_the_same_piped_prompt(tmp_path, stdins,
     assert "must-not-appear-in-driver-output" not in (bundle / "trace/events.jsonl").read_text()
 
 
-def test_a_piped_prompt_that_is_not_text_leaves_a_planner_retry_unpaired(tmp_path):
+@pytest.mark.parametrize(("declared", "paired"), [(False, True), (True, False)],
+                         ids=["undeclared-ignored", "declared-unknown"])
+def test_non_text_stdin_is_ignored_only_without_forwarding_capability(tmp_path, declared, paired):
     engine = STDIN_RETRY_ENGINE.replace("__STDINS__", "[]").replace(
         "  for (const stdin of STDINS) {",
         "  for (const stdin of [new Uint8Array([112]), new Uint8Array([112])] as any[]) {")
     runner = DECLARED_RETRY_RUNNER.replace("__FAIL_ON__", "[1]")
+    if declared:
+        runner = 'export const PI_RUNNER_STDIN_MODE = "pi-cli-1";\n' + runner
     root = _stub_harness(tmp_path, "bytes-planner-retry", engine=engine, runner=runner)
     bundle = _stub_harness_bundle(tmp_path, root, run_id="bytes-planner-retry", runner="default",
                                  capture_pi_sessions=False)
@@ -1883,9 +1948,31 @@ def test_a_piped_prompt_that_is_not_text_leaves_a_planner_retry_unpaired(tmp_pat
 
     assert output.get("error") is None, "optional correlation must not fail the driver"
     assert output["planner_timeout_failures_observed"] == 1
+    assert output["planner_timeout_recovery_candidates"] == (1 if paired else 0)
+    assert output["model_call_failures_recovered"] == (1 if paired else 0)
+    assert output["model_call_failures_unrecovered"] == (0 if paired else 1)
+    assert execution["status"] == ("success" if paired else "partial")
+
+
+@pytest.mark.parametrize(("replacement", "run_id"), [
+    ('["-p", "--unknown", "plan"]', "malformed-argv-retry"),
+    ('["-p", "--model", "test/mock", "@src/context.ts"]', "at-file-argv-retry"),
+], ids=["unknown-flag", "at-file-positional"])
+def test_unknown_pi_prompt_argv_cannot_form_a_retry_identity_even_with_matching_stdin(
+    tmp_path, replacement, run_id
+):
+    engine = STDIN_RETRY_ENGINE.replace("__STDINS__", json.dumps(["same", "same"])).replace(
+        '["-p", "--model", "test/mock", "plan"]', replacement)
+    runner = ('export const PI_RUNNER_STDIN_MODE = "pi-cli-1";\n'
+              + DECLARED_RETRY_RUNNER.replace("__FAIL_ON__", "[1]"))
+    root = _stub_harness(tmp_path, run_id, engine=engine, runner=runner)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id=run_id, runner="default",
+                                  capture_pi_sessions=False)
+    output = json.loads((bundle / "raw/driver-output.json").read_text())
+
     assert output["planner_timeout_recovery_candidates"] == 0
-    assert output["model_call_failures"] == output["model_call_failures_unrecovered"] == 1
-    assert execution["status"] == "partial"
+    assert output["model_call_failures_recovered"] == 0
+    assert output["model_call_failures_unrecovered"] == 1
 
 
 # Every request shape the runner boundary carries, sent once each. The runner answers with what
@@ -1898,7 +1985,9 @@ export async function runRuntimeScan(options: any): Promise<any> {
     { id: "argv-only", args: ARGS },
     { id: "piped", args: ARGS, stdin: "piped prompt\n" },
     { id: "piped-empty", args: ARGS, stdin: "" },
+    { id: "piped-whitespace", args: ARGS, stdin: " \n\t" },
     { id: "piped-bytes", args: ARGS, stdin: new Uint8Array([112]) },
+    { id: "stdin-only", args: ["-p", "--model", "test/mock"], stdin: " piped only\n" },
     { id: "structured", request: { route: { driver: "structured-route", model: "test/structured" },
       effort: "low", prompt: "structured prompt" } },
   ];
@@ -1913,6 +2002,7 @@ export async function runRuntimeScan(options: any): Promise<any> {
 '''
 STDIN_CAPTURE_RUNNER = r'''
 __HOOKS_EXPORT__
+__STDIN_MODE_EXPORT__
 export function resolveRunnerBinary(): string { return "pi"; }
 export function createDefaultPiRunner(options: any = {}) {
   return { async runPi(invocation: any) {
@@ -1932,10 +2022,15 @@ export function createDefaultPiRunner(options: any = {}) {
 
 
 @pytest.mark.parametrize("hooked", [False, True], ids=["wrapper-only", "runner-hooks"])
+@pytest.mark.parametrize("declared", [False, True], ids=["stdin-ignored", "pi-cli-1"])
 @pytest.mark.parametrize("trace_mode", ["content", "metadata"])
-def test_the_recorded_prompt_is_the_piped_one_and_an_empty_pipe_still_wins(tmp_path, hooked, trace_mode):
-    runner = STDIN_CAPTURE_RUNNER.replace(
-        "__HOOKS_EXPORT__", "export const PI_RUNNER_HOOKS_VERSION = 1;" if hooked else "")
+def test_prompt_metadata_distinguishes_boundary_stdin_from_effective_delivery(
+    tmp_path, hooked, declared, trace_mode
+):
+    runner = (STDIN_CAPTURE_RUNNER
+              .replace("__HOOKS_EXPORT__", "export const PI_RUNNER_HOOKS_VERSION = 1;" if hooked else "")
+              .replace("__STDIN_MODE_EXPORT__",
+                       'export const PI_RUNNER_STDIN_MODE = "pi-cli-1";' if declared else ""))
     root = _stub_harness(tmp_path, "stdin-capture", engine=STDIN_CAPTURE_ENGINE, runner=runner)
     bundle = _stub_harness_bundle(tmp_path, root, run_id="stdin-capture", runner="default",
                                  trace_mode=trace_mode, capture_pi_sessions=False)
@@ -1950,22 +2045,37 @@ def test_the_recorded_prompt_is_the_piped_one_and_an_empty_pipe_still_wins(tmp_p
         "argv-only": {"args": args},
         "piped": {"args": args, "stdin": "piped prompt\n"},
         "piped-empty": {"args": args, "stdin": ""},
+        "piped-whitespace": {"args": args, "stdin": " \n\t"},
         "piped-bytes": {"args": args, "stdin": None},
+        "stdin-only": {"args": ["-p", "--model", "test/mock"], "stdin": " piped only\n"},
         "structured": {"request": {"route": {"driver": "structured-route", "model": "test/structured"},
                                    "effort": "low", "prompt": "structured prompt"}},
     }
-    assert output["model_calls"] == 5 and output.get("error") is None
+    assert output["model_calls"] == 7 and output.get("error") is None
+    assert output["runner_transport"]["pi_stdin"] == {
+        "declaration": "pi-cli-1" if declared else "absent",
+        "effective": "pi-cli-1" if declared else None,
+    }
     assert set(requests) == set(expected_content)
     assert requests["structured"]["metadata"]["route"] == "structured-route"
     assert {requests[call]["metadata"]["route"] for call in expected_content if call != "structured"} == {"pi"}
+    effective_prompt_chars = {
+        "argv-only": 9,
+        "piped": 21 if declared else 9,
+        "piped-empty": 9,
+        "piped-whitespace": 9,
+        "piped-bytes": None if declared else 9,
+        "stdin-only": 10 if declared else None,
+        "structured": 17,
+    }
     if hooked:
-        # Under hooks the size is the runner's own report of the attempt; only content is the driver's.
+        # The native count keeps its native name; the driver's correlated interpretation is additive.
         assert {event["metadata"]["source"] for event in requests.values()} == {"harness_runner_hook"}
         assert {event["metadata"]["prompt_chars"] for event in requests.values()} == {7}
+        assert {call: event["metadata"]["effective_prompt_chars"] for call, event in requests.items()} == effective_prompt_chars
     else:
         assert {event["metadata"]["source"] for event in requests.values()} == {"driver_runner_wrapper"}
-        assert {call: event["metadata"]["prompt_chars"] for call, event in requests.items()} == {
-            "argv-only": 9, "piped": 13, "piped-empty": 0, "piped-bytes": None, "structured": 17}
+        assert {call: event["metadata"]["prompt_chars"] for call, event in requests.items()} == effective_prompt_chars
         assert requests["structured"]["metadata"]["model_requested"] == "test/structured"
         assert requests["piped"]["metadata"]["model_requested"] == "test/mock"
         assert requests["piped"]["metadata"]["thinking"] == "high"
@@ -1975,7 +2085,9 @@ def test_the_recorded_prompt_is_the_piped_one_and_an_empty_pipe_still_wins(tmp_p
             "argv-only": {"stdin": "<absent>", "last": "argv-last"},
             "piped": {"stdin": "piped prompt\n", "last": "argv-last"},
             "piped-empty": {"stdin": "", "last": "argv-last"},
+            "piped-whitespace": {"stdin": " \n\t", "last": "argv-last"},
             "piped-bytes": {"stdin": "<bytes>", "last": "argv-last"},
+            "stdin-only": {"stdin": " piped only\n", "last": "test/mock"},
             "structured": {"stdin": "<absent>", "last": None},
         }
     else:
@@ -1983,6 +2095,93 @@ def test_the_recorded_prompt_is_the_piped_one_and_an_empty_pipe_still_wins(tmp_p
         assert "piped prompt" not in trace_text and "structured prompt" not in trace_text
     assert "must-not-appear-in-trace" not in trace_text
     assert "must-not-appear-in-trace" not in json.dumps(output)
+
+
+@pytest.mark.parametrize(("declaration", "expected"), [
+    (None, {"declaration": "absent", "effective": None}),
+    ('"pi-cli-1"', {"declaration": "pi-cli-1", "effective": "pi-cli-1"}),
+    ('"pi-cli-2"', {"declaration": "unknown", "effective": None}),
+    ("false", {"declaration": "malformed", "effective": None}),
+    ("{}", {"declaration": "malformed", "effective": None}),
+], ids=["absent", "current", "unknown", "false", "object"])
+def test_runner_stdin_capability_is_versioned_pinned_and_fails_closed(tmp_path, declaration, expected):
+    runner = STDIN_CAPTURE_RUNNER.replace("__HOOKS_EXPORT__", "").replace(
+        "__STDIN_MODE_EXPORT__",
+        "" if declaration is None else f"export const PI_RUNNER_STDIN_MODE = {declaration};")
+    root = _stub_harness(tmp_path, "stdin-capability", engine=STDIN_CAPTURE_ENGINE, runner=runner)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="stdin-capability", runner="default",
+                                  trace_mode="metadata", capture_pi_sessions=False)
+    output = json.loads((bundle / "raw/driver-output.json").read_text())
+
+    assert output["runner_transport"]["pi_stdin"] == expected
+    assert "pi-cli-2" not in json.dumps(output), "unknown declarations are classified, not echoed"
+
+
+def test_mock_runner_cannot_inherit_the_default_runner_stdin_capability(tmp_path):
+    runner = 'export const PI_RUNNER_STDIN_MODE = "pi-cli-1";\n' + NO_HOOKS_RUNNER
+    root = _stub_harness(tmp_path, "mock-stdin-capability", engine=NO_HOOKS_ENGINE, runner=runner)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="mock-stdin-capability", runner="mock",
+                                  trace_mode="metadata", capture_pi_sessions=False)
+    output = json.loads((bundle / "raw/driver-output.json").read_text())
+
+    assert output["runner_transport"]["pi_stdin"] == {"declaration": "pi-cli-1", "effective": None}
+
+
+def test_pi_argv_prompt_parser_rejects_ambiguous_shapes_without_inventing_empty_prompts(tmp_path):
+    engine = r'''
+export async function runRuntimeScan(options: any): Promise<any> {
+  const calls: any[] = [
+    { id: "positional-before-flags", args: ["known prompt", "--thinking", "high", "-p", "--model", "test/mock"] },
+    { id: "missing-print", args: ["--model", "test/mock", "known prompt"] },
+    { id: "at-file", args: ["-p", "--model", "test/mock", "@src/context.ts"] },
+    { id: "flag-only", args: ["-p", "--no-session"] },
+    { id: "flag-value-only", args: ["-p", "--model", "test/mock", "--thinking", "high"] },
+    { id: "unknown-flag", args: ["-p", "--wat", "source-looking-value"] },
+    { id: "missing-value", args: ["-p", "--model"] },
+    { id: "duplicate-boolean", args: ["-p", "--print", "prompt"] },
+    { id: "duplicate-value", args: ["-p", "--model", "m1", "--model", "m2", "prompt"] },
+    { id: "extra-positionals", args: ["-p", "first", "second"] },
+    { id: "non-string", args: ["-p", 7] },
+    { id: "mixed", args: ["-p", "argv prompt"], request: { route: { driver: "fieldglass", model: "m" },
+      effort: "low", prompt: "structured prompt" } },
+    { id: "malformed-request", request: [] },
+    { id: "missing-route", request: { prompt: "structured prompt" } },
+    { id: "malformed-route", request: { route: [], prompt: "structured prompt" } },
+    { id: "missing-driver", request: { route: { model: "m" }, prompt: "structured prompt" } },
+    { id: "empty-driver", request: { route: { driver: "", model: "m" }, prompt: "structured prompt" } },
+    { id: "missing-model", request: { route: { driver: "fieldglass" }, prompt: "structured prompt" } },
+    { id: "empty-model", request: { route: { driver: "fieldglass", model: "" }, prompt: "structured prompt" } },
+    { id: "malformed-structured-prompt", request: { route: { driver: "fieldglass", model: "m" },
+      effort: "low", prompt: 7 } },
+  ];
+  for (const { id, ...shape } of calls) {
+    await options.llmRunner.runPi({ ...shape, cwd: options.repoPath, timeoutMs: 1000, env: {},
+      meta: { invocationId: id, stage: "llm-static.file" } });
+  }
+  return { newFindings: [], updatedFindings: [],
+    bootstrapScan: { llmCalls: calls.length, failedCalls: 0, status: "complete", hypothesisCoverage: 1 },
+    runtimeProfile: "full", degraded: false };
+}
+'''
+    root = _stub_harness(tmp_path, "argv-grammar", engine=engine, runner=NO_HOOKS_RUNNER)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="argv-grammar", runner="default",
+                                  trace_mode="content", capture_pi_sessions=False)
+    events = [json.loads(line) for line in (bundle / "trace/events.jsonl").read_text().splitlines()]
+    requests = {event["call_id"]: event for event in events if event["type"] == "model.request"}
+
+    for call_id in ("positional-before-flags", "missing-print", "at-file", "flag-only",
+                    "flag-value-only", "unknown-flag", "missing-value", "duplicate-boolean",
+                    "duplicate-value", "extra-positionals", "non-string", "mixed", "malformed-request",
+                    "missing-route", "malformed-route", "missing-driver", "empty-driver", "missing-model",
+                    "empty-model", "malformed-structured-prompt"):
+        assert requests[call_id]["metadata"]["prompt_chars"] is None
+    for call_id in ("positional-before-flags", "missing-print", "at-file", "unknown-flag"):
+        assert requests[call_id]["metadata"]["route"] == "pi"
+    assert requests["positional-before-flags"]["metadata"]["model_requested"] is None
+    assert requests["positional-before-flags"]["metadata"]["thinking"] is None
+    assert requests["malformed-structured-prompt"]["metadata"]["route"] == "fieldglass"
+    assert requests["missing-model"]["metadata"]["route"] == "fieldglass"
+    assert requests["empty-driver"]["metadata"]["route"] == "unknown"
 
 
 def test_stale_active_plan_retry_note_does_not_manufacture_a_recovery(tmp_path):
@@ -2373,13 +2572,8 @@ def test_v1_truncated_spans_are_credited_only_after_exact_source_mapping(tmp_pat
     assert spans["null-truncation"]["truncated"] is None
 
 
-def test_source_mapping_is_verified_against_the_piped_prompt_not_the_last_argv_word(tmp_path):
-    """A truncated span is credited only when it is in the prompt the runner was actually sent.
-
-    The same contiguous prefix that ``test_v1_truncated_spans_are_credited_only_after_exact_source_mapping``
-    verifies is sent once on stdin behind a decoy argv word, and once as the last argv word behind
-    an explicit empty stdin. Only the first carried the source.
-    """
+def test_undeclared_runner_mapping_ignores_boundary_stdin_and_credits_valid_argv(tmp_path):
+    """Raw boundary stdin is not evidence that an undeclared runner delivered those bytes."""
     prepared = _prepared(tmp_path)
     (prepared.source_dir / "src/context.ts").write_text(MAPPING_SOURCE, encoding="utf-8")
     prepared = PreparedInput(prepared.input_id, prepared.source_dir,
@@ -2393,8 +2587,10 @@ def test_source_mapping_is_verified_against_the_piped_prompt_not_the_last_argv_w
     engine = f'''
 export const HARNESS_OBSERVER_VERSION = 1;
 const CALLS: any[] = [
-  {{ id: "piped", last: "argv-decoy", stdin: {prompt} }},
-  {{ id: "empty-piped", last: {prompt}, stdin: "" }},
+  {{ id: "stdin-source-decoy-argv", last: "argv-decoy", stdin: {prompt} }},
+  {{ id: "argv-source-empty-stdin", last: {prompt}, stdin: "" }},
+  {{ id: "argv-source-nonempty-stdin", last: {prompt}, stdin: "ignored boundary text" }},
+  {{ id: "argv-source-nontext-stdin", last: {prompt}, stdin: new Uint8Array([112]) }},
 ];
 export async function runRuntimeScan(options: any) {{
   for (const call of CALLS) {{
@@ -2419,10 +2615,255 @@ export async function runRuntimeScan(options: any) {{
     spans = {event["call_id"]: event["metadata"]["spans"][0]
              for event in events if event["type"] == "context.selection"}
 
-    assert spans["piped"]["location_known"] is True
-    assert spans["piped"]["source_mapping"] == "verified_exact"
-    assert spans["empty-piped"]["location_known"] is False
-    assert spans["empty-piped"].get("source_mapping") != "verified_exact"
+    assert spans["stdin-source-decoy-argv"]["location_known"] is False
+    assert spans["stdin-source-decoy-argv"].get("source_mapping") != "verified_exact"
+    for call_id in ("argv-source-empty-stdin", "argv-source-nonempty-stdin", "argv-source-nontext-stdin"):
+        assert spans[call_id]["location_known"] is True
+        assert spans[call_id]["source_mapping"] == "verified_exact"
+
+
+def test_declared_pi_stdin_mode_is_not_applied_to_a_claude_route(tmp_path):
+    prepared = _prepared(tmp_path)
+    (prepared.source_dir / "src/context.ts").write_text(MAPPING_SOURCE, encoding="utf-8")
+    prepared = PreparedInput(prepared.input_id, prepared.source_dir,
+                             hash_exported_tree(prepared.source_dir)["tree_hash"],
+                             prepared.languages, prepared.provenance)
+    prefix = "".join(MAPPING_SOURCE.splitlines(keepends=True)[:4])
+    digest = hashlib.sha256(prefix.encode()).hexdigest()
+    source_stdin = "before\n" + prefix + "after"
+    engine = f'''
+export const HARNESS_OBSERVER_VERSION = 1;
+export async function runRuntimeScan(options: any) {{
+  options.observer.onContextSupplied({{ invocationId: "claude-stdin", stage: "llm-static.file",
+    promptChars: {len(prefix)}, spans: [{{ path: "src/context.ts", startLine: 1, endLine: 4,
+      chars: {len(prefix)}, sha256: {json.dumps(digest)}, truncated: true,
+      originalChars: {len(MAPPING_SOURCE)}, role: "primary" }}], truncatedSpans: 1, omittedPaths: [] }});
+  await options.llmRunner.runPi({{ args: ["-p", "--model", "test/mock", "argv-decoy"],
+    stdin: {json.dumps(source_stdin)}, cwd: options.repoPath, timeoutMs: 1000, env: {{}},
+    meta: {{ invocationId: "claude-stdin", stage: "llm-static.file" }} }});
+  return {{ newFindings: [], updatedFindings: [],
+    bootstrapScan: {{ llmCalls: 1, failedCalls: 0, status: "complete", hypothesisCoverage: 1 }},
+    runtimeProfile: "full", degraded: false, observer: {{ version: 1, hookFailures: 0 }} }};
+}}
+'''
+    runner = ('export const PI_RUNNER_STDIN_MODE = "pi-cli-1";\n'
+              'export function resolveRunnerBinary(): string { return "claude"; }\n'
+              'export function createDefaultPiRunner() { return { async runPi() { '
+              'return { code: 0, stdout: "", stderr: "" }; } }; }\n')
+    root = _stub_harness(tmp_path, "mapping-claude-stdin-gate", engine=engine, runner=runner)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="mapping-claude-stdin-gate", runner="default",
+                                  prepared=prepared, capture_pi_sessions=False)
+    events = [json.loads(line) for line in (bundle / "trace/events.jsonl").read_text().splitlines()]
+    request = next(event for event in events if event["type"] == "model.request")
+    span = next(event for event in events if event["type"] == "context.selection")["metadata"]["spans"][0]
+
+    assert request["metadata"]["route"] == "claude"
+    assert request["metadata"]["prompt_chars"] == len("argv-decoy")
+    assert span["location_known"] is False
+    assert span.get("source_mapping") != "verified_exact"
+
+
+@pytest.mark.parametrize("declared", [False, True], ids=["stdin-undeclared", "pi-cli-1"])
+def test_structured_request_mapping_is_independent_of_pi_stdin_capability(tmp_path, declared):
+    prepared = _prepared(tmp_path)
+    (prepared.source_dir / "src/context.ts").write_text(MAPPING_SOURCE, encoding="utf-8")
+    prepared = PreparedInput(prepared.input_id, prepared.source_dir,
+                             hash_exported_tree(prepared.source_dir)["tree_hash"],
+                             prepared.languages, prepared.provenance)
+    prefix = "".join(MAPPING_SOURCE.splitlines(keepends=True)[:4])
+    digest = hashlib.sha256(prefix.encode()).hexdigest()
+    prompt = "before\n" + prefix + "after"
+    engine = f'''
+export const HARNESS_OBSERVER_VERSION = 1;
+export async function runRuntimeScan(options: any) {{
+  options.observer.onContextSupplied({{ invocationId: "structured", stage: "llm-static.file",
+    promptChars: {len(prompt)}, spans: [{{ path: "src/context.ts", startLine: 1, endLine: 4,
+      chars: {len(prefix)}, sha256: {json.dumps(digest)}, truncated: true,
+      originalChars: {len(MAPPING_SOURCE)}, role: "primary" }}], truncatedSpans: 1, omittedPaths: [] }});
+  await options.llmRunner.runPi({{ request: {{ route: {{ driver: "fieldglass", model: "test/structured" }},
+    effort: "low", prompt: {json.dumps(prompt)} }}, cwd: options.repoPath, timeoutMs: 1000, env: {{}},
+    meta: {{ invocationId: "structured", stage: "llm-static.file" }} }});
+  return {{ newFindings: [], updatedFindings: [],
+    bootstrapScan: {{ llmCalls: 1, failedCalls: 0, status: "complete", hypothesisCoverage: 1 }},
+    runtimeProfile: "full", degraded: false, observer: {{ version: 1, hookFailures: 0 }} }};
+}}
+'''
+    runner = NO_HOOKS_RUNNER
+    if declared:
+        runner = 'export const PI_RUNNER_STDIN_MODE = "pi-cli-1";\n' + runner
+    root = _stub_harness(tmp_path, "mapping-structured", engine=engine, runner=runner)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="mapping-structured", runner="default",
+                                  prepared=prepared)
+    events = [json.loads(line) for line in (bundle / "trace/events.jsonl").read_text().splitlines()]
+    request = next(event for event in events if event["type"] == "model.request")
+    selection = next(event for event in events if event["type"] == "context.selection")
+
+    assert request["metadata"]["route"] == "fieldglass"
+    assert request["metadata"]["model_requested"] == "test/structured"
+    assert request["metadata"]["thinking"] == "low"
+    assert request["metadata"]["prompt_chars"] == len(prompt)
+    assert request["content"]["request"]["prompt"] == prompt
+    assert selection["metadata"]["spans"][0]["source_mapping"] == "verified_exact"
+
+
+def test_malformed_structured_requests_cannot_earn_verified_exact_source_mapping(tmp_path):
+    prepared = _prepared(tmp_path)
+    (prepared.source_dir / "src/context.ts").write_text(MAPPING_SOURCE, encoding="utf-8")
+    prepared = PreparedInput(prepared.input_id, prepared.source_dir,
+                             hash_exported_tree(prepared.source_dir)["tree_hash"],
+                             prepared.languages, prepared.provenance)
+    prefix = "".join(MAPPING_SOURCE.splitlines(keepends=True)[:4])
+    digest = hashlib.sha256(prefix.encode()).hexdigest()
+    engine = f'''
+export const HARNESS_OBSERVER_VERSION = 1;
+const PROMPT = "before\\n" + {json.dumps(prefix)} + "after";
+const CALLS: any[] = [
+  {{ id: "request-array", request: [] }},
+  {{ id: "missing-route", request: {{ prompt: PROMPT }} }},
+  {{ id: "route-array", request: {{ route: [], prompt: PROMPT }} }},
+  {{ id: "missing-driver", request: {{ route: {{ model: "test/structured" }}, prompt: PROMPT }} }},
+  {{ id: "empty-driver", request: {{ route: {{ driver: "", model: "test/structured" }}, prompt: PROMPT }} }},
+  {{ id: "missing-model", request: {{ route: {{ driver: "fieldglass" }}, prompt: PROMPT }} }},
+  {{ id: "empty-model", request: {{ route: {{ driver: "fieldglass", model: "" }}, prompt: PROMPT }} }},
+  {{ id: "nontext-prompt", request: {{ route: {{ driver: "fieldglass", model: "test/structured" }},
+    effort: 9, prompt: 7 }} }},
+];
+export async function runRuntimeScan(options: any) {{
+  for (const call of CALLS) {{
+    options.observer.onContextSupplied({{ invocationId: call.id, stage: "llm-static.file",
+      promptChars: PROMPT.length, spans: [{{ path: "src/context.ts", startLine: 1, endLine: 4,
+        chars: {len(prefix)}, sha256: {json.dumps(digest)}, truncated: true,
+        originalChars: {len(MAPPING_SOURCE)}, role: "primary" }}], truncatedSpans: 1, omittedPaths: [] }});
+    await options.llmRunner.runPi({{ ...call, cwd: options.repoPath, timeoutMs: 1000, env: {{}},
+      meta: {{ invocationId: call.id, stage: "llm-static.file" }} }});
+  }}
+  return {{ newFindings: [], updatedFindings: [],
+    bootstrapScan: {{ llmCalls: CALLS.length, failedCalls: 0, status: "complete", hypothesisCoverage: 1 }},
+    runtimeProfile: "full", degraded: false, observer: {{ version: 1, hookFailures: 0 }} }};
+}}
+'''
+    root = _stub_harness(tmp_path, "mapping-malformed-structured", engine=engine, runner=NO_HOOKS_RUNNER)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="mapping-malformed-structured", runner="default",
+                                  prepared=prepared)
+    events = [json.loads(line) for line in (bundle / "trace/events.jsonl").read_text().splitlines()]
+    requests = {event["call_id"]: event for event in events if event["type"] == "model.request"}
+    spans = {event["call_id"]: event["metadata"]["spans"][0]
+             for event in events if event["type"] == "context.selection"}
+
+    expected = {"request-array", "missing-route", "route-array", "missing-driver", "empty-driver",
+                "missing-model", "empty-model", "nontext-prompt"}
+    assert set(requests) == set(spans) == expected
+    assert all(event["metadata"]["prompt_chars"] is None for event in requests.values())
+    assert requests["empty-driver"]["metadata"]["route"] == "unknown"
+    assert requests["empty-driver"]["content"]["request"]["route"]["driver"] == ""
+    assert requests["missing-model"]["content"]["request"]["route"]["model"] is None
+    nontext_request = requests["nontext-prompt"]["content"]["request"]
+    assert nontext_request["prompt"] == 7
+    assert nontext_request["effort"] == 9
+    assert requests["nontext-prompt"]["metadata"]["thinking"] is None
+    assert all(span["location_known"] is False for span in spans.values())
+    assert all(span.get("source_mapping") != "verified_exact" for span in spans.values())
+
+
+def test_at_file_positional_cannot_earn_verified_exact_source_mapping(tmp_path):
+    prepared = _prepared(tmp_path)
+    source = "@src/context.ts"
+    (prepared.source_dir / "src/context.ts").write_text(source, encoding="utf-8")
+    prepared = PreparedInput(prepared.input_id, prepared.source_dir,
+                             hash_exported_tree(prepared.source_dir)["tree_hash"],
+                             prepared.languages, prepared.provenance)
+    digest = hashlib.sha256(source.encode()).hexdigest()
+    engine = f'''
+export const HARNESS_OBSERVER_VERSION = 1;
+export async function runRuntimeScan(options: any) {{
+  options.observer.onContextSupplied({{ invocationId: "at-file", stage: "llm-static.file",
+    promptChars: {len(source)}, spans: [{{ path: "src/context.ts", startLine: 1, endLine: 1,
+      chars: {len(source)}, sha256: {json.dumps(digest)}, truncated: true,
+      originalChars: {len(source)}, role: "primary" }}], truncatedSpans: 1, omittedPaths: [] }});
+  await options.llmRunner.runPi({{ args: ["-p", "--model", "test/mock", "@src/context.ts"],
+    cwd: options.repoPath, timeoutMs: 1000, env: {{}},
+    meta: {{ invocationId: "at-file", stage: "llm-static.file" }} }});
+  return {{ newFindings: [], updatedFindings: [],
+    bootstrapScan: {{ llmCalls: 1, failedCalls: 0, status: "complete", hypothesisCoverage: 1 }},
+    runtimeProfile: "full", degraded: false, observer: {{ version: 1, hookFailures: 0 }} }};
+}}
+'''
+    root = _stub_harness(tmp_path, "mapping-at-file", engine=engine, runner=NO_HOOKS_RUNNER)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="mapping-at-file", runner="default",
+                                  prepared=prepared)
+    events = [json.loads(line) for line in (bundle / "trace/events.jsonl").read_text().splitlines()]
+    request = next(event for event in events if event["type"] == "model.request")
+    span = next(event for event in events if event["type"] == "context.selection")["metadata"]["spans"][0]
+
+    assert request["metadata"]["route"] == "pi"
+    assert request["metadata"]["prompt_chars"] is None
+    assert span["location_known"] is False
+    assert span.get("source_mapping") != "verified_exact"
+
+
+@pytest.mark.parametrize("hooked", [False, True], ids=["wrapper-only", "runner-hooks"])
+def test_declared_pi_cli_stdin_mapping_uses_trimmed_concatenated_effective_prompt(tmp_path, hooked):
+    prepared = _prepared(tmp_path)
+    (prepared.source_dir / "src/context.ts").write_text(MAPPING_SOURCE, encoding="utf-8")
+    prepared = PreparedInput(prepared.input_id, prepared.source_dir,
+                             hash_exported_tree(prepared.source_dir)["tree_hash"],
+                             prepared.languages, prepared.provenance)
+    prefix = "".join(MAPPING_SOURCE.splitlines(keepends=True)[:4])
+    digest = hashlib.sha256(prefix.encode()).hexdigest()
+    split = prefix.index("return") + 3
+    engine = f'''
+export const HARNESS_OBSERVER_VERSION = 1;
+const SOURCE = {json.dumps(prefix)};
+const SPAN = {{ path: "src/context.ts", startLine: 1, endLine: 4, chars: SOURCE.length,
+  sha256: {json.dumps(digest)}, truncated: true, originalChars: {len(MAPPING_SOURCE)}, role: "primary" }};
+const CALLS: any[] = [
+  {{ id: "stdin-source", args: ["-p", "--model", "test/mock", "argv-decoy"], stdin: `  before\n${{SOURCE}}after  ` }},
+  {{ id: "argv-source-after-stdin", args: ["-p", "--model", "test/mock", SOURCE], stdin: "lead" }},
+  {{ id: "source-split-at-boundary", args: ["-p", "--model", "test/mock", SOURCE.slice({split}) + "\\nafter"],
+    stdin: "before\\n" + SOURCE.slice(0, {split}) }},
+  {{ id: "whitespace-absent", args: ["-p", "--model", "test/mock", SOURCE], stdin: " \\n\\t" }},
+  {{ id: "nontext-unknown", args: ["-p", "--model", "test/mock", SOURCE], stdin: new Uint8Array([112]) }},
+  {{ id: "flag-only", args: ["-p", "--no-session"] }},
+  {{ id: "flag-value-only", args: ["-p", "--model", SOURCE] }},
+];
+export async function runRuntimeScan(options: any) {{
+  for (const call of CALLS) {{
+    options.observer.onContextSupplied({{ invocationId: call.id, stage: "llm-static.file",
+      promptChars: SOURCE.length, spans: [SPAN], truncatedSpans: 1, omittedPaths: [] }});
+    await options.llmRunner.runPi({{ ...call, cwd: options.repoPath, timeoutMs: 1000, env: {{}},
+      meta: {{ invocationId: call.id, stage: "llm-static.file" }} }});
+  }}
+  return {{ newFindings: [], updatedFindings: [],
+    bootstrapScan: {{ llmCalls: CALLS.length, failedCalls: 0, status: "complete", hypothesisCoverage: 1 }},
+    runtimeProfile: "full", degraded: false, observer: {{ version: 1, hookFailures: 0 }} }};
+}}
+'''
+    runner = (STDIN_CAPTURE_RUNNER
+              .replace("__HOOKS_EXPORT__", "export const PI_RUNNER_HOOKS_VERSION = 1;" if hooked else "")
+              .replace("__STDIN_MODE_EXPORT__", 'export const PI_RUNNER_STDIN_MODE = "pi-cli-1";'))
+    root = _stub_harness(tmp_path, "mapping-declared-stdin", engine=engine, runner=runner)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="mapping-declared-stdin", runner="default",
+                                  prepared=prepared)
+    events = [json.loads(line) for line in
+              (bundle / "trace/events.jsonl").read_text(encoding="utf-8").splitlines()]
+    spans = {event["call_id"]: event["metadata"]["spans"][0]
+             for event in events if event["type"] == "context.selection"}
+    requests = {event["call_id"]: event for event in events if event["type"] == "model.request"}
+
+    for call_id in ("stdin-source", "argv-source-after-stdin", "source-split-at-boundary", "whitespace-absent"):
+        assert spans[call_id]["source_mapping"] == "verified_exact"
+    for call_id in ("nontext-unknown", "flag-only", "flag-value-only"):
+        assert spans[call_id].get("source_mapping") != "verified_exact"
+    if hooked:
+        assert {event["metadata"]["prompt_chars"] for event in requests.values()} == {7}
+    else:
+        assert requests["stdin-source"]["metadata"]["prompt_chars"] == len("before\n") + len(prefix) + len("afterargv-decoy")
+        assert requests["argv-source-after-stdin"]["metadata"]["prompt_chars"] == len("lead") + len(prefix)
+        assert requests["source-split-at-boundary"]["metadata"]["prompt_chars"] == len("before\n") + len(prefix) + len("\nafter")
+        assert requests["whitespace-absent"]["metadata"]["prompt_chars"] == len(prefix)
+        assert requests["nontext-unknown"]["metadata"]["prompt_chars"] is None
+        assert requests["flag-only"]["metadata"]["prompt_chars"] is None
+        assert requests["flag-value-only"]["metadata"]["prompt_chars"] is None
 
 
 def _reused_context_id_engine() -> str:
@@ -2460,6 +2901,13 @@ export async function runRuntimeScan(options: any) {{
   await call("conflicting-retry", PROMPT);
   await call("conflicting-retry", OTHER_PROMPT);
 
+  report("known-then-unknown");
+  await call("known-then-unknown", PROMPT);
+  await options.llmRunner.runPi({{
+    args: ["-p", "--future-flag", PROMPT], cwd: options.repoPath,
+    timeoutMs: 1000, env: {{}}, meta: {{ invocationId: "known-then-unknown", stage: "llm-static.file" }},
+  }});
+
   const mutableSpan = {{ path: "src/context.ts", startLine: 1, endLine: 4,
     chars: SOURCE.length, sha256: {json.dumps(digest)}, truncated: true,
     originalChars: {len(MAPPING_SOURCE)}, role: "primary" }};
@@ -2486,7 +2934,7 @@ export async function runRuntimeScan(options: any) {{
   await call("snapshot-failure", PROMPT);
   options.observer.onScanComplete?.({{ hookFailures: 0, unattributablePayloads: 0 }});
   return {{ newFindings: [], updatedFindings: [],
-    bootstrapScan: {{ llmCalls: 10, failedCalls: 0, status: "complete", hypothesisCoverage: 1 }},
+    bootstrapScan: {{ llmCalls: 12, failedCalls: 0, status: "complete", hypothesisCoverage: 1 }},
     runtimeProfile: "full", degraded: false, observer: {{ version: 1, hookFailures: 0 }} }};
 }}
 '''
@@ -2512,7 +2960,7 @@ def test_reused_context_ids_cannot_attach_mapping_proof_to_the_wrong_prompt(tmp_
             by_call.setdefault(event["call_id"], []).append(event["metadata"]["spans"][0])
 
     assert len(by_call["duplicate"]) == 2
-    for call_id in ("duplicate", "late", "conflicting-retry"):
+    for call_id in ("duplicate", "late", "conflicting-retry", "known-then-unknown"):
         assert all(span["location_known"] is False for span in by_call[call_id])
         assert all("source_mapping" not in span for span in by_call[call_id])
     assert len(by_call["identical-retry"]) == 1
@@ -4236,7 +4684,7 @@ def test_the_adapter_declares_full_and_pr_scans():
     adapter = get_adapter("llm-harness")
 
     assert adapter.scan_modes == frozenset({"full", "pr"})
-    assert adapter.adapter_version == "2.6.0"
+    assert adapter.adapter_version == "2.7.0"
 
 
 def test_a_pr_request_runs_the_harness_in_pr_mode_between_the_commits_the_request_names(tmp_path, monkeypatch):
@@ -4261,7 +4709,7 @@ def test_a_pr_request_runs_the_harness_in_pr_mode_between_the_commits_the_reques
     execution = load_document(bundle / "execution.json", "execution-record")
     assert result["status"] == "success" and result["location_basis"] == "pr_head"
     assert [claim["claim_id"] for claim in result["claims"]] == ["SV-AUTH-AUTHBYPASS-001"]
-    assert execution["provenance"]["mode"] == "pr" and execution["adapter"]["version"] == "2.6.0"
+    assert execution["provenance"]["mode"] == "pr" and execution["adapter"]["version"] == "2.7.0"
     assert execution["provenance"]["pr"]["prepared_state"] == "fresh"
     assert any(note.startswith("Prepared state: fresh.") for note in execution["notes"])
     assert all(not note.startswith("Prepared state") for note in

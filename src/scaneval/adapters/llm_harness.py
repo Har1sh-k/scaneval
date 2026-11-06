@@ -2593,7 +2593,7 @@ def session_history_notes(manifest: list[dict[str, Any]], registered: dict[str, 
 
 class LlmHarnessAdapter(Adapter):
     name = "llm-harness"
-    adapter_version = "2.6.0"
+    adapter_version = "2.7.0"
     requires_git = True
     # A full request runs the harness's bootstrap mode; a PR request runs its pr mode over the base
     # and head commits the request names (see the module docstring).

@@ -29,7 +29,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const DRIVER_VERSION = "2.6.0";
+const DRIVER_VERSION = "2.7.0";
 // The route label of the image runtime's dedicated Pi runner. Deliberately not "pi": the old
 // local route's declared tool policy is --no-tools, and this one is an explicit allowlist.
 const PI_OCI_ROUTE = "pi-oci";
@@ -97,14 +97,15 @@ type PiResult = {
   binary?: string; outputFormat?: "text" | "json";
   structured?: ClaudeStructured | null; structuredParseError?: string;
 };
-type PiInvocation = { args?: string[]; stdin?: string; request?: unknown; cwd: string; timeoutMs: number; env: NodeJS.ProcessEnv; meta?: PiMeta };
+type PiInvocation = { args?: string[]; stdin?: unknown; request?: unknown; cwd: string; timeoutMs: number; env: NodeJS.ProcessEnv; meta?: PiMeta };
 type PiRunner = { runPi(options: PiInvocation): Promise<PiResult> };
 
 // Compatibility fingerprint for the harness's current outer planner retry helper. Its isolation
 // wrapper gives every attempt a new argv array and temporary cwd, so identity and cwd cannot join
 // the calls. The hash covers the stable request values instead, including the source-bearing
-// prompt and environment, and is never written out. This is only correlation: the summary's
-// native retry note is still required before a failed call is classified as recovered.
+// prompt and the explicit invocation.env entries (not ambient process environment), and is never
+// written out. This is only correlation: the summary's native retry note is still required before
+// a failed call is classified as recovered.
 interface PlannerRetryIdentity {
   invocationId: string;
   requestFingerprint: string;
@@ -248,66 +249,150 @@ function moveClaudeTranscript(sessionId: string | null, destination: string): bo
 interface InvocationView {
   model: string | null;
   thinking: string | null;
-  /** Null when the prompt travelled in a form this driver cannot read as text. */
+  /** Null when effective delivery is unknown, not a measurement of an empty prompt. */
   promptChars: number | null;
-  /** Kept inside the driver for source-map verification; emitted only through `content`. */
-  prompt: string;
+  /** Kept inside the driver for source-map verification; emitted only through raw `content`. */
+  prompt: string | null;
   route: string;
   content: Record<string, unknown>;
 }
 
-// securevibes-agent hands the runner pi-style argv with the prompt last, or with the prompt on
-// `stdin` beside the argv; Fieldglass hands it a structured ModelRequest whose prompt travels on
-// stdin. Describe each without changing it. A string `stdin`, even an empty one, is the prompt
-// that is piped, so it wins over the last argv word. Any other value present there is a prompt
-// this driver cannot read as text: it is reported as unknown rather than guessed from the argv,
-// and the empty prompt kept for mapping verification can only make attribution conservative.
-function describeInvocation(options: Record<string, unknown>, resolveBinary?: (args: string[]) => string): InvocationView {
-  const args = Array.isArray(options.args) ? (options.args as string[]) : null;
-  if (args) {
-    const stdin = options.stdin;
-    const last = args.length > 0 ? args[args.length - 1] : "";
-    const prompt = stdin === undefined ? (typeof last === "string" ? last : "")
-      : typeof stdin === "string" ? stdin : "";
-    const flag = (name: string): string | null => {
-      const index = args.indexOf(name);
-      return index === -1 ? null : args[index + 1] ?? null;
-    };
+type PiRunnerStdinMode = "pi-cli-1";
+
+interface ParsedPiArgv {
+  args: string[];
+  model: string | null;
+  thinking: string | null;
+  positionalPrompt: string | null;
+}
+
+const PI_BOOLEAN_FLAGS = new Map<string, string>([
+  ["-p", "print"], ["--print", "print"], ["--no-session", "no-session"],
+  ["--no-tools", "no-tools"], ["--no-extensions", "no-extensions"], ["--no-skills", "no-skills"],
+]);
+const PI_VALUE_FLAGS = new Map<string, "model" | "thinking">([
+  ["--model", "model"], ["--thinking", "thinking"],
+]);
+
+function stringArgv(value: unknown): string[] | null {
+  return Array.isArray(value) && value.every((word) => typeof word === "string")
+    ? value as string[] : null;
+}
+
+/** Parse only the Pi argv grammar emitted by the current harness stages. */
+function parsePiArgv(value: unknown): ParsedPiArgv | null {
+  const args = stringArgv(value);
+  if (!args) return null;
+  let model: string | null = null;
+  let thinking: string | null = null;
+  let positionalPrompt: string | null = null;
+  const seen = new Set<string>();
+  for (let index = 0; index < args.length; index += 1) {
+    const word = args[index];
+    const booleanKey = PI_BOOLEAN_FLAGS.get(word);
+    if (booleanKey) {
+      if (seen.has(booleanKey)) return null;
+      seen.add(booleanKey);
+      continue;
+    }
+    const valueKey = PI_VALUE_FLAGS.get(word);
+    if (valueKey) {
+      if (seen.has(valueKey) || index + 1 >= args.length || args[index + 1].startsWith("-")) return null;
+      seen.add(valueKey);
+      const flagValue = args[index + 1];
+      if (valueKey === "model") model = flagValue;
+      else thinking = flagValue;
+      index += 1;
+      continue;
+    }
+    // The current harness emits every flag before at most one final literal prompt. Pi 1.4.0
+    // parses every @... positional as a file argument, so none can prove literal prompt bytes.
+    if (word.startsWith("-") || word.startsWith("@") || index !== args.length - 1) return null;
+    positionalPrompt = word;
+  }
+  if (!seen.has("print")) return null;
+  return { args: args.slice(), model, thinking, positionalPrompt };
+}
+
+/** Pi 1.4.0's piped-stdin composition, applied only after an exact capability declaration. */
+function effectivePiPrompt(parsed: ParsedPiArgv | null, stdin: unknown,
+                           stdinMode: PiRunnerStdinMode | null): string | null {
+  if (!parsed) return null;
+  if (stdinMode === null) return parsed.positionalPrompt;
+  if (stdin !== undefined && typeof stdin !== "string") return null;
+  const piped = typeof stdin === "string" ? stdin.trim() : "";
+  if (piped) return piped + (parsed.positionalPrompt ?? "");
+  return parsed.positionalPrompt;
+}
+
+function boundaryContent(options: Record<string, unknown>, args: unknown): Record<string, unknown> {
+  const content: Record<string, unknown> = { args: Array.isArray(args) ? args : null };
+  if (options.stdin !== undefined) content.stdin = typeof options.stdin === "string" ? options.stdin : null;
+  if (options.request !== undefined) content.request = options.request;
+  return content;
+}
+
+// `content` is the raw runner boundary shape. Prompt length, retry identity, and source mapping
+// instead use the effective request that the declared transport would deliver to Pi. Structured
+// Fieldglass requests are a separate shape and do not inherit Pi stdin behavior.
+function describeInvocation(options: Record<string, unknown>, stdinMode: PiRunnerStdinMode | null,
+                            resolveBinary?: (args: string[]) => string): InvocationView {
+  if (options.args !== undefined) {
+    const args = stringArgv(options.args);
+    const parsed = parsePiArgv(options.args);
+    const mixed = options.request !== undefined;
+    const prompt = mixed ? null : effectivePiPrompt(parsed, options.stdin, stdinMode);
     return {
-      model: flag("--model"),
-      thinking: flag("--thinking"),
-      promptChars: stdin === undefined || typeof stdin === "string" ? prompt.length : null,
+      model: parsed?.model ?? null,
+      thinking: parsed?.thinking ?? null,
+      promptChars: prompt === null ? null : prompt.length,
       prompt,
-      route: resolveBinary ? resolveBinary(args) : "unknown",
-      content: stdin === undefined ? { args } : { args, stdin: typeof stdin === "string" ? stdin : null },
+      // Route resolution is native runner behavior, not prompt inference. A newer valid argv
+      // may contain flags this conservative parser does not yet know and still resolve normally.
+      route: args && resolveBinary ? resolveBinary(args) : "unknown",
+      content: boundaryContent(options, options.args),
     };
   }
-  const request = (options.request ?? {}) as { route?: { driver?: string; model?: string }; effort?: string; prompt?: string };
-  const route = request.route ?? {};
-  const prompt = typeof request.prompt === "string" ? request.prompt : "";
+  const rawRequest = options.request;
+  const request = typeof rawRequest === "object" && rawRequest !== null && !Array.isArray(rawRequest)
+    ? rawRequest as Record<string, unknown> : null;
+  const rawRoute = request?.route;
+  const route = typeof rawRoute === "object" && rawRoute !== null && !Array.isArray(rawRoute)
+    ? rawRoute as Record<string, unknown> : null;
+  const rawDriver = route?.driver ?? null;
+  const rawModel = route?.model ?? null;
+  const rawEffort = request?.effort ?? null;
+  const rawPrompt = request?.prompt ?? null;
+  const driver = typeof rawDriver === "string" && rawDriver.length > 0 ? rawDriver : null;
+  const model = typeof rawModel === "string" && rawModel.length > 0 ? rawModel : null;
+  const effort = typeof rawEffort === "string" ? rawEffort : null;
+  const prompt = request && route && driver !== null && model !== null
+    && typeof rawPrompt === "string" ? rawPrompt : null;
   return {
-    model: route.model ?? null,
-    thinking: request.effort ?? null,
-    promptChars: prompt.length,
+    model,
+    thinking: effort,
+    promptChars: prompt === null ? null : prompt.length,
     prompt,
-    route: route.driver ?? "unknown",
-    content: { request: { route: { driver: route.driver ?? null, model: route.model ?? null }, effort: request.effort ?? null, prompt: request.prompt ?? null } },
+    route: driver ?? "unknown",
+    content: { request: {
+      route: { driver: rawDriver, model: rawModel }, effort: rawEffort, prompt: rawPrompt,
+    } },
   };
 }
 
-function plannerRetryIdentity(options: PiInvocation, invocationId: unknown, stage: unknown): PlannerRetryIdentity | null {
+function plannerRetryIdentity(options: PiInvocation, invocationId: unknown, stage: unknown,
+                              stdinMode: PiRunnerStdinMode | null): PlannerRetryIdentity | null {
   // The runner boundary is implemented by a pluggable JavaScript module, so its runtime value
   // can be thinner or stranger than the TypeScript interface promises. Correlation is optional
   // observation: malformed fields must make it unavailable, never make the runner call fail.
   try {
-    if (stage !== "planner" || typeof invocationId !== "string" || !invocationId || !Array.isArray(options.args)
-        || !options.args.every((arg) => typeof arg === "string")
+    if (stage !== "planner" || typeof invocationId !== "string" || !invocationId
         || typeof options.timeoutMs !== "number" || !Number.isFinite(options.timeoutMs)
-        || !options.env || typeof options.env !== "object" || Array.isArray(options.env)) return null;
-    // A piped prompt is part of the request. Absent stays distinct from the empty string, and a
-    // value that is not a string has no stable text identity, so it leaves the call unpaired.
-    const stdin: unknown = options.stdin;
-    if (stdin !== undefined && typeof stdin !== "string") return null;
+        || !options.env || typeof options.env !== "object" || Array.isArray(options.env)
+        || options.request !== undefined) return null;
+    const parsed = parsePiArgv(options.args);
+    const prompt = effectivePiPrompt(parsed, options.stdin, stdinMode);
+    if (!parsed || prompt === null) return null;
     const environment = Object.entries(options.env);
     if (!environment.every(([, value]) => typeof value === "string" || value === undefined)) return null;
     environment.sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
@@ -315,7 +400,7 @@ function plannerRetryIdentity(options: PiInvocation, invocationId: unknown, stag
     // wrapper-created copies compare by value. Hashing avoids retaining or emitting API keys;
     // length-delimited JSON keeps boundaries unambiguous, and escapes lone surrogates rather
     // than letting UTF-8 encoding merge distinct prompts.
-    const stableRequest = JSON.stringify([options.args.slice(), stdin ?? null, options.timeoutMs, environment]);
+    const stableRequest = JSON.stringify([parsed.args, prompt, options.timeoutMs, environment]);
     return { invocationId, requestFingerprint: createHash("sha256").update(stableRequest).digest("hex") };
   } catch {
     return null;
@@ -911,6 +996,14 @@ async function main(): Promise<void> {
   // rather than resolved off argv by a helper the pinned build does not export.
   const runnerHooks: number | null = imageState ? null : runnerModule.PI_RUNNER_HOOKS_VERSION ?? null;
   const engineHooks: number | null = engineModule.HARNESS_OBSERVER_VERSION ?? null;
+  const declaredStdinMode: unknown = runnerModule.PI_RUNNER_STDIN_MODE;
+  const stdinDeclaration = declaredStdinMode === undefined ? "absent"
+    : declaredStdinMode === "pi-cli-1" ? "pi-cli-1"
+    : typeof declaredStdinMode === "string" ? "unknown" : "malformed";
+  // The mock module is a different runner, and the image route owns its argv-to-stdin rewrite.
+  // Neither can inherit a declaration from the harness's default runner module.
+  const effectiveStdinMode: PiRunnerStdinMode | null = !imageState && config.runner === "default"
+    && declaredStdinMode === "pi-cli-1" ? "pi-cli-1" : null;
   const resolveBinary: ((args: string[]) => string) | undefined = imageState
     ? () => PI_OCI_ROUTE : runnerModule.resolveRunnerBinary;
 
@@ -1153,7 +1246,10 @@ async function main(): Promise<void> {
           attempt: record.attempt,
           max_attempts: record.maxAttempts,
           retries_observable: true,
+          // Native runner evidence is retained under its native name. The separately named
+          // value is this driver's conservative interpretation of the effective request.
           prompt_chars: wireNumber(record.promptChars),
+          effective_prompt_chars: wireNumber(state?.view.promptChars),
           timeout_ms: wireNumber(record.timeoutMs),
           output_format: record.outputFormat,
           ...(correlated ? {} : { correlation: "missing_invocation_id" }),
@@ -1370,8 +1466,10 @@ async function main(): Promise<void> {
       // Only an evaluated pi call changes its session policy. Each logical call gets a
       // separate directory, so removing --no-session preserves history without carrying
       // model context from one hypothesis into the next. Ordinary harness runs are untouched.
+      const originalArgs = stringArgv(options.args);
       const binary = config.runner === "mock" ? "mock"
-        : options.args && resolveBinary ? resolveBinary(options.args) : "unknown";
+        : originalArgs && resolveBinary ? resolveBinary(originalArgs) : "unknown";
+      const callStdinMode = binary === "pi" ? effectiveStdinMode : null;
       let observedOptions = options;
       if ((binary === "pi" || binary === PI_OCI_ROUTE) && config.pi_session_root && options.args) {
         const sessionDir = join(config.pi_session_root, minted);
@@ -1400,7 +1498,7 @@ async function main(): Promise<void> {
       // events of the same invocation share one call_id; the driver's own id when it did not.
       const callId = meta.invocationId ?? minted;
       const stage = typeof meta.stage === "string" && meta.stage ? meta.stage : "untagged";
-      const retryIdentity = plannerRetryIdentity(options, meta.invocationId, stage);
+      const retryIdentity = plannerRetryIdentity(options, meta.invocationId, stage, callStdinMode);
       let activePlannerCall: ActivePlannerCall | null = null;
       let retryOf: PendingPlannerTimeout | null = null;
       if (retryIdentity) {
@@ -1430,7 +1528,7 @@ async function main(): Promise<void> {
         }
         activePlannerCalls.push(activePlannerCall);
       }
-      const view = describeInvocation(observedOptions as unknown as Record<string, unknown>, resolveBinary);
+      const view = describeInvocation(observedOptions as unknown as Record<string, unknown>, callStdinMode, resolveBinary);
       const route = config.runner === "mock" ? "mock" : view.route;
       observedRoutes.add(route);
       const state: CallState = { callId, runnerCallId: minted, view, route, final: null, attemptSessions: [] };
@@ -1442,10 +1540,10 @@ async function main(): Promise<void> {
       if (config.trace_mode !== "off" && !contextBufferExhausted && mappingContexts.length > 0
           && !promptRetentionFailed.has(callId)) {
         const prompts = promptsByCallId.get(callId) ?? [];
-        if (mappingPromptRecords + 1 > MAX_MAPPING_RETAINED_PROMPT_RECORDS
+        if (view.prompt === null || mappingPromptRecords + 1 > MAX_MAPPING_RETAINED_PROMPT_RECORDS
             || mappingPromptChars + view.prompt.length > MAX_MAPPING_RETAINED_PROMPT_CHARS) {
           // Drop this ID's earlier prompts too: keeping a prefix of its lifecycle would let a
-          // later conflicting call disappear from the exact-mapping decision.
+          // later unknown or conflicting call disappear from the exact-mapping decision.
           for (const retained of prompts) mappingPromptChars -= retained.prompt.length;
           mappingPromptRecords -= prompts.length;
           promptsByCallId.delete(callId);
@@ -1909,6 +2007,7 @@ async function main(): Promise<void> {
     // What this harness build exposed to be observed with, null for a build that exports
     // neither. Every capture claim the adapter makes about this run is read off these two.
     hooks: { runner: runnerHooks, engine: engineHooks },
+    runner_transport: { pi_stdin: { declaration: stdinDeclaration, effective: effectiveStdinMode } },
     model: config.model,
     runner: config.runner,
     mode: config.mode,
