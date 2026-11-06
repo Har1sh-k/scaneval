@@ -98,8 +98,10 @@ def test_cli_separates_policy_variants_and_refuses_nonexistent_bundle(tmp_path, 
     assert main(["condition", str(first), str(second), "--output", str(output)]) == 0
     report = json.loads(output.read_text())
     assert len(report["coverage"]) == 2
-    assert {row["status"] for row in report["coverage"]} == {"attested"}
+    assert {row["status"] for row in report["coverage"]} == {"attested", "unavailable"}
     assert len({row["policy_sha256"] for row in report["coverage"]}) == 2
+    [unavailable] = [row for row in report["observations"] if row["status"] == "unavailable"]
+    assert "missing_condition_record" in {reason["code"] for reason in unavailable["reasons"]}
     assert main(["condition", str(tmp_path / "typo")]) == 2
     assert "not a directory" in capsys.readouterr().err
 
@@ -165,6 +167,26 @@ def test_new_condition_records_from_different_systems_are_reported_separately(tm
     report = aggregate.aggregate([run], policy=policy(replicates=10))
     assert {(row["system_id"], row["status"]) for row in report["condition_coverage"]} == {
         ("held", "attested"), ("local", "declared_only")}
+
+
+def test_aggregation_retains_missing_condition_record_as_an_unavailable_identity_stratum(tmp_path, upstream, monkeypatch):
+    from test_v2_aggregate import policy
+    run = condition_run(tmp_path, upstream, monkeypatch, [reporting_system("scanner")])
+    bundle = next((run / "invocations").iterdir())
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert execution["schema_version"] == "2.1"
+    (bundle / "condition.json").unlink()
+
+    report = aggregate.aggregate([run], policy=policy(replicates=10))
+
+    [coverage] = report["condition_coverage"]
+    assert {key: coverage[key] for key in ("system_id", "mode", "profile", "condition", "status")} == {
+        "system_id": "scanner", "mode": "full", "profile": "standard",
+        "condition": "closed_book_standard", "status": "unavailable",
+    }
+    assert coverage["policy_sha256"] and coverage["observations"] == 1
+    assert "missing_condition_record" in {
+        reason["code"] for reason in coverage["assignments"][0]["reasons"]}
 
 
 def test_unsupported_assignment_stays_in_denominator_without_refusing_supported_evidence(tmp_path, upstream, monkeypatch):

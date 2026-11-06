@@ -102,8 +102,52 @@ def test_offline_enforcement_attests_and_preserves_identity_cues(tmp_path):
     assert record["provider_retrieval"] == "not_applicable" and record["network"] == "enforced"
     assert record["retained_identity_cues"]["instruction_files"] == ["AGENTS.md"]
     assert record["retained_identity_cues"]["package_metadata"] == ["package.json"]
-    assert conditions.classify_observation(bundle) == record
+    reclassified = conditions.classify_observation(bundle)
+    assert reclassified == record
+    assert (bundle / conditions.RECORD_FILE).read_bytes() == (canonical_json(reclassified) + "\n").encode()
     assert {item["role"] for item in record["artifacts"]} == {"request", "result", "execution", "configuration", "policy", "provenance", "evidence"}
+
+
+def test_schema_2_1_without_condition_record_fails_closed_and_keeps_coverage_identity(tmp_path):
+    bundle, saved = invoke(tmp_path)
+    (bundle / conditions.RECORD_FILE).unlink()
+
+    record = conditions.classify_observation(bundle)
+
+    assert saved["status"] == "attested"
+    assert record["status"] == "unavailable" and record["status"] != "attested"
+    assert "missing_condition_record" in codes(record)
+    assert conditions.condition_coverage([record]) == [{
+        "system_id": record["system_id"], "mode": record["mode"],
+        "condition": record["condition"], "status": "unavailable",
+        "identity_profile": record["identity_profile"],
+        "policy_sha256": record["policy_sha256"], "observations": 1,
+    }]
+
+
+def test_initial_record_bypass_is_private_to_creation_and_public_reads_still_fail_closed(tmp_path):
+    bundle, saved = invoke(tmp_path)
+    with pytest.raises(ContractError, match="requires condition.json to be absent"):
+        conditions._classify_observation_for_creation(bundle)
+
+    (bundle / conditions.RECORD_FILE).unlink()
+    initial = conditions._classify_observation_for_creation(bundle)
+    public = conditions.classify_observation(bundle)
+
+    assert initial == saved and initial["status"] == "attested"
+    assert public["status"] == "unavailable"
+    assert "missing_condition_record" in codes(public)
+
+
+def test_schema_2_0_without_condition_record_preserves_historical_classification(tmp_path):
+    bundle, saved = invoke(tmp_path, enforced=False, declared=False)
+    assert load_document(bundle / "execution.json", "execution-record")["schema_version"] == "2.0"
+    (bundle / conditions.RECORD_FILE).unlink()
+
+    record = conditions.classify_observation(bundle)
+
+    assert record == saved and record["status"] == "declared_only"
+    assert "missing_condition_record" not in codes(record)
 
 
 def test_local_declaration_is_never_attested(tmp_path):
@@ -148,7 +192,8 @@ def test_inferred_condition_still_fails_genuine_artifact_binding_corruption(tmp_
     configuration["config"] = {"different": True}
     path.write_text(canonical_json(configuration))
     record = conditions.classify_observation(bundle)
-    assert record["status"] == "failed" and "configuration_mismatch" in codes(record)
+    assert record["status"] == "failed"
+    assert {"configuration_mismatch", "missing_condition_record"} <= codes(record)
 
 
 @pytest.mark.parametrize("changes", [
@@ -192,7 +237,8 @@ def test_missing_legacy_request_input_fields_are_conservative_gaps(tmp_path, fie
     request["input"].pop(field)
     path.write_text(canonical_json(request))
     record = conditions.classify_observation(bundle)
-    assert record["status"] == "declared_only" and "missing_request" in codes(record)
+    assert record["status"] == "unavailable"
+    assert {"missing_request", "missing_condition_record"} <= codes(record)
 
 
 def test_present_preparation_mode_must_match_executed_input(tmp_path):
@@ -410,7 +456,8 @@ def test_legacy_trace_without_execution_time_digest_does_not_attest(tmp_path):
     evidence.pop("trace")
     evidence_path.write_text(canonical_json(evidence))
     record = conditions.classify_observation(bundle)
-    assert record["status"] == "declared_only" and "trace_binding_unavailable" in codes(record)
+    assert record["status"] == "unavailable"
+    assert {"trace_binding_unavailable", "missing_condition_record"} <= codes(record)
 
 
 @pytest.mark.parametrize("key,value,code", [
@@ -507,8 +554,9 @@ def test_scanner_json_assertion_is_not_authenticated_provider_attestation(tmp_pa
     evidence["controls"]["provider"]["attestation"] = {"path": "raw/provider.json", "sha256": digest}
     (bundle / conditions.EVIDENCE_FILE).write_text(canonical_json(evidence))
     record = conditions.classify_observation(bundle)
-    assert record["status"] == "declared_only" and record["provider_retrieval"] == "unverifiable"
+    assert record["status"] == "unavailable" and record["provider_retrieval"] == "unverifiable"
     assert record["provider"]["attestation"] == "self_reported"
+    assert "missing_condition_record" in codes(record)
 
 
 @pytest.mark.parametrize("file", ["request.json", "execution.json", "result.json", conditions.POLICY_FILE,
@@ -554,7 +602,9 @@ def test_historical_provenance_without_optional_cue_inventory_remains_readable(t
     execution = json.loads(execution_path.read_text())
     execution["provenance"]["provenance_sha256"] = canonical_sha256(provenance)
     execution_path.write_text(canonical_json(execution))
-    record = conditions.classify_observation(bundle)
+    # This test intentionally regenerates the baseline after changing fixture provenance; use
+    # the writer-only initial path so the separate public missing-record rule does not obscure it.
+    record = conditions._classify_observation_for_creation(bundle)
     assert record["status"] == "attested"
     assert record["retained_identity_cues"]["instruction_files"] == ["AGENTS.md"]
 

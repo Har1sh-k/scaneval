@@ -349,10 +349,36 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None,
                          identity_profile: str | None = None, input_mode: str | None = None) -> dict:
     """Classify one saved bundle; never promote legacy declarations to attested evidence.
 
-    Missing execution/input/trace evidence produces an unavailable or declared-only record. An
-    existing ``condition.json`` is verified against recomputed evidence, including exact file
-    hashes, and never trusted as an assertion. No artifact is modified by this function.
+    Missing execution/input/trace evidence produces an unavailable or declared-only record. A
+    validated schema-2.1 execution record also requires ``condition.json``: its absence is
+    reported as ``missing_condition_record`` and cannot attest. An existing record is verified
+    against recomputed evidence, including exact file hashes, and never trusted as an assertion.
+    No artifact is modified by this function.
     """
+    return _classify_observation(bundle, condition=condition, identity_profile=identity_profile,
+                                 input_mode=input_mode, require_condition_record=True)
+
+
+def _classify_observation_for_creation(bundle: str | Path, *, condition: dict | None = None,
+                                       identity_profile: str | None = None,
+                                       input_mode: str | None = None) -> dict:
+    """Build the first condition record for the invocation writer, and only while it is absent.
+
+    This closes the intentional creation gap between publishing the other bundle documents and
+    the create-only write of ``condition.json``. Public readers always use
+    :func:`classify_observation` and therefore fail closed on that same gap.
+    """
+    root = Path(bundle).expanduser().resolve()
+    if (root / RECORD_FILE).exists():
+        raise ContractError("initial condition-record classification requires condition.json to be absent")
+    return _classify_observation(root, condition=condition, identity_profile=identity_profile,
+                                 input_mode=input_mode, require_condition_record=False)
+
+
+def _classify_observation(bundle: str | Path, *, condition: dict | None,
+                          identity_profile: str | None, input_mode: str | None,
+                          require_condition_record: bool) -> dict:
+    """Shared classifier; only the create-only invocation writer may waive initial presence."""
     root = Path(bundle).expanduser().resolve()
     artifacts: list[dict] = []
     documents: dict[str, dict] = {}
@@ -376,6 +402,11 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None,
             (failed if role == "policy" and (root / relative).exists() else gaps).append(
                 _reason("invalid_condition_policy" if role == "policy" and (root / relative).exists() else "missing_" + role, str(exc)))
     execution, result, request = (documents.get(name, {}) for name in ("execution", "result", "request"))
+    missing_condition_record = (require_condition_record
+                                and execution.get("schema_version") == "2.1"
+                                and not (root / RECORD_FILE).exists())
+    if missing_condition_record:
+        gaps.append(_reason("missing_condition_record", "A schema-2.1 execution bundle has no saved condition record."))
     profile = (execution.get("provenance") or {}).get("profile", (request.get("input") or {}).get("profile", identity_profile or "standard"))
     # Execution 2.0 predates PR inputs and therefore denotes a full scan. A contradictory
     # request must not supply the missing mode and relabel an otherwise valid legacy record.
@@ -575,7 +606,8 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None,
     inferred_ineligible = (not declared and declaration["name"] in ("closed_book_standard", "identity_reduced") and failed
                            and all(row["code"] in eligibility_failures for row in failed))
     record["status"] = ("unavailable" if inferred_ineligible else "failed" if failed
-                        else "unavailable" if execution["status"] == "unsupported" or legacy or identity_unavailable
+                        else "unavailable" if (missing_condition_record or execution["status"] == "unsupported"
+                                               or legacy or identity_unavailable)
                         else "declared_only" if gaps else "attested")
     record["reasons"] = failed + gaps
     if not record["reasons"]:

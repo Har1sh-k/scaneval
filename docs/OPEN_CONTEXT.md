@@ -178,8 +178,10 @@ no response bytes and remain explicit capture gaps.
 `condition.json` is recomputed from saved request, result, execution, configuration, policy,
 input provenance, history audit, retrieval events, and retained-content bytes. It distinguishes
 declarations, external enforcement, observed capture, and unavailable or unverifiable portions.
-Changing any bound artifact invalidates the record. Missing capture remains `capture_gap`;
-zero events never proves that no research occurred.
+Changing any bound artifact invalidates the record. A schema-2.1 execution bundle missing the
+record itself is unavailable with `missing_condition_record`; a real evidence failure still takes
+precedence. Missing capture remains `capture_gap`; zero events never proves that no research
+occurred.
 
 Provider CONNECT tunnels remain encrypted. Their allow/deny decisions and byte counts are
 observed, while provider-side searches, browser/native retrieval inside a tunnel, URLs,

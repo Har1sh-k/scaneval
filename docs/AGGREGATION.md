@@ -53,8 +53,10 @@ statuses cannot share one system's mode/profile metric view: ordinary weighted a
 comparison refuse that mixture before computing metrics. Systems are checked separately, and
 comparison checks only its baseline/candidate. Empty unsupported/error/timeout observations
 occupy denominators without blocking other evidence. Missing/skipped assignments remain in the operational denominator and are
-reported as unavailable. Legacy bundles without condition evidence remain readable and classify
-conservatively. Use `scaneval condition bundle-a bundle-b` to inspect mixed collections and their
+reported as unavailable. A schema-2.1 bundle missing `condition.json` contributes an unavailable
+stratum with its system, mode, profile, condition, and policy identity preserved; evidence
+failures still contribute a failed stratum. Legacy schema-2.0 bundles keep their historical
+classification. Use `scaneval condition bundle-a bundle-b` to inspect mixed collections and their
 separate coverage without pooling results; see [closed-book standard](CLOSED_BOOK.md).
 
 For mixed-status runs, `scaneval aggregate <run> --by-condition --output strata.json` produces
