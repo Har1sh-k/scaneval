@@ -386,7 +386,7 @@ def test_secure_v1_records_and_returns_unsupported_for_every_native_direct_agent
         trace_mode="off", trace_dir=None)
     assert outcome.status == "unsupported" and outcome.command == [] and outcome.exit_code is None
     assert outcome.error["code"] == "unsupported_runtime_boundary"
-    assert outcome.examined_nothing is True and outcome.bundles_resolved is True
+    assert outcome.examined_nothing is True and outcome.bundles_resolved is False
     assert runtime.invocations() == []
 
 
@@ -413,7 +413,7 @@ def test_secure_v1_unsupported_bundle_validates_replays_and_advertises_no_provid
     result = load_document(bundle / "result.json", "scan-result")
     execution = load_document(bundle / "execution.json", "execution-record")
     assert result["status"] == execution["status"] == "unsupported"
-    assert result["examined_nothing"] is True and result["bundles_resolved"] is True
+    assert result["examined_nothing"] is True and result["bundles_resolved"] is False
     assert execution["command"] == [] and execution["exit_code"] is None
     assert execution["raw_artifacts"] == []
     assert not set(rs.CREDENTIAL_ENV_ALLOWLIST) & set(execution["environment"]["passthrough"])

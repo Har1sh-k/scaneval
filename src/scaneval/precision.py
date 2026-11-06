@@ -7,7 +7,8 @@ probability sample of it, and weight each reviewed claim by the inverse of the p
 of being drawn (Horvitz and Thompson). This module does each step, and ``docs/PRECISION.md`` is the
 guide:
 
-- :func:`build_frame` lists the population from saved run directories. A unit is one exact-duplicate
+- :func:`build_frame` lists the population from saved run directories after reopening and binding
+  each validated ``run-config.json`` to its manifest and schedule. A unit is one exact-duplicate
   group of claims within one invocation, by :func:`scaneval.scoring.claim_fingerprint`, the identity
   scoring uses, so a claim delivered three times is judged once and its copies are counted apart as
   duplicate delivery burden. The ``first_b`` population holds the units with a copy at native rank
@@ -17,7 +18,8 @@ guide:
   :class:`scaneval.resampling.Stream` per stratum, and records every inclusion probability. A
   stratum that draws no unit is listed as uncovered.
 - :func:`review_queue` exports the sampled claims for reviewers under blinded item ids, with each
-  system shown only by an alias; the mapping stays in the sample.
+  system shown only by an alias; the mapping stays in the sample. The sample is self-contained, so
+  this step has no run-directory access and does not reopen the configuration.
 - :func:`record_review` appends one human review to a chained, append-only history bound to one
   sample.
 - :func:`estimate` resolves each sampled unit by the documented rule and reports weighted totals,
@@ -70,6 +72,7 @@ SAMPLE_KIND = "precision-sample"
 REVIEWS_KIND = "precision-reviews"
 ESTIMATE_KIND = "precision-estimate"
 SCHEMA_VERSION = "2.1"
+CONFIG_NAME = "run-config.json"
 # The chain kind of a recorded precision review, so one can never be replayed as a case review or
 # a map review (see scaneval.contracts.chain_digest).
 REVIEW_CHAIN_KIND = "precision_review"
@@ -125,10 +128,12 @@ def _count(value: object, label: str, *, minimum: int) -> int:
 
 
 def _load_run(run_dir: Path) -> tuple[Path, dict, dict]:
-    """The manifest and frozen schedule of one run directory, refused unless they agree.
+    """The manifest, schedule, and reopened configuration of one run, refused unless they bind.
 
     A 2.0 manifest names no schedule, so it cannot say which assignments its claims answer; it is
-    refused rather than read as a run that assigned whatever happens to be on disk.
+    refused rather than read as a run that assigned whatever happens to be on disk. The 2.1 reader
+    also validates ``run-config.json`` and binds its canonical digest through the schedule and
+    manifest before it considers assignment rows.
     """
     manifest = load_document(run_dir / MANIFEST_NAME, MANIFEST_KIND)
     if manifest["schema_version"] == "2.0":
@@ -139,6 +144,12 @@ def _load_run(run_dir: Path) -> tuple[Path, dict, dict]:
     if schedule["run_id"] != manifest["run_id"]:
         raise ContractError(f"{run_dir}: the manifest is for run {manifest['run_id']}, but its schedule "
                             f"is for run {schedule['run_id']}")
+    run_id = manifest["run_id"]
+    if schedule["config_sha256"] != manifest["config_sha256"]:
+        raise ContractError(f"the schedule and the manifest of run {run_id} bind to different configurations")
+    config = load_document(run_dir / CONFIG_NAME, "run-config")
+    if canonical_sha256(config) != schedule["config_sha256"]:
+        raise ContractError(f"{CONFIG_NAME} of run {run_id} is not the configuration its schedule froze")
     assigned = {row["assignment_id"] for row in schedule["assignments"]}
     unassigned = sorted({row["invocation_id"] for row in manifest["invocations"]} - assigned)
     if unassigned:
@@ -262,8 +273,9 @@ def build_frame(run_dirs: Sequence[str | PathLike[str]], *, population: str, bud
                 profile: str = "standard") -> dict:
     """The sampling frame of one declared claim population over saved run directories.
 
-    Each run directory must hold a 2.1 manifest and the schedule it names; every assignment of a
-    chosen system (default: every system the runs schedule) to an input of the (*mode*, *profile*)
+    Each run directory must hold a 2.1 manifest, the schedule it names, and the validated
+    ``run-config.json`` whose canonical digest both bind; every assignment of a chosen system
+    (default: every system the runs schedule) to an input of the (*mode*, *profile*)
     view becomes an invocation row, and every unit its saved result delivers into the population
     becomes a unit. ``first_b`` needs *budget* B and holds the units with a copy at native rank at
     most B: an invocation whose output is unranked, or whose bundles are unresolved, has no measured
@@ -275,7 +287,7 @@ def build_frame(run_dirs: Sequence[str | PathLike[str]], *, population: str, bud
     The frame is a function of the documents read and nothing else: runs are taken in run-id order,
     assignments in id order, and units sorted by unit id, so the order run directories are named in
     and the order a filesystem lists them in change nothing. Refused: no run directory, a run read
-    twice, a 2.0 manifest, a schedule or manifest that disagrees with itself, a bundle outside its
+    twice, a 2.0 manifest, a manifest, schedule, or reopened configuration that does not bind, a bundle outside its
     run, a result that cannot be read or names another run, system, or input, an unknown system,
     and a view no chosen assignment falls in. A result is never skipped: a frame that dropped an
     unreadable bundle's claims would misstate the population. Nothing is written.
@@ -565,7 +577,8 @@ def review_queue(sample: dict) -> dict:
     invocation, unit, and claim ids and native rule ids are left out because they can name the
     tool. Blinding is only as good as the claim text: an allegation that names its tool still does.
     This is an export for people, not a contract document: nothing reads it back, and a review is
-    recorded against the sample by item id.
+    recorded against the sample by item id. The validated sample is self-contained here: this
+    function receives no run directory and does not reopen ``run-config.json``.
     """
     verify_sample(sample)
     frame = sample["frame"]

@@ -1071,7 +1071,10 @@ def run_invocation(
 
     ``result.json`` and ``execution.json`` are written only once both documents validate and
     encode, and they are renamed into place together, so a bundle never holds a successful
-    result beside a missing execution record: a write that fails part way leaves neither. An
+    result beside a missing execution record: a write that fails part way leaves neither. Once
+    all evidence is present, the writer uses the private initial-classification path and creates
+    ``condition.json`` without overwriting; public classification never waives that file's
+    schema-2.1 presence requirement. An
     outcome this module cannot read, an execution record the contract refuses, a trace file that
     is not UTF-8 text, and any failure while capturing harness state, moving the staged
     directories into the bundle, collecting or hashing declared artifacts, or serializing what
@@ -1341,6 +1344,7 @@ def run_invocation(
             raise ExecutionError(f"the exported history could not be audited: {_failure_message(exc)}") from exc
         if mode_unsupported:
             outcome = NativeOutcome(status="unsupported", exit_code=None, command=[],
+                                    bundles_resolved=False,
                                     error={"code": "unsupported_mode",
                                            "message": f"{adapter.name} does not declare support for "
                                                       f"{prepared.mode} scans; it carries out: "
@@ -1349,6 +1353,7 @@ def run_invocation(
                                            "mode is never run in its place."])
         elif unsupported:
             outcome = NativeOutcome(status="unsupported", exit_code=None, command=[],
+                                    bundles_resolved=False,
                                     error={"code": "unsupported_language",
                                            "message": f"{adapter.name} does not declare support for: {', '.join(unsupported)}"},
                                     notes=["Unsupported work stays in the denominator; nothing was executed."])
@@ -1362,6 +1367,7 @@ def run_invocation(
                 # Any failure inside the adapter is a recorded error with its own type name,
                 # never an empty successful scan and never a crash of the whole run.
                 outcome = NativeOutcome(status="error", exit_code=None, command=[],
+                                        bundles_resolved=False,
                                         error={"code": "adapter_failure", "message": _failure_message(exc)})
             else:
                 # An outcome this module cannot read is a recorded failure too, checked here so
@@ -1754,5 +1760,5 @@ def run_invocation(
                           (bundle / conditions.CONFIGURATION_FILE, configuration_bytes),
                           (bundle / conditions.PROVENANCE_FILE, provenance_bytes),
                           *[(bundle / relative, payload) for relative, payload in identity_documents]])
-    _write_new(bundle / conditions.RECORD_FILE, conditions.classify_observation(bundle))
+    _write_new(bundle / conditions.RECORD_FILE, conditions._classify_observation_for_creation(bundle))
     return bundle

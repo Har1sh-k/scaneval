@@ -73,11 +73,13 @@ schedule, runs of different packs, or, for ``compare``, two systems that were no
 frozen work.
 
 ``precision`` draws a seeded probability sample of delivered claims from saved run directories,
-exports it for human review with system identity blinded, records the reviews people state, and
-estimates reviewed precision from them (:mod:`scaneval.precision`, ``docs/PRECISION.md``). It reads
-runs and never writes into one: each of its outputs is refused inside a run directory as well as
-inside a trial. It supplies no reviewer and changes no decision, score, or detection credit. It
-exits 0 once its document is written, whatever the document reports, and 2 when refused.
+reopening and binding each validated ``run-config.json`` through its schedule and manifest. It
+exports the self-contained sample for human review with system identity blinded, records the reviews
+people state, and estimates reviewed precision from them (:mod:`scaneval.precision`,
+``docs/PRECISION.md``). The queue has no run-directory access. Precision reads runs and never writes
+into one: each output is refused inside a run directory as well as inside a trial. It supplies no
+reviewer and changes no decision, score, or detection credit. It exits 0 once its document is
+written, whatever the document reports, and 2 when refused.
 
 ``gate`` holds one saved comparison, and optionally a precision estimate of each system, to a gate
 policy and writes the decision (:mod:`scaneval.gate`, ``docs/GATE.md``). It runs no scan, model, or
@@ -1111,7 +1113,7 @@ def _refuse_precision_path(output: Path) -> None:
 
 
 def _precision_sample(args: argparse.Namespace) -> int:
-    """Build the frame from the run directories, draw the sample, and write it create-only.
+    """Bind each run's reopened config, build the frame, draw, and write the sample create-only.
 
     Strata that drew no unit are named on stderr, because no estimate from this sample will say
     anything about them; the sample is still written, and the command still exits 0.
@@ -1571,7 +1573,7 @@ def _add_precision_commands(sub: argparse._SubParsersAction) -> None:
     sampled = commands.add_parser(
         "sample", help="list a claim population from run directories and draw a seeded probability sample")
     sampled.add_argument("runs", nargs="+", type=Path, metavar="RUN_DIR",
-                         help="run directory written by 'scaneval run' (2.1 manifest and schedule)")
+                         help="run directory written by 'scaneval run' (bound config, 2.1 manifest and schedule)")
     sampled.add_argument("--output", required=True, type=Path, help="new JSON file, outside any trial directory")
     sampled.add_argument("--population", required=True, choices=precision.POPULATIONS,
                          help="first_b: unique claims with a copy in the first --budget native positions; "

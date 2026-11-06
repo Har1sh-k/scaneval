@@ -33,14 +33,19 @@ is needed. Its content security policy blocks remote resources and connections.
    before export redaction. A recorded reviewer identity or `human_approved` value is attribution
    in the saved record, not authenticated human approval.
 
-The view displays saved `evaluation.json` outcomes and verifies their result, plan, and decision
-hashes. It does not recompute them. Stale judgments remain readable with a stale label. Review
-bindings include the plan and decisions, and an unavailable or stale result binding prevents a
-current review claim. Execution run/input/system/repetition identities must agree with the manifest
-row; result and execution input hashes must match the prepared manifest input, and the saved
-input provenance must match its execution digest. Mismatches remain readable, are shown in
-identity diagnostics, and prevent cross-document claims from appearing currently bound. Raw artifacts are checked by their declared SHA-256; their contents are
-not copied into the export. Captured source, tool results, and prompts come from trace events.
+The view displays saved `evaluation.json` outcomes and first verifies their result, plan, and
+decision hashes. Only after those pointers are current does it check that evaluation identity,
+status, scope, integer summary counts, ordered target IDs, and boolean detection totals agree with
+the bound documents and manifest row. It does not rescore the decisions. In particular, aggregate
+manifest counts cannot detect a count-preserving reassignment of `detected` values between targets,
+and this binding does not validate `first_hit_rank` edits. Stale judgments remain readable with a
+stale label. Review bindings include the plan and decisions, and an unavailable or stale result
+binding prevents a current review claim. Execution run/input/system/repetition identities must agree
+with the manifest row; result and execution input hashes must match the prepared manifest input,
+and the saved input provenance must match its execution digest. Mismatches remain readable, are
+shown in identity diagnostics, and prevent cross-document claims from appearing currently bound.
+Raw artifacts are checked by their declared SHA-256; their contents are not copied into the export.
+Captured source, tool results, and prompts come from trace events.
 
 ## Filters and missingness
 

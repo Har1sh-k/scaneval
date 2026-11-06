@@ -2620,6 +2620,7 @@ class RunSortieAdapter(Adapter):
                 reason = "; ".join(capability["reasons"])
                 return NativeOutcome(
                     status="unsupported", exit_code=None, timed_out=False, command=[], claims=[], artifacts=[],
+                    bundles_resolved=False,
                     notes=["RunSortie secure v1 did not launch: " + reason],
                     error={"code": "unsupported_runtime_boundary",
                            "message": (reason + "; required boundary: "

@@ -6,10 +6,10 @@ import shutil
 
 import pytest
 
-from scaneval.contracts import canonical_sha256
+from scaneval.contracts import canonical_sha256, validate_document
 from scaneval.investigation import build_investigation, export_investigation, InvestigationError
 from scaneval.observer import Observer
-from scaneval.review import review_record
+from scaneval.review import draft_decisions, review_record
 from scaneval.runner import run_from_config
 from scaneval.scoring import score
 from test_v2_runner import upstream, write_pack, write_config, system_entry, FakeAdapter, CLOCK
@@ -66,6 +66,9 @@ def make_run(tmp_path, upstream, *, status="success", malformed=False, mode="con
             run_from_config(config_path, run, adapters=adapters, clock=CLOCK)
     else:
         run_from_config(config_path, run, adapters=adapters, clock=CLOCK)
+    manifest_path = run / "run-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    rows = {row.get("bundle_path"): row for row in manifest["invocations"]}
     for bundle in (run / "invocations").iterdir():
         if not (bundle / "result.json").exists():
             continue
@@ -79,7 +82,13 @@ def make_run(tmp_path, upstream, *, status="success", malformed=False, mode="con
         (bundle / "evaluator/decisions.json").write_text(json.dumps(decisions))
         record = review_record(plan, decisions, clock=CLOCK)
         (bundle / "evaluator/review-record.json").write_text(json.dumps(record))
-        (bundle / "evaluation.json").write_text(json.dumps(score(plan, result, decisions)))
+        evaluation = score(plan, result, decisions)
+        (bundle / "evaluation.json").write_text(json.dumps(evaluation))
+        row = rows[bundle.relative_to(run).as_posix()]
+        row.update(status=evaluation["status"], plan_scope=evaluation["scope"],
+                   **{field: evaluation["metrics"][field] for field in (
+                       "claim_records", "targets_assigned", "targets_detected", "pending_matching_count")})
+    manifest_path.write_text(json.dumps(manifest))
     return run
 
 
@@ -136,6 +145,224 @@ def test_metadata_mode_omits_content_and_preserves_usage_missingness(tmp_path, u
     assert "Private source:" not in json.dumps(document)
     assert any("content excluded" in entry["reason"] for entry in document["export_policy"]["omissions"])
     assert inv["usage"]["recorded"].get("input_tokens") is None
+
+
+def test_evaluation_binding_accepts_the_synchronized_fixture(tmp_path, upstream):
+    run = make_run(tmp_path, upstream)
+    manifest = json.loads((run / "run-manifest.json").read_text())
+    validate_document("run-manifest", manifest)
+    bundle = next((run / "invocations").iterdir())
+    plan = json.loads((bundle / "evaluator/plan.json").read_text())
+    evaluation = json.loads((bundle / "evaluation.json").read_text())
+
+    assert [outcome["target_id"] for outcome in evaluation["targets"]] == [
+        target["target_id"] for target in plan["targets"]]
+    assert build_investigation(run)["invocations"][0]["bindings"]["evaluation"] == "current"
+
+
+def test_evaluation_binding_checks_claim_count_against_bound_result(tmp_path, upstream):
+    run = make_run(tmp_path, upstream)
+    assert build_investigation(run)["invocations"][0]["bindings"]["evaluation"] == "current"
+
+    bundle = next((run / "invocations").iterdir())
+    result_path = bundle / "result.json"
+    result = json.loads(result_path.read_text())
+    claim_count = len(result["claims"])
+
+    evaluation_path = bundle / "evaluation.json"
+    evaluation = json.loads(evaluation_path.read_text())
+    evaluation["metrics"]["claim_records"] += 1
+
+    manifest_path = run / "run-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    row = next(row for row in manifest["invocations"]
+               if row["bundle_path"] == bundle.relative_to(run).as_posix())
+    row["claim_records"] += 1
+
+    assert evaluation["metrics"]["claim_records"] == row["claim_records"] == claim_count + 1
+    assert evaluation["result_sha256"] == canonical_sha256(result)
+    validate_document("run-manifest", manifest)
+    evaluation_path.write_text(json.dumps(evaluation))
+    manifest_path.write_text(json.dumps(manifest))
+    assert len(json.loads(result_path.read_text())["claims"]) == claim_count
+
+    assert build_investigation(run)["invocations"][0]["bindings"]["evaluation"] == "stale"
+
+
+def test_evaluation_binding_uses_scorer_order_for_a_current_unsorted_plan(tmp_path, upstream):
+    run = make_run(tmp_path, upstream)
+    bundle = next((run / "invocations").iterdir())
+    result = json.loads((bundle / "result.json").read_text())
+    plan = json.loads((bundle / "evaluator/plan.json").read_text())
+    plan["targets"].reverse()
+    plan_ids = [target["target_id"] for target in plan["targets"]]
+    assert plan_ids != sorted(plan_ids)
+    validate_document("evaluation-plan", plan)
+
+    decisions = draft_decisions(plan, result, clock=CLOCK)
+    validate_document("review-decisions", decisions)
+    record = review_record(plan, decisions, clock=CLOCK)
+    evaluation = score(plan, result, decisions)
+
+    assert [outcome["target_id"] for outcome in evaluation["targets"]] == sorted(plan_ids)
+    assert evaluation["plan_sha256"] == record["plan_sha256"] == canonical_sha256(plan)
+    assert evaluation["decisions_sha256"] == record["decisions_sha256"] == canonical_sha256(decisions)
+    assert evaluation["result_sha256"] == decisions["result_sha256"] == canonical_sha256(result)
+
+    (bundle / "evaluator/plan.json").write_text(json.dumps(plan))
+    (bundle / "evaluator/decisions.json").write_text(json.dumps(decisions))
+    (bundle / "evaluator/review-record.json").write_text(json.dumps(record))
+    (bundle / "evaluation.json").write_text(json.dumps(evaluation))
+    manifest_path = run / "run-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    row = next(row for row in manifest["invocations"]
+               if row["bundle_path"] == bundle.relative_to(run).as_posix())
+    row.update(status=evaluation["status"], plan_scope=evaluation["scope"], review_state=record["state"],
+               **{field: evaluation["metrics"][field] for field in (
+                   "claim_records", "targets_assigned", "targets_detected", "pending_matching_count")})
+    validate_document("run-manifest", manifest)
+    manifest_path.write_text(json.dumps(manifest))
+
+    assert build_investigation(run)["invocations"][0]["bindings"]["evaluation"] == "current"
+
+
+@pytest.mark.parametrize(("field", "replacement"), [
+    ("run_id", "edited-run"),
+    ("system_id", "edited-system"),
+    ("input_hash", "sha256:" + "0" * 64),
+    ("status", "partial"),
+    ("scope", "reviewed"),
+])
+def test_edited_evaluation_identity_status_and_scope_are_stale(tmp_path, upstream, field, replacement):
+    run = make_run(tmp_path, upstream)
+    path = next((run / "invocations").iterdir()) / "evaluation.json"
+    evaluation = json.loads(path.read_text())
+    evaluation[field] = replacement
+    path.write_text(json.dumps(evaluation))
+
+    assert build_investigation(run)["invocations"][0]["bindings"]["evaluation"] == "stale"
+
+
+@pytest.mark.parametrize("field", [
+    "claim_records", "targets_assigned", "targets_detected", "pending_matching_count",
+])
+def test_edited_evaluation_summary_metrics_are_stale(tmp_path, upstream, field):
+    run = make_run(tmp_path, upstream)
+    path = next((run / "invocations").iterdir()) / "evaluation.json"
+    evaluation = json.loads(path.read_text())
+    evaluation["metrics"][field] += 1
+    path.write_text(json.dumps(evaluation))
+
+    assert build_investigation(run)["invocations"][0]["bindings"]["evaluation"] == "stale"
+
+
+@pytest.mark.parametrize("field", [
+    "claim_records", "targets_assigned", "targets_detected", "pending_matching_count",
+])
+def test_boolean_evaluation_counts_are_stale_not_python_equal_integers(tmp_path, upstream, field):
+    run = make_run(tmp_path, upstream)
+    path = next((run / "invocations").iterdir()) / "evaluation.json"
+    evaluation = json.loads(path.read_text())
+    evaluation["metrics"][field] = bool(evaluation["metrics"][field])
+    path.write_text(json.dumps(evaluation))
+
+    assert build_investigation(run)["invocations"][0]["bindings"]["evaluation"] == "stale"
+
+
+@pytest.mark.parametrize("mutation", [
+    "missing-metrics", "non-object-metrics", "non-list-targets", "non-object-outcome", "non-bool-detected",
+])
+def test_malformed_evaluation_summary_shapes_are_stale_without_exception(tmp_path, upstream, mutation):
+    run = make_run(tmp_path, upstream)
+    path = next((run / "invocations").iterdir()) / "evaluation.json"
+    evaluation = json.loads(path.read_text())
+    if mutation == "missing-metrics":
+        del evaluation["metrics"]
+    elif mutation == "non-object-metrics":
+        evaluation["metrics"] = []
+    elif mutation == "non-list-targets":
+        evaluation["targets"] = {}
+    elif mutation == "non-object-outcome":
+        evaluation["targets"][0] = "not an outcome"
+    else:
+        evaluation["targets"][0]["detected"] = 1
+    path.write_text(json.dumps(evaluation))
+
+    assert build_investigation(run)["invocations"][0]["bindings"]["evaluation"] == "stale"
+
+
+@pytest.mark.parametrize("mutation", ["missing", "extra", "reordered", "wrong-id", "detected-count"])
+def test_evaluation_target_mutations_are_stale(tmp_path, upstream, mutation):
+    run = make_run(tmp_path, upstream)
+    path = next((run / "invocations").iterdir()) / "evaluation.json"
+    evaluation = json.loads(path.read_text())
+    if mutation == "missing":
+        evaluation["targets"].pop()
+    elif mutation == "extra":
+        evaluation["targets"].append({"target_id": "extra", "detected": False, "first_hit_rank": None})
+    elif mutation == "reordered":
+        scorer_order = [outcome["target_id"] for outcome in evaluation["targets"]]
+        evaluation["targets"].reverse()
+        assert [outcome["target_id"] for outcome in evaluation["targets"]] != scorer_order
+    elif mutation == "wrong-id":
+        evaluation["targets"][0]["target_id"] = "wrong-target"
+    else:
+        evaluation["targets"][-1]["detected"] = True
+    path.write_text(json.dumps(evaluation))
+
+    assert build_investigation(run)["invocations"][0]["bindings"]["evaluation"] == "stale"
+
+
+@pytest.mark.parametrize("field", [
+    "status", "plan_scope", "claim_records", "targets_assigned", "targets_detected", "pending_matching_count",
+])
+def test_evaluation_binding_checks_manifest_row_summaries(tmp_path, upstream, field):
+    run = make_run(tmp_path, upstream)
+    path = run / "run-manifest.json"
+    manifest = json.loads(path.read_text())
+    row = manifest["invocations"][0]
+    if field == "status":
+        row[field] = "partial"
+    elif field == "plan_scope":
+        row[field] = "reviewed"
+    else:
+        row[field] += 1
+    validate_document("run-manifest", manifest)
+    path.write_text(json.dumps(manifest))
+
+    assert build_investigation(run)["invocations"][0]["bindings"]["evaluation"] == "stale"
+
+
+def test_evaluation_binding_does_not_claim_to_recompute_outcomes_or_ranks(tmp_path, upstream):
+    run = make_run(tmp_path, upstream)
+    path = next((run / "invocations").iterdir()) / "evaluation.json"
+    evaluation = json.loads(path.read_text())
+    assert [outcome["detected"] for outcome in evaluation["targets"]] == [True, False]
+    for outcome in evaluation["targets"]:
+        outcome["detected"] = not outcome["detected"]
+        outcome["first_hit_rank"] = 999
+    path.write_text(json.dumps(evaluation))
+
+    assert build_investigation(run)["invocations"][0]["bindings"]["evaluation"] == "current"
+
+
+def test_evaluation_digest_binding_states_keep_their_precedence(tmp_path, upstream):
+    run = make_run(tmp_path, upstream)
+    bundle = next((run / "invocations").iterdir())
+    evaluation_path = bundle / "evaluation.json"
+    original = evaluation_path.read_text()
+
+    evaluation_path.unlink()
+    assert build_investigation(run)["invocations"][0]["bindings"]["evaluation"] == "missing"
+    evaluation_path.write_text("not JSON")
+    assert build_investigation(run)["invocations"][0]["bindings"]["evaluation"] == "malformed"
+    evaluation = json.loads(original)
+    evaluation["result_sha256"] = "sha256:" + "0" * 64
+    evaluation_path.write_text(json.dumps(evaluation))
+    assert build_investigation(run)["invocations"][0]["bindings"]["evaluation"] == "stale"
+    evaluation_path.write_text(original)
+    (bundle / "evaluator/plan.json").unlink()
+    assert build_investigation(run)["invocations"][0]["bindings"]["evaluation"] == "unavailable"
 
 
 def test_stale_and_missing_bindings_remain_visible(tmp_path, upstream):
@@ -254,6 +481,7 @@ def test_nested_symlinks_and_traversal_are_refused(tmp_path, upstream):
     (bundle / "evaluator").symlink_to(saved, target_is_directory=True)
     inv = build_investigation(run)["invocations"][0]
     assert inv["documents"]["plan"]["state"] == "unavailable"
+    assert inv["bindings"]["evaluation"] == "unavailable"
     execution_path = bundle / "execution.json"
     execution = json.loads(execution_path.read_text())
     execution["trace"]["path"] = "../other/trace.jsonl"
@@ -285,7 +513,7 @@ def test_document_ambiguity_is_not_a_current_binding(tmp_path, upstream):
     plan.write_text('{"scope":"draft",' + plan.read_text()[1:])
     inv = build_investigation(run)["invocations"][0]
     assert inv["documents"]["plan"]["state"] == "malformed"
-    assert inv["bindings"]["decisions"] == "unavailable"
+    assert inv["bindings"]["decisions"] == inv["bindings"]["evaluation"] == "unavailable"
     assert inv["targets"] == []
 
 

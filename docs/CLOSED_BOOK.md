@@ -25,8 +25,12 @@ Each invocation saves `condition.json`, validated as a `condition-record`. It bi
 of the request, result, execution record, configuration, input provenance, condition policy,
 mechanical history audits, and any observed trace or referenced provider assertion. It also
 shows retained instruction, metadata, and documentation paths. Reclassification checks those
-files and refuses a stale record. Hashes detect changes to saved evidence; they do not
-authenticate its author or stop an operator from rewriting every artifact.
+files and refuses a stale record. A validated schema-2.1 execution bundle with no
+`condition.json` fails closed as `unavailable` with reason `missing_condition_record` unless
+other evidence genuinely fails, in which case `failed` takes precedence and both reasons remain
+visible. Schema 2.0 keeps its historical missing-record behavior. Hashes detect changes to
+saved evidence; they do not authenticate its author or stop an operator from rewriting every
+artifact.
 The trace digest and its run identities are captured when the execution record is written;
 matching event counts alone cannot establish trace identity. Adapter identity and the requested
 model/revision must also agree across the saved configuration, request, and execution record.
@@ -40,7 +44,7 @@ The states are:
 | `attested` | All required evidence establishes the condition, including enforced isolation. |
 | `declared_only` | An eligible invocation declares the condition but has enforcement, capture, or provider verification gaps. |
 | `failed` | Evidence violates the condition, contradicts its bindings, or differs from its saved condition record. |
-| `unavailable` | Required legacy evidence is absent, the scanner did not support the invocation, or the condition cannot be classified. |
+| `unavailable` | Required evidence or a schema-2.1 condition record is absent, the scanner did not support the invocation, or the condition cannot be classified. |
 
 The ordinary export removes original `.git` entries and controller state. A scanner requiring
 Git gets one neutral snapshot commit with fixed identity and date. Before and after audits
