@@ -120,6 +120,68 @@ def _binding(documents: dict, owner: str, checks: list[tuple[str, str]]) -> str:
                             for field, target in checks) else "stale"
 
 
+def _evaluation_binding(documents: dict, row: dict) -> str:
+    """Bind a saved evaluation without rescoring it or weakening digest-state precedence.
+
+    Once its three digest pointers are current, require the saved summary and ordered target
+    outcomes to agree with the documents and manifest row they summarize. Any malformed shape or
+    inconsistent value is stale. This deliberately does not authenticate semantic outcome details
+    such as ranks or recompute detections from review decisions.
+    """
+    try:
+        binding = _binding(documents, "evaluation", [
+            ("result_sha256", "result"),
+            ("plan_sha256", "plan"),
+            ("decisions_sha256", "decisions"),
+        ])
+        if binding != "current":
+            return binding
+
+        evaluation = documents["evaluation"]["data"]
+        result = documents["result"]["data"]
+        plan = documents["plan"]["data"]
+        for field in ("run_id", "system_id", "input_hash", "status"):
+            if evaluation.get(field) != result.get(field):
+                return "stale"
+        if evaluation.get("status") != row.get("status"):
+            return "stale"
+        if evaluation.get("scope") != plan.get("scope") or evaluation.get("scope") != row.get("plan_scope"):
+            return "stale"
+
+        metrics = evaluation.get("metrics")
+        metric_fields = ("claim_records", "targets_assigned", "targets_detected", "pending_matching_count")
+        if not isinstance(metrics, dict):
+            return "stale"
+        if any(type(metrics.get(field)) is not int or metrics[field] != row.get(field)
+               for field in metric_fields):
+            return "stale"
+        claims = result.get("claims")
+        if not isinstance(claims, list) or metrics["claim_records"] != len(claims):
+            return "stale"
+
+        outcomes = evaluation.get("targets")
+        plan_targets = plan.get("targets")
+        if not isinstance(outcomes, list) or not isinstance(plan_targets, list):
+            return "stale"
+        if any(not isinstance(outcome, dict) for outcome in outcomes):
+            return "stale"
+        # scoring.observe emits one outcome per target in sorted target_id order, independent
+        # of the schema-valid order in which targets appear in the plan.
+        expected_ids = sorted(target["target_id"] for target in plan_targets)
+        if [outcome.get("target_id") for outcome in outcomes] != expected_ids:
+            return "stale"
+        if any(type(outcome.get("detected")) is not bool for outcome in outcomes):
+            return "stale"
+        detected = sum(outcome["detected"] for outcome in outcomes)
+        if len(outcomes) != metrics["targets_assigned"] or len(outcomes) != row.get("targets_assigned"):
+            return "stale"
+        if detected != metrics["targets_detected"] or detected != row.get("targets_detected"):
+            return "stale"
+        return "current"
+    except Exception:
+        return "stale"
+
+
 def _export_copy(value: Any, changes: list[dict], path: str = "") -> Any:
     """Redact credentials in the copy; never apply the publication fixture sanitizer."""
     if isinstance(value, dict):
@@ -285,7 +347,7 @@ def _invocation(evidence: Evidence, manifest: dict, row: dict, filters: dict,
             review_binding = "stale"
     invocation["review_state"] = data["review"].get("state") if review_binding == "current" else review_binding
     invocation["bindings"] = {"decisions": decisions_binding, "review": review_binding,
-        "evaluation": _binding(documents, "evaluation", [("result_sha256", "result"), ("plan_sha256", "plan"), ("decisions_sha256", "decisions")])}
+        "evaluation": _evaluation_binding(documents, row)}
     if not identity_current and invocation["bindings"]["evaluation"] == "current":
         invocation["bindings"]["evaluation"] = "identity_mismatch"
     trace_info = execution.get("trace")
