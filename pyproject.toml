@@ -1,18 +1,40 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "scaneval"
 version = "2.0.0a1"
-description = "Reproducible evaluation and observability contracts for security scanners."
-readme = "README.md"
+description = "Alpha framework for reproducible security-scanner evaluation and observability."
+readme = "README_PYPI.md"
 requires-python = ">=3.11"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
   { name = "ScanEval contributors" },
 ]
 dependencies = ["jsonschema>=4.23,<5"]
+keywords = ["security", "scanner", "evaluation", "benchmark", "observability"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Operating System :: POSIX",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Security",
+  "Topic :: Software Development :: Testing",
+]
+
+[project.urls]
+Homepage = "https://github.com/Har1sh-k/scaneval"
+Repository = "https://github.com/Har1sh-k/scaneval"
+Documentation = "https://github.com/Har1sh-k/scaneval/blob/main/docs/INITIAL_BUILD.md"
+Issues = "https://github.com/Har1sh-k/scaneval/issues"
 
 [project.scripts]
 scaneval = "scaneval.cli:main"

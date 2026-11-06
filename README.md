@@ -4,6 +4,22 @@ ScanEval evaluates security scanners on versioned cases and records how instrume
 
 > Alpha (`2.0.0a1`). No benchmark results are published. The [selected CVE corpus](corpus/diverse/README.md) contains 50 CVEs from 32 repositories across seven target languages: 9 Critical, 13 High, 20 Medium and 8 Low by the documented published-CVSS policy. Its 48 pinned vulnerable exports have mechanical checks and a separate machine-review workflow for static labels. Selection emphasizes contextual security reasoning; scanner miss rates remain unmeasured. Fixed controls remain unvalidated. Scanner outputs and traces stay local.
 
+## Python alpha package
+
+The planned PyPI release is `scaneval==2.0.0a1`; publication is pending. The Python distribution includes the evaluation API, CLI, and optional tracing through `scaneval.observer`. After publication, install the alpha:
+
+```bash
+python -m pip install scaneval==2.0.0a1
+```
+
+```python
+import scaneval
+
+report = scaneval.evaluate(plan, result, decisions)
+```
+
+The arguments are structured saved ScanEval records: an evaluation plan, normalized scanner result, and supplied review decisions bound to those records. Scoring is offline; scanner execution and finding adjudication are separate steps. See the [Python package guide](README_PYPI.md) for loading the records and the [Observer guide](docs/OBSERVER_SDK.md) for optional instrumentation. The TypeScript Observer remains available as source; this release publishes only the Python `scaneval` distribution. [Release instructions](docs/RELEASING.md) cover artifact verification and PyPI publishing. Use a source checkout for the corpus, examples, and development workflow below.
+
 ## Quick start
 
 Requires Git and Python 3.11+. Live runs also need the configured scanner.
