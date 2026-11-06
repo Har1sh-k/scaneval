@@ -13,12 +13,14 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const ROOT = "/opt/scaneval";
 const HARNESS = join(ROOT, "harness");
 const PI_PACKAGE = "@earendil-works/pi-coding-agent";
+const PI_CLI = join(ROOT, "node_modules", PI_PACKAGE, "dist", "cli.js");
+const PI_LAUNCHER = join(ROOT, "pi-cli.mjs");
 const REQUIRED = ["llm_harness_driver.mts", "pi_oci_runner.mts", "pi_open_context.mts"];
 
 function expected(name) {
@@ -70,6 +72,17 @@ const pi = readJson(join(ROOT, "node_modules", PI_PACKAGE, "package.json"));
 const piLock = readJson(join(ROOT, "package-lock.json")).packages[`node_modules/${PI_PACKAGE}`];
 check("Pi version", pi.version, expected("EXPECT_PI_VERSION"));
 check("Pi lockfile version", piLock.version, pi.version);
+check("Pi executable", realpathSync(join(ROOT, "bin", "pi")), PI_LAUNCHER);
+if (existsSync(join(ROOT, "node_modules", PI_PACKAGE, "dist", "bundle"))) {
+  throw new Error("the unused Pi release bundle must be excluded: npm overrides cannot patch its embedded dependencies");
+}
+const runtimeLock = readJson(join(ROOT, "package-lock.json"));
+const dependencyVersions = {};
+for (const name of ["minimatch", "undici", "protobufjs"]) {
+  const installed = readJson(join(ROOT, "node_modules", name, "package.json"));
+  dependencyVersions[name] = check(`${name} lockfile version`, installed.version,
+    runtimeLock.packages[`node_modules/${name}`].version);
+}
 check("Node version", process.version, expected("EXPECT_NODE_VERSION"));
 for (const name of REQUIRED) {
   if (!existsSync(join(ROOT, name))) throw new Error(`adapter file ${name} is missing from the build context`);
@@ -77,7 +90,7 @@ for (const name of REQUIRED) {
 
 const adapters = {};
 for (const name of readdirSync(ROOT).sort()) {
-  if (/\.m(ts|js)$/.test(name)) adapters[name] = sha256(join(ROOT, name));
+  if (name !== "pi-cli.mjs" && /\.m(ts|js)$/.test(name)) adapters[name] = sha256(join(ROOT, name));
 }
 
 const receipt = {
@@ -97,6 +110,16 @@ const receipt = {
     version: pi.version,
     integrity: piLock.integrity,
     lockfile_sha256: sha256(join(ROOT, "package-lock.json")),
+    cli: {
+      mode: "upstream_unbundled",
+      executable: join(ROOT, "bin", "pi"),
+      launcher: PI_LAUNCHER,
+      launcher_sha256: sha256(PI_LAUNCHER),
+      entrypoint: PI_CLI,
+      entrypoint_sha256: sha256(PI_CLI),
+      release_bundle_present: false,
+    },
+    dependency_versions: dependencyVersions,
   },
   node: {
     version: process.version,

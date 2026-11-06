@@ -60,6 +60,32 @@ jobs:
           "$RUNNER_TEMP/scaneval-wheel-env/bin/scaneval" replay "$RUNNER_TEMP/scaneval-demo" --output "$RUNNER_TEMP/scaneval-replay.json"
           cmp "$RUNNER_TEMP/scaneval-demo/evaluation.json" "$RUNNER_TEMP/scaneval-replay.json"
 
+  runtime-dependencies:
+    name: Audited SV-Agent runtime dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PI_OFFLINE: '1'
+      PI_SKIP_VERSION_CHECK: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '26.7.0'
+          cache: npm
+          cache-dependency-path: containers/sv-agent/package-lock.json
+      - name: Install the image's runtime dependencies
+        run: npm ci --prefix containers/sv-agent --omit=dev --ignore-scripts --engine-strict
+      - name: Audit both dependency locks
+        run: |
+          npm audit --prefix containers/sv-agent --omit=dev --audit-level=low
+          npm audit --prefix sdk/typescript --package-lock-only --audit-level=low
+      - name: Exercise the native CLI, glob selection, and proxy transport
+        # Real installed Pi and dependencies against local fixtures, with no model calls.
+        run: node --test tests/node/sv_runtime_dependencies.test.mjs
+
   oci_path_gate:
     name: Decide whether OCI integration is relevant
     runs-on: ubuntu-latest

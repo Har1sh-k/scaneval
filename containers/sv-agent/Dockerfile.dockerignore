@@ -6,6 +6,7 @@
 *
 !containers/sv-agent/package.json
 !containers/sv-agent/package-lock.json
+!containers/sv-agent/pi-cli.mjs
 !containers/sv-agent/write-runtime-receipt.mjs
 !sdk/typescript/package.json
 !sdk/typescript/package-lock.json

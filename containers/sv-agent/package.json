@@ -8,6 +8,8 @@
     "@earendil-works/pi-coding-agent": "1.4.0"
   },
   "overrides": {
+    "minimatch": "11.0.3",
+    "undici": "8.12.4",
     "protobufjs": "7.6.6"
   }
 }

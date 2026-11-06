@@ -11,7 +11,8 @@
 #   harness/                  clean upstream SV-Agent checkout at HARNESS_COMMIT, npm ci'd
 #                             (shallow when fetched online, full history from a bundle)
 #   harness/node_modules/.bin/tsx
-#   node_modules/             Pi 1.4.0 and its locked dependencies (bin on PATH)
+#   node_modules/             Pi 1.4.0 unbundled code and its locked dependencies
+#   bin/pi, pi-cli.mjs        image-owned launcher for the upstream unbundled CLI
 #   observer/                 built sdk/typescript dist
 #   *.mts, *.mjs              driver, OCI runner, research extension and sibling helpers
 #   runtime.json              build receipt read by the driver
@@ -71,7 +72,14 @@ RUN npm ci --ignore-scripts --no-audit --no-fund \
 FROM base AS pi
 WORKDIR /opt/scaneval
 COPY containers/sv-agent/package.json containers/sv-agent/package-lock.json ./
+COPY containers/sv-agent/pi-cli.mjs ./pi-cli.mjs
+# The release bundle embeds vulnerable dependency copies; root npm overrides patch only
+# the unbundled imports. Exclude that unused executable code and its stale npm bin link.
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund --engine-strict \
+ && rm -rf node_modules/@earendil-works/pi-coding-agent/dist/bundle node_modules/.bin/pi \
+ && mkdir bin \
+ && ln -s ../pi-cli.mjs bin/pi \
+ && chmod 0555 pi-cli.mjs \
  && rm -rf /root/.npm
 
 FROM base AS adapters
@@ -111,7 +119,7 @@ RUN --mount=type=bind,source=containers/sv-agent/write-runtime-receipt.mjs,targe
     EXPECT_NODE_VERSION="$EXPECT_NODE_VERSION" EXPECT_PI_VERSION="$EXPECT_PI_VERSION" \
     node /run/scaneval/write-runtime-receipt.mjs \
  && scratch="$(mktemp -d)" \
- && test "$(HOME="$scratch" PI_CODING_AGENT_DIR="$scratch/pi" PI_OFFLINE=1 /opt/scaneval/node_modules/.bin/pi --version)" = "$EXPECT_PI_VERSION" \
+ && test "$(HOME="$scratch" PI_CODING_AGENT_DIR="$scratch/pi" PI_OFFLINE=1 /opt/scaneval/bin/pi --version)" = "$EXPECT_PI_VERSION" \
  && printf 'const n: number = 1;\nconsole.log(n);\n' > "$scratch/check.ts" \
  && test "$(HOME="$scratch" TMPDIR="$scratch" /opt/scaneval/harness/node_modules/.bin/tsx "$scratch/check.ts")" = 1 \
  && rm -rf "$scratch" \
@@ -132,7 +140,7 @@ LABEL org.opencontainers.image.title="scaneval-sv-agent" \
 # the driver and extension. PI_TELEMETRY is deliberately not set: in Pi 1.4.0 it also decides
 # whether provider requests carry attribution headers, which is the runner's transport choice.
 # Pi auth is never set here: it arrives per run as a declared credential environment variable.
-ENV PATH=/opt/scaneval/node_modules/.bin:$PATH \
+ENV PATH=/opt/scaneval/bin:/opt/scaneval/node_modules/.bin:$PATH \
     HOME=/tmp \
     PI_CODING_AGENT_DIR=/tmp/pi-agent \
     PI_SKIP_VERSION_CHECK=1 \
