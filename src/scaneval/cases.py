@@ -171,7 +171,7 @@ REVIEW_DECISIONS = ("approve", "reject", "unresolved")
 # A public identifier must be well formed, so a typo in a CVE or GHSA id is caught. Any other
 # identifier shape is accepted: a private pack names its cases by internal ticket or review id,
 # and the design states a CVE is neither required nor sufficient.
-_PUBLIC_ALIAS = re.compile(r"^(CVE-\d{4}-\d{4,}|GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4})$")
+_PUBLIC_ALIAS = re.compile(r"^(CVE-[0-9]{4}-[0-9]{4,}|GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4})$")
 _PUBLIC_ALIAS_PREFIX = re.compile(r"^(CVE|GHSA)[-_]", re.IGNORECASE)
 
 
@@ -179,7 +179,7 @@ def alias_problem(alias: str) -> str | None:
     """Return why *alias* is unusable as an identifier, or None when it is fine."""
     if not isinstance(alias, str) or not alias.strip():
         return "an identifier cannot be blank"
-    if _PUBLIC_ALIAS_PREFIX.match(alias) and not _PUBLIC_ALIAS.match(alias):
+    if _PUBLIC_ALIAS_PREFIX.match(alias) and not _PUBLIC_ALIAS.fullmatch(alias):
         return f"{alias} is not a well formed CVE or GHSA identifier"
     return None
 _REPRESENTS = re.compile(r"^This case tests .+ under .+, and adds .+", re.DOTALL)
@@ -597,7 +597,7 @@ def _tree_records(case: dict, snapshot_id: str) -> set[str]:
     recorded += [check["detail"] for check in case["validation"]["checks"]
                  if check.get("snapshot_id") == snapshot_id and check["result"] == "pass"
                  and check["check"] == "snapshot_hash_recorded"]
-    return {value for value in recorded if isinstance(value, str) and _TREE_HASH.match(value)}
+    return {value for value in recorded if isinstance(value, str) and _TREE_HASH.fullmatch(value)}
 
 
 def checked_tree_hash(case: dict, snapshot_id: str) -> str | None:
@@ -666,7 +666,7 @@ def mechanical_checks(pack: dict, snapshot_id: str, source_dir: Path, tree_hash:
     *pack* exactly as it was. The caller's pack reference stays valid; references taken to cases,
     snapshots, or validation blocks beforehand point at the superseded copy and must be re-read.
     """
-    if not isinstance(tree_hash, str) or not _TREE_HASH.match(tree_hash):
+    if not isinstance(tree_hash, str) or not _TREE_HASH.fullmatch(tree_hash):
         raise ContractError(f"tree_hash must be a sha256:<64 hex digits> digest, not {tree_hash!r}")
     now = _now(clock)
     present = exported_file_paths(source_dir)

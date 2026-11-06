@@ -7,8 +7,8 @@
   "properties": {
     "schema_version": {"const": "2.0"},
     "run_id": {"type": "string", "minLength": 1},
-    "input_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-    "result_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "input_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"},
+    "result_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"},
     "claim_matches": {"type": "array", "items": {"$ref": "#/$defs/claim_match"}},
     "control_assessments": {"type": "array", "items": {"$ref": "#/$defs/control_assessment"}}
   },

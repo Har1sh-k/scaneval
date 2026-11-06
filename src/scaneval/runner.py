@@ -434,8 +434,9 @@ def _check_invocation_ids(inputs: list[_InputSpec], systems: list[dict], repetit
     """Refuse a configuration whose triples collide into one invocation id.
 
     An invocation id joins the input id, the system id, and the repetition, so two distinct
-    triples can still produce one id when an id contains the separator. Colliding invocations
-    would share a bundle directory and destroy each other's records, so this runs before the
+    triples can still produce one id when an id contains the separator, including when their
+    spellings differ only by case. Colliding invocations would share a bundle directory on a
+    case-insensitive filesystem, so this runs before the
     output directory is created and nothing is written.
     """
     seen: dict[str, tuple[str, str, int]] = {}
@@ -444,11 +445,12 @@ def _check_invocation_ids(inputs: list[_InputSpec], systems: list[dict], repetit
             for repetition in range(1, repetitions + 1):
                 triple = (spec.input_id, system["system_id"], repetition)
                 identifier = execution.invocation_id(*triple)
-                if identifier in seen:
+                folded = identifier.casefold()
+                if folded in seen:
                     raise ContractError(
-                        f"invocation id {identifier!r} is produced by both {seen[identifier]} and "
+                        f"invocation id {identifier!r} is produced by both {seen[folded]} and "
                         f"{triple}; rename the input or the system")
-                seen[identifier] = triple
+                seen[folded] = triple
 
 
 def _check_workspace_root(workspace_root: Path | None, out_dir: Path, cache_root: Path,

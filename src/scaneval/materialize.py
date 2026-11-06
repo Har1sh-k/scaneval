@@ -204,7 +204,7 @@ class CachedSnapshot:
 
 def _require_commit(commit: str) -> str:
     commit = commit.strip().lower()
-    if not _SHA.match(commit):
+    if not _SHA.fullmatch(commit):
         raise MaterializationError("commit must be a full 40-hex SHA, not a branch, tag, or short id")
     return commit
 

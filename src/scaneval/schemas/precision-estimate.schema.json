@@ -39,18 +39,18 @@
     },
     "sample_sha256": {
       "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$"
+      "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
     },
     "frame_sha256": {
       "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$"
+      "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
     },
     "reviews_sha256": {
       "type": [
         "string",
         "null"
       ],
-      "pattern": "^sha256:[0-9a-f]{64}$",
+      "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
       "description": "canonical_sha256 of the reviews document used; null when none was."
     },
     "review_entries": {
@@ -185,7 +185,7 @@
           "sha256": {
             "type": "string",
             "minLength": 1,
-            "pattern": "^sha256:[a-f0-9]{64}$"
+            "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
           }
         }
       },
@@ -195,7 +195,7 @@
   "$defs": {
     "sha256": {
       "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$"
+      "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
     },
     "population": {
       "type": "object",
@@ -345,11 +345,11 @@
         },
         "manifest_sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         },
         "schedule_sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         }
       }
     },
@@ -773,7 +773,7 @@
         },
         "item_id": {
           "type": "string",
-          "pattern": "^item-[0-9]{4,}$"
+          "pattern": "^item-[0-9]{4,}(?![\\s\\S])"
         },
         "stratum": {
           "type": "string",

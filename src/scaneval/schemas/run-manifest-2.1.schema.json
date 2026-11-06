@@ -40,7 +40,7 @@
     },
     "config_sha256": {
       "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$"
+      "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
     },
     "failure": {
       "type": "object",
@@ -315,7 +315,7 @@
         },
         "sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         },
         "severity_counts": {
           "type": "object",
@@ -408,7 +408,7 @@
             "string",
             "null"
           ],
-          "pattern": "^sha256:[0-9a-f]{64}$",
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
           "description": "The tree the scanner receives; null when preparation failed before one existed."
         },
         "input_hash": {
@@ -416,7 +416,7 @@
             "string",
             "null"
           ],
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         },
         "provenance_path": {
           "type": [

@@ -25,7 +25,7 @@
     },
     "frame_sha256": {
       "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$",
+      "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
       "description": "canonical_sha256 of frame."
     },
     "design": {
@@ -66,7 +66,7 @@
   "$defs": {
     "sha256": {
       "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$"
+      "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
     },
     "location": {
       "type": "object",
@@ -174,7 +174,7 @@
         },
         "fingerprint": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$",
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
           "description": "scaneval.scoring.claim_fingerprint of every copy."
         },
         "claim_ids": {
@@ -289,14 +289,14 @@
             "string",
             "null"
           ],
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         },
         "result_sha256": {
           "type": [
             "string",
             "null"
           ],
-          "pattern": "^sha256:[0-9a-f]{64}$",
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
           "description": "Canonical digest of the saved result the units were read from."
         },
         "claim_records": {
@@ -475,11 +475,11 @@
         },
         "manifest_sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         },
         "schedule_sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         }
       }
     },
@@ -627,7 +627,7 @@
         },
         "item_id": {
           "type": "string",
-          "pattern": "^item-[0-9]{4,}$",
+          "pattern": "^item-[0-9]{4,}(?![\\s\\S])",
           "description": "The blinded name reviewers see in the review queue."
         }
       }
@@ -656,7 +656,7 @@
               },
               "alias": {
                 "type": "string",
-                "pattern": "^system-[0-9]+$"
+                "pattern": "^system-[0-9]+(?![\\s\\S])"
               }
             }
           }

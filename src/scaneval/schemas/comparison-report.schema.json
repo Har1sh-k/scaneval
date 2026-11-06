@@ -29,15 +29,15 @@
           "mode": {"enum": ["full", "pr"]}, "profile": {"type": "string"},
           "condition": {"enum": ["closed_book_standard", "open_context", "identity_reduced"]},
           "status": {"enum": ["attested", "declared_only", "failed", "unavailable"]},
-          "policy_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "policy_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"},
           "observations": {"type": "integer", "minimum": 0},
           "assignments": {"type": "array", "items": {"type": "object", "additionalProperties": false,
             "required": ["run_id", "assignment_id", "reasons"],
             "anyOf": [{"required":["record_sha256"]},{"required":["record_identity_sha256"]}], "properties": {
               "run_id": {"type": "string"}, "assignment_id": {"type": "string"},
               "reasons": {"type": "array", "items": {"type": "object", "required": ["code", "message"], "additionalProperties": false, "properties": {"code": {"type": "string"}, "message": {"type": "string"}}}},
-              "record_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
-              "record_identity_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"}
+              "record_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"},
+              "record_identity_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"}
             }}}
         }
       }
@@ -55,7 +55,7 @@
     },
     "policy_sha256": {
       "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$"
+      "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
     },
     "runs": {
       "type": "array",
@@ -81,7 +81,7 @@
       "properties": {
         "structure_sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         },
         "inputs": {
           "type": "integer",
@@ -229,7 +229,7 @@
   "$defs": {
     "sha256": {
       "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$"
+      "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
     },
     "id": {
       "type": "string",
@@ -1576,7 +1576,7 @@
         },
         "sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         }
       }
     },
@@ -1667,19 +1667,19 @@
         },
         "manifest_sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         },
         "schedule_sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         },
         "config_sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         },
         "evidence_sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         },
         "pack": {
           "$ref": "#/$defs/pack"
@@ -1784,7 +1784,7 @@
               "sha256": {
                 "type": "string",
                 "minLength": 1,
-                "pattern": "^sha256:[a-f0-9]{64}$"
+                "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
               }
             }
           },
@@ -1845,7 +1845,7 @@
         },
         "config_sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         },
         "network_policy": {
           "enum": [

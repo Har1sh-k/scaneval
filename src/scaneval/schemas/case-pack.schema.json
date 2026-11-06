@@ -7,8 +7,8 @@
   "required": ["schema_version", "namespace", "pack_id", "version", "status", "description", "review_budgets", "snapshots", "cases", "admissions"],
   "properties": {
     "schema_version": {"const": "2.0"},
-    "namespace": {"type": "string", "pattern": "^[a-z0-9]+(\\.[a-z0-9-]+)*$"},
-    "pack_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+    "namespace": {"type": "string", "pattern": "^[a-z0-9]+(\\.[a-z0-9-]+)*(?![\\s\\S])"},
+    "pack_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*(?![\\s\\S])"},
     "version": {"type": "string", "minLength": 1},
     "status": {"enum": ["draft", "reviewed", "released"]},
     "description": {"type": "string"},
@@ -24,14 +24,14 @@
     "cases": {"type": "array", "items": {"$ref": "#/$defs/case"}},
     "admissions": {"type": "array", "items": {"$ref": "#/$defs/admission"}},
     "anchor_sha256": {
-      "type": "string", "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
       "description": "The digest of every record a planning decision reads that no other record already holds: the pack fields themselves, review_budgets included, each snapshot, each case minus its notes, and the chain value the admission history ends at. Computed by scaneval.contracts.pack_anchor_digest, which projects the whole record minus a stated allowlist rather than a list of fields to cover, so a field added to this schema is anchored the day it is added. Two subtractions are made for a digest that already exists, and only while it does. A case's label fields are left out while its latest recorded review carries a labels_sha256 over them, so that an edited label costs the approval rather than an anchor a person would have to rebuild before re-approving; a case no review has bound, a draft or a mechanically checked one, is anchored with its target, its controls, its evidence, and what it says it represents, because no digest holds those. A snapshot's identity is left out only for a snapshot some case names, and only once every case in the pack binds its own labels. A label digest carries the identity of the snapshots that label names and of no others, so a snapshot the pack declares that no case names is inside no digest however thoroughly the rest of the pack is reviewed, and until every case binds, some case reads those bytes with no digest speaking for them. Both halves are asked per snapshot by scaneval.contracts.snapshots_bound_by_labels. Every pack carries one: the field is optional here only so that a pack without it is refused by the rule that says why rather than by a shape error, and a pack that omits it is refused all the same, because an optional anchor is no anchor. Editing the disposition that keeps a case in a plan, deleting a case's mechanical check set, rewriting the review budgets a recall-at-k number is computed at, deleting a whole case with its chained review history, wiping a case's review history so an empty one is indistinguishable from a deleted one, deleting the admission that kept a case out of a plan, and repinning or re-declaring the languages of a snapshot no label digest holds each leave the pack anchoring to something else. Anyone who can edit the pack can recompute this, so it makes such a deletion visible rather than impossible."
     },
     "notes": {"type": "array", "items": {"type": "string"}}
   },
   "$defs": {
-    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
-    "date": {"type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?![\\s\\S])"},
+    "date": {"type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}(?![\\s\\S])"},
     "field_state": {
       "type": "object", "additionalProperties": false, "required": ["state"],
       "properties": {"state": {"enum": ["not_applicable", "unknown", "not_reviewed"]}, "reason": {"type": "string"}}
@@ -55,7 +55,7 @@
         "repository": {"type": "object", "additionalProperties": false, "required": ["url", "name"],
                        "properties": {"url": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1},
                                       "historical_url": {"type": "string"}}},
-        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}(?![\\s\\S])"},
         "reference": {"type": "string", "description": "How the commit was chosen: tag, parent of fix, or explicit advisory commit."},
         "languages": {"type": "array", "minItems": 1, "uniqueItems": true,
                       "description": "Which adapters are run against this export, and therefore part of the snapshot identity scaneval.contracts.label_digest covers: a snapshot re-declared as holding no Python is a different scan of the same bytes, and an approval that covered the one did not cover the other. Read as a set, so the order carries no content.",
@@ -65,7 +65,7 @@
         "production_use_evidence": {"type": "string"},
         "license": {"type": "object", "additionalProperties": false, "required": ["spdx", "verified", "note"],
                     "properties": {"spdx": {"type": ["string", "null"]}, "verified": {"type": "boolean"}, "note": {"type": "string"}}},
-        "tree_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+        "tree_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"},
         "git_tree": {"type": ["string", "null"]},
         "role": {"enum": ["vulnerable", "fixed", "ordinary"], "default": "vulnerable"}
       }
@@ -128,11 +128,11 @@
         "at": {"type": "string", "minLength": 1},
         "note": {"type": "string"},
         "labels_sha256": {
-          "type": "string", "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
           "description": "Digest of the label content this review covers: what the case claims to be, its target, every control, and the identity of every snapshot those name, projected by scaneval.contracts.label_digest. An approval covers the exact bytes reviewed, so a snapshot repinned to another commit or another exported tree changes this digest exactly as an edited label does. The latest review whose digest equals the case's current labels is the one review every gate asks, both for whether the approval stands and for what the validation level is. Absent on reviews recorded before approvals were bound to content; such a review is read as covering no current label, so planning leaves the case out until a review of the labels as they stand, and while the latest review is one of those the pack anchor covers the label fields instead, because nothing else does."
         },
         "chain_sha256": {
-          "type": "string", "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
           "description": "This review's place in the chain: the digest of its own fields together with the chain value of the review recorded before it, computed by scaneval.contracts.review_chain_digest. Every recorded review carries one, and a pack whose chain does not verify is refused, so deleting the review that withdrew an approval cannot quietly restore it. Anyone who can edit the pack can recompute the chain, so this is not a signature and says nothing about who recorded a review; what it removes is the deletion that passes unnoticed."
         }
       }
@@ -155,7 +155,7 @@
         "vector": {"type": "string", "pattern": "^CVSS:(3\\.[01]|4\\.0)/"},
         "source": {"type": "string", "pattern": "^https?://"},
         "source_kind": {"enum": ["cna_cvss", "vendor_cvss", "github_reviewed_cvss"]},
-        "retrieved": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+        "retrieved": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}(?![\\s\\S])"},
         "note": {"type": "string"}
       },
       "oneOf": [
@@ -225,15 +225,15 @@
                 "required": ["result", "tree_hash", "checks_sha256"],
                 "properties": {
                   "result": {"enum": ["pass", "fail"]},
-                  "tree_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-                  "checks_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+                  "tree_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"},
+                  "checks_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"}
                 }
               }
             },
             "checks_failed": {"type": "boolean", "description": "Absent by default. Set when a mechanical check set failed for a snapshot this case references after the case was human approved: the recorded review and level stand, and planning leaves the case out until a correction decision resolves it."},
             "reviews": {"type": "array", "items": {"$ref": "#/$defs/review"}},
             "reviews_sha256": {
-              "type": "string", "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
               "description": "Where the recorded review history ends: the chain_sha256 of its last review, present exactly when the case records a review. The chain binds each review to the one before it, which catches an edit, a reordering, and a deletion from the middle; this catches the deletion off the end, which is the one that would otherwise restore an approval by dropping the review that withdrew it. Anyone who can edit the pack can rewrite this too, so it makes a deletion visible rather than impossible."
             }
           }
@@ -249,7 +249,7 @@
                      "decision": {"enum": ["admitted", "rejected", "deferred"]},
                      "by": {"type": "string", "minLength": 1}, "at": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1},
                      "chain_sha256": {
-                       "type": "string", "pattern": "^sha256:[0-9a-f]{64}$",
+                       "type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
                        "description": "This decision's place in the admission chain: the digest of its own fields together with the chain value of the decision recorded before it, computed by scaneval.contracts.admission_chain_digest. Every recorded admission carries one, and the pack anchor records where the chain ends, so deleting the rejection that kept a case out of a plan cannot quietly restore it, from the middle of the history or off the end."
                      }}
     }

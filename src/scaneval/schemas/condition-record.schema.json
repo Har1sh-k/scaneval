@@ -20,12 +20,12 @@
     "run_id": {"type": "string", "minLength": 1},
     "invocation_id": {"type": "string", "minLength": 1},
     "system_id": {"type": "string", "minLength": 1},
-    "input_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
-    "policy_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "input_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"},
+    "policy_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"},
     "bindings": {"type": "object", "additionalProperties": {"type": ["string", "null"]}},
     "artifacts": {"type": "array", "items": {
       "type": "object", "additionalProperties": false, "required": ["role", "path", "sha256"],
-      "properties": {"role": {"type": "string", "minLength": 1}, "path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}
+      "properties": {"role": {"type": "string", "minLength": 1}, "path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"}}
     }},
     "retained_identity_cues": {"type": "object"},
     "assurance": {"type": "object", "additionalProperties": false, "required": ["network", "retrieval", "provider"], "properties": {

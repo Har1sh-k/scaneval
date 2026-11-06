@@ -56,8 +56,8 @@
       "type": "object", "additionalProperties": false,
       "required": ["tree_hash", "provenance_sha256", "profile", "synthetic_history", "source_modified", "modified_paths", "captured_state_dirs"],
       "properties": {
-        "tree_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-        "provenance_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "tree_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"},
+        "provenance_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"},
         "profile": {"enum": ["standard", "metadata_blinded", "identity_reduced"]},
         "synthetic_history": {"type": ["object", "null"]},
         "source_modified": {"type": "boolean"},
@@ -74,6 +74,6 @@
     "raw_artifacts": {"type": "array", "items": {
       "type": "object", "additionalProperties": false, "required": ["id", "path", "sha256"],
       "properties": {"id": {"type": "string", "minLength": 1}, "path": {"type": "string", "minLength": 1},
-                     "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}}}
+                     "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"}}}}
   }
 }

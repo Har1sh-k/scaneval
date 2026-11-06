@@ -17,7 +17,7 @@
     },
     "sample_sha256": {
       "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$",
+      "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
       "description": "canonical_sha256 of the precision sample these reviews judge."
     },
     "reviews": {
@@ -31,14 +31,14 @@
         "string",
         "null"
       ],
-      "pattern": "^sha256:[0-9a-f]{64}$",
+      "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
       "description": "Chain value of the last entry; null exactly when there is none."
     }
   },
   "$defs": {
     "sha256": {
       "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$"
+      "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
     },
     "review": {
       "type": "object",
@@ -87,7 +87,7 @@
         },
         "chain_sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$",
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
           "description": "chain_digest(previous chain value, this entry, 'precision_review')."
         }
       }

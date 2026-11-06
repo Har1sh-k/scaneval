@@ -232,6 +232,13 @@ def _unique(values: list[str], label: str) -> None:
         raise ContractError(f"{label} values must be unique")
 
 
+def _unique_file_ids(values: list[str], label: str) -> None:
+    """Keep directory identities distinct on case-sensitive and case-insensitive filesystems."""
+    _unique(values, label)
+    if len(values) != len({value.casefold() for value in values}):
+        raise ContractError(f"{label} values must be unique ignoring case")
+
+
 def check_set_digest(snapshot_id: str, record: dict[str, Any], checks: list[dict[str, Any]]) -> str:
     """The digest a check set record carries: its own fields together with the checks it holds.
 
@@ -1586,7 +1593,7 @@ def _validate_review_record(document: dict[str, Any]) -> None:
             raise ContractError("the latest review must bind to the current decisions hash")
 
 
-_PINNED_IMAGE = re.compile(r"^(?:[^@\s]+@sha256:[0-9a-f]{64}|sha256:[0-9a-f]{64})$")
+_PINNED_IMAGE = re.compile(r"(?:[^@\s]+@sha256:[0-9a-f]{64}|sha256:[0-9a-f]{64})")
 BLINDED_INPUT_SUFFIX = ".blinded"
 IDENTITY_REDUCED_INPUT_SUFFIX = ".identity-reduced"
 IDENTITY_PROFILES = frozenset({"metadata_blinded", "identity_reduced"})
@@ -1645,9 +1652,9 @@ def _validate_run_config(document: dict[str, Any]) -> None:
     cannot look sandboxed while nothing is. These are shape rules: whether an image exists or a
     map is reviewed is checked when the run prepares it.
     """
-    _unique([system["system_id"] for system in document["systems"]], "system_id")
+    _unique_file_ids([system["system_id"] for system in document["systems"]], "system_id")
     if document["schema_version"] == "2.0":
-        _unique([item["snapshot_id"] for item in document["inputs"]], "inputs.snapshot_id")
+        _unique_file_ids([item["snapshot_id"] for item in document["inputs"]], "inputs.snapshot_id")
         return
     for index, item in enumerate(document["inputs"]):
         label = f"inputs[{index}]"
@@ -1673,7 +1680,7 @@ def _validate_run_config(document: dict[str, Any]) -> None:
                     from . import open_context  # noqa: F401
                 except ImportError as exc:
                     raise ContractError(f"{label}: open_context is unavailable: its bounded-history extension is not installed") from exc
-    _unique([input_identity(item) for item in document["inputs"]], "input id")
+    _unique_file_ids([input_identity(item) for item in document["inputs"]], "input id")
     for index, system in enumerate(document["systems"]):
         execution = system.get("execution") or {"backend": "local"}
         label = f"systems[{index}].execution"
@@ -1691,13 +1698,13 @@ def _validate_run_config(document: dict[str, Any]) -> None:
                     f"{label}: the local backend enforces nothing, so it takes no {', '.join(extra)}")
             continue
         image = execution.get("image")
-        if not isinstance(image, str) or not _PINNED_IMAGE.match(image):
+        if not isinstance(image, str) or not _PINNED_IMAGE.fullmatch(image):
             raise ContractError(f"{label}: an oci backend needs an image pinned by digest, not {image!r}")
         if policy in ("model_provider_only", "public_research"):
             if not execution.get("egress"):
                 raise ContractError(f"{label}: model_provider_only needs the egress it allows declared")
             proxy = execution.get("proxy_image")
-            if not isinstance(proxy, str) or not _PINNED_IMAGE.match(proxy):
+            if not isinstance(proxy, str) or not _PINNED_IMAGE.fullmatch(proxy):
                 raise ContractError(
                     f"{label}: model_provider_only needs a proxy_image pinned by digest, not {proxy!r}")
         elif execution.get("egress") or execution.get("proxy_image"):

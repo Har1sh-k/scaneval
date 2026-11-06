@@ -4,8 +4,8 @@
   "title": "ScanEval three-condition experiment matrix",
   "oneOf": [{"$ref":"#/$defs/declaration"},{"$ref":"#/$defs/frozen"}],
   "$defs": {
-    "id": {"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9._-]*$"},
-    "digest": {"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    "id": {"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9._-]*(?![\\s\\S])"},
+    "digest": {"type":"string","pattern":"^sha256:[0-9a-f]{64}(?![\\s\\S])"},
     "names": {"enum":["open_context","closed_book_standard","identity_reduced"]},
     "system": {
       "type":"object","additionalProperties":false,

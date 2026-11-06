@@ -752,7 +752,7 @@ def _route(value: Any, label: str, allowed: tuple[str, ...]) -> Route:
     agent, model, effort = value["agent"], value["model"], value.get("reasoning_effort")
     if agent not in allowed:
         raise AdapterError(f"config.{label}.agent must be one of {', '.join(allowed)}")
-    if not isinstance(model, str) or not _ROUTE.match(model):
+    if not isinstance(model, str) or not _ROUTE.fullmatch(model):
         raise AdapterError(f"config.{label}.model must be a model route name")
     if effort is not None:
         if not AGENT_EFFORTS[agent]:
@@ -801,12 +801,12 @@ def read_settings(config: dict) -> Settings:
     if not isinstance(configured_root, str) or not configured_root.strip():
         raise AdapterError("config.root (the RunSortie checkout) is required")
     commit = config.get("expected_commit")
-    if not isinstance(commit, str) or not evidence.HEX40.match(commit):
+    if not isinstance(commit, str) or not evidence.HEX40.fullmatch(commit):
         raise AdapterError("config.expected_commit must be the exact 40-hex RunSortie commit")
     if commit != SUPPORTED_RUNSORTIE_COMMIT:
         raise AdapterError(f"runsortie adapter 0.1.0 supports only RunSortie commit {SUPPORTED_RUNSORTIE_COMMIT}")
     version = config.get("expected_version")
-    if not isinstance(version, str) or not _VERSION.match(version):
+    if not isinstance(version, str) or not _VERSION.fullmatch(version):
         raise AdapterError("config.expected_version must be the exact RunSortie package version")
     if version != SUPPORTED_RUNSORTIE_VERSION:
         raise AdapterError(f"runsortie adapter 0.1.0 supports only RunSortie package version {SUPPORTED_RUNSORTIE_VERSION}")
@@ -814,7 +814,7 @@ def read_settings(config: dict) -> Settings:
     if not isinstance(dist_digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", dist_digest):
         raise AdapterError("config.expected_dist_tree_sha256 must pin the observed dist/ tree as sha256:<64 lowercase hex>")
     engine_model = config.get("engine_model")
-    if not isinstance(engine_model, str) or not _ROUTE.match(engine_model):
+    if not isinstance(engine_model, str) or not _ROUTE.fullmatch(engine_model):
         raise AdapterError("config.engine_model (the Fieldglass --llm-model route) is required")
     if engine_model.startswith("claude:"):
         raise AdapterError(
@@ -2278,9 +2278,9 @@ def initial_repository(source: Path, deadline: Deadline | None = None) \
     object_format = _hermetic_git(source, "rev-parse", "--show-object-format", git_dir=git, deadline=deadline)
     evaluated = head.stdout.decode("ascii", errors="replace").strip()
     name = branch.stdout.decode("utf-8", errors="replace").strip()
-    if head.returncode or not evidence.HEX40.match(evaluated):
+    if head.returncode or not evidence.HEX40.fullmatch(evaluated):
         raise AdapterError("the workspace has no readable HEAD commit to evaluate")
-    if branch.returncode or not _BRANCH.match(name):
+    if branch.returncode or not _BRANCH.fullmatch(name):
         raise AdapterError("the workspace HEAD is not on a branch RunSortie can name")
     if status.returncode or status.stdout.strip():
         raise AdapterError("the workspace is not a clean checkout of the evaluated head")

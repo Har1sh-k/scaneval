@@ -65,7 +65,7 @@
     }
   },
   "$defs": {
-    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"},
     "criterion": {"enum": ["supported", "unsupported", "uncertain"]},
     "strings": {"type": "array", "items": {"type": "string", "minLength": 1}}
   }

@@ -6,14 +6,14 @@
   "required": ["schema_version", "input_hash", "scope", "targets", "controls", "review_budgets"],
   "properties": {
     "schema_version": {"const": "2.0"},
-    "input_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "input_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"},
     "scope": {"enum": ["diagnostic", "draft", "reviewed"], "description": "Whether the plan's labels are diagnostic fixtures, drafts, or independently reviewed. Scope alone carries draft status: a draft plan may carry L1, L2, L3, or L4 items and keeps each item's real level, a reviewed plan may carry only L3 and L4, and a diagnostic plan only fixtures."},
     "provenance": {
       "type": "object", "additionalProperties": false,
       "required": ["namespace", "pack_id", "pack_version", "pack_sha256", "snapshot_id", "mode"],
       "properties": {
         "namespace": {"type": "string", "minLength": 1}, "pack_id": {"type": "string", "minLength": 1},
-        "pack_version": {"type": "string", "minLength": 1}, "pack_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "pack_version": {"type": "string", "minLength": 1}, "pack_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"},
         "snapshot_id": {"type": "string", "minLength": 1}, "mode": {"enum": ["full", "pr"]},
         "case_ids": {"type": "array", "items": {"type": "string"}}
       }

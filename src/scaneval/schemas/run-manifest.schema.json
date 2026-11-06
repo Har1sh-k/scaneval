@@ -10,7 +10,7 @@
     "run_id": {"type": "string", "minLength": 1},
     "status": {"enum": ["completed", "failed"], "description": "Whether the invocation loop finished. A completed run can still contain failed, skipped, and unsupported invocations."},
     "created_at": {"type": "string", "minLength": 1},
-    "config_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "config_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"},
     "failure": {
       "type": "object", "additionalProperties": false, "required": ["type", "message"],
       "description": "Present exactly when status is 'failed': the exception class name and message that stopped the run. It is not a scan outcome.",
@@ -89,7 +89,7 @@
                          "extended_regression": {"type": "integer", "minimum": 0},
                          "exclude": {"type": "integer", "minimum": 0}}
         },
-        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"}
       }
     },
     "input": {
@@ -97,7 +97,7 @@
       "required": ["snapshot_id", "tree_hash", "provenance_path", "mechanical_checks"],
       "properties": {
         "snapshot_id": {"$ref": "#/$defs/id"},
-        "tree_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "tree_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"},
         "provenance_path": {"type": "string", "minLength": 1},
         "mechanical_checks": {"type": "array", "items": {"$ref": "#/$defs/mechanical_check_outcome"}}
       }

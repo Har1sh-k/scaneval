@@ -8,7 +8,7 @@
     "schema_version": {"const": "2.0"},
     "run_id": {"type": "string", "minLength": 1},
     "system_id": {"type": "string", "minLength": 1},
-    "input_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "input_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"},
     "status": {"enum": ["success", "partial", "unsupported", "error", "timeout"]},
     "ranking": {"enum": ["native", "unranked"]},
     "claims": {"type": "array", "items": {"$ref": "#/$defs/claim"}},
@@ -66,7 +66,7 @@
       "properties": {
         "id": {"type": "string", "minLength": 1},
         "path": {"type": "string", "minLength": 1},
-        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"}
       }
     }
   }

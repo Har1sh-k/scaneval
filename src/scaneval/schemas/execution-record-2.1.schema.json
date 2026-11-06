@@ -296,11 +296,11 @@
       "properties": {
         "tree_hash": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         },
         "provenance_sha256": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         },
         "profile": {
           "enum": [
@@ -332,7 +332,7 @@
         },
         "input_hash": {
           "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$",
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
           "description": "The identity the result binds to: the tree hash for a full input, a hash over base tree, head tree, and diff for a PR input."
         },
         "mode": {
@@ -418,7 +418,7 @@
           },
           "sha256": {
             "type": "string",
-            "pattern": "^sha256:[0-9a-f]{64}$"
+            "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
           }
         }
       }

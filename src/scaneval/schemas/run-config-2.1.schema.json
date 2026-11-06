@@ -22,7 +22,7 @@
     },
     "run_id": {
       "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?![\\s\\S])"
     },
     "pack": {
       "type": "string",
@@ -43,17 +43,19 @@
         "properties": {
           "input_id": {
             "type": "string",
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?![\\s\\S])",
             "description": "Evaluator-side input identity; defaults to the snapshot id for a full input and to the change set id for a PR input, with '.blinded' or '.identity-reduced' for a transformed profile. Never shown to a scanner."
           },
           "snapshot_id": {
             "type": "string",
             "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?![\\s\\S])",
             "description": "The pack snapshot a full input exports. Required when mode is full, absent when mode is pr."
           },
           "change_set_id": {
             "type": "string",
             "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?![\\s\\S])",
             "description": "The pack change set a PR input reviews. Required when mode is pr, absent when mode is full."
           },
           "mode": {
@@ -97,7 +99,7 @@
         "properties": {
           "system_id": {
             "type": "string",
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?![\\s\\S])"
           },
           "adapter": {
             "type": "string",
@@ -182,7 +184,7 @@
                   "properties": {
                     "env": {
                       "type": "string",
-                      "pattern": "^[A-Z_][A-Z0-9_]*$"
+                      "pattern": "^[A-Z_][A-Z0-9_]*(?![\\s\\S])"
                     },
                     "provider": {
                       "type": "string",
@@ -233,7 +235,7 @@
               },
               "user": {
                 "type": "string",
-                "pattern": "^[0-9]+:[0-9]+$"
+                "pattern": "^[0-9]+:[0-9]+(?![\\s\\S])"
               }
             }
           }
