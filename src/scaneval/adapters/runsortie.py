@@ -151,10 +151,19 @@ CLI_PACKAGE_PINS = {
     "claude": ("@anthropic-ai/claude-code", CLAUDE_BARE_PACKAGE_VERSION),
 }
 
-def _credential_wrapper(real: str, *, keep: frozenset[str], arguments: tuple[str, ...] = ()) -> bytes:
+def _shell_shebang(shell: str) -> str:
+    if not Path(shell).is_absolute() or any(char.isspace() or char == "\0" for char in shell):
+        raise AdapterError("the pinned shell path is unsafe for a shebang")
+    return "#!" + shell
+
+
+def _credential_wrapper(real: str, *, shell: str, keep: frozenset[str],
+                        arguments: tuple[str, ...] = ()) -> bytes:
     """A deterministic shell wrapper that removes every non-role provider secret before exec."""
     remove = sorted(CREDENTIAL_ENV_ALLOWLIST - keep)
-    lines = ["#!/bin/sh", "unset " + " ".join(remove)] if remove else ["#!/bin/sh"]
+    lines = [_shell_shebang(shell)]
+    if remove:
+        lines.append("unset " + " ".join(remove))
     argv = " ".join((shlex.quote(real), *(shlex.quote(argument) for argument in arguments), '"$@"'))
     lines.append("exec " + argv)
     return ("\n".join(lines) + "\n").encode("utf-8")
@@ -1171,6 +1180,17 @@ def _fixed_executable(path: Path, label: str, deadline: Deadline | None = None) 
     return {"path": str(path), "realpath": str(real), "sha256": _sha256(real, deadline)}
 
 
+def _npm_script_shell_identity(deadline: Deadline | None = None) -> dict[str, str]:
+    """Resolve only the trusted system shell alias, lazily after the capability gate."""
+    try:
+        target = NPM_SCRIPT_SHELL.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise AdapterError(f"the pinned npm script shell is unavailable: {exc}") from exc
+    _shell_shebang(str(target))
+    return {"configured_path": str(NPM_SCRIPT_SHELL),
+            **_fixed_executable(target, "the pinned npm script shell", deadline)}
+
+
 def _json_file(path: Path, label: str, deadline: Deadline | None = None) -> dict:
     try:
         if deadline:
@@ -1476,7 +1496,8 @@ def _isolated_probe_identity(identity: dict[str, Any], selected_agents: set[str]
         _write_private_file(pi_home / "models-store.json", b"{}")
         probe_shell = private / "scaneval-bash"
         _write_private_file(
-            probe_shell, ("#!/bin/sh\nexec " + shlex.quote(str(AGENT_SHELL))
+            probe_shell, (_shell_shebang(identity["npm_script_shell"]["path"]) + "\nexec "
+                          + shlex.quote(identity["agent_shell"]["realpath"])
                           + ' --noprofile --norc "$@"\n').encode("utf-8"), mode=0o700)
         env = build_env((), {
             "PATH": identity["runtime_path"], "HOME": str(home), "TMPDIR": str(tmp),
@@ -1487,7 +1508,7 @@ def _isolated_probe_identity(identity: dict[str, Any], selected_agents: set[str]
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_TERMINAL_PROMPT": "0", "GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1",
             "NODE_OPTIONS": "", "npm_config_node_options": "", "npm_config_userconfig": os.devnull,
-            "npm_config_globalconfig": os.devnull, "npm_config_script_shell": str(NPM_SCRIPT_SHELL),
+            "npm_config_globalconfig": os.devnull, "npm_config_script_shell": identity["npm_script_shell"]["path"],
             "npm_config_cache": str(npm_cache), "npm_config_offline": "true",
             "npm_config_update_notifier": "false", "NO_UPDATE_NOTIFIER": "1",
         })
@@ -1582,7 +1603,7 @@ def runtime_identity(settings: Settings, *, probe_versions: bool, deadline: Dead
                           **_npm_launcher_identity(engine_driver, deadline, runtime_path=runtime_path)},
         "node": _executable("node", deadline, runtime_path=runtime_path),
         "npm": _npm_launcher_identity("npm", deadline, runtime_path=runtime_path),
-        "npm_script_shell": _fixed_executable(NPM_SCRIPT_SHELL, "the pinned npm script shell", deadline),
+        "npm_script_shell": _npm_script_shell_identity(deadline),
         "agent_shell": _fixed_executable(AGENT_SHELL, "the pinned agent command shell", deadline),
         "git": _executable("git", deadline, runtime_path=runtime_path),
         "agents": {agent: _npm_launcher_identity(AGENT_BINARIES[agent], deadline, runtime_path=runtime_path)
@@ -2710,26 +2731,28 @@ class RunSortieAdapter(Adapter):
         required_secret(engine_credential, "Pi engine")
 
         wrapper_specs: list[tuple[str, Path, bytes]] = []
+        npm_script_shell = preparation["npm_script_shell"]["path"]
         pi_wrapper = isolated_bin / "pi"
         pi_wrapper_bytes = _credential_wrapper(
-            preparation["engine_driver"]["realpath"], keep=frozenset({engine_credential}),
+            preparation["engine_driver"]["realpath"], shell=npm_script_shell, keep=frozenset({engine_credential}),
             arguments=PI_ISOLATION_FLAGS)
         wrapper_specs.append(("Pi isolation wrapper", pi_wrapper, pi_wrapper_bytes))
         runtime_path = str(isolated_bin) + os.pathsep + preparation["runtime_path"]
         npm_script_wrapper = isolated_bin / "runsortie-npm-script-shell"
         npm_script_wrapper_bytes = (
-            "#!/bin/sh\nunset "
+            _shell_shebang(npm_script_shell) + "\nunset "
             + " ".join(sorted(CREDENTIAL_ENV_ALLOWLIST - {engine_credential}))
             + "\nPATH=" + shlex.quote(runtime_path) + "\nexport PATH\nexec "
-            + shlex.quote(str(NPM_SCRIPT_SHELL)) + ' "$@"\n').encode("utf-8")
+            + shlex.quote(npm_script_shell) + ' "$@"\n').encode("utf-8")
         wrapper_specs.append(("npm lifecycle PATH-reset wrapper", npm_script_wrapper, npm_script_wrapper_bytes))
         tsx_wrapper = isolated_bin / "tsx"
         tsx_wrapper_bytes = _credential_wrapper(
-            preparation["fieldglass"]["tsx_launcher"]["realpath"], keep=frozenset({engine_credential}))
+            preparation["fieldglass"]["tsx_launcher"]["realpath"], shell=npm_script_shell,
+            keep=frozenset({engine_credential}))
         wrapper_specs.append(("Fieldglass tsx absolute-launch wrapper", tsx_wrapper, tsx_wrapper_bytes))
         agent_shell_wrapper = isolated_bin / "scaneval-bash"
         agent_shell_wrapper_bytes = (
-            "#!/bin/sh\nexec " + shlex.quote(str(AGENT_SHELL))
+            _shell_shebang(npm_script_shell) + "\nexec " + shlex.quote(preparation["agent_shell"]["realpath"])
             + ' --noprofile --norc "$@"\n').encode("utf-8")
         wrapper_specs.append(("agent no-startup-files shell wrapper", agent_shell_wrapper,
                               agent_shell_wrapper_bytes))

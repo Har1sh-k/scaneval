@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import socket
 import stat
@@ -451,7 +452,8 @@ def test_preparation_records_pinned_identities_at_their_real_assurance(runtime):
     assert preparation["node"]["version"] == "v22.11.0" and preparation["npm"]["version"] == "10.9.0"
     assert preparation["npm"]["package_name"] == "npm"
     assert preparation["npm"]["package_tree"]["tree_sha256"].startswith("sha256:")
-    assert preparation["npm_script_shell"]["path"] == "/bin/sh"
+    assert preparation["npm_script_shell"]["configured_path"] == "/bin/sh"
+    assert preparation["npm_script_shell"]["path"] == str(rs.NPM_SCRIPT_SHELL.resolve(strict=True))
     assert preparation["npm_script_shell"]["sha256"].startswith("sha256:")
     assert preparation["agent_shell"]["path"] == "/bin/bash"
     assert preparation["agent_shell"]["sha256"].startswith("sha256:")
@@ -501,11 +503,74 @@ def test_dist_identity_refuses_an_external_module_symlink(runtime):
         rs._dist_identity(runtime.root)
 
 
-def test_fixed_executable_identity_refuses_a_link_even_to_a_regular_binary(runtime):
-    linked = runtime.tmp / "linked-agent-shell"
-    linked.symlink_to("/bin/bash")
+@pytest.mark.parametrize("relative", [False, True])
+def test_fixed_executable_identity_refuses_a_link_even_to_a_regular_binary(tmp_path, relative):
+    target = tmp_path / "regular-shell"
+    _executable(target, "#!/bin/sh\nexit 0\n")
+    linked = tmp_path / "linked-agent-shell"
+    linked.symlink_to(target.name if relative else target)
     with pytest.raises(AdapterError, match="no-follow executable regular file"):
         rs._fixed_executable(linked, "fixture shell")
+
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_npm_script_shell_identity_records_the_exact_trusted_alias_target(tmp_path, monkeypatch, relative):
+    target = tmp_path / "regular-shell"
+    _executable(target, "#!/bin/sh\nexit 0\n")
+    alias = tmp_path / "trusted-system-shell"
+    alias.symlink_to(target.name if relative else target)
+    monkeypatch.setattr(rs, "NPM_SCRIPT_SHELL", alias)
+    identity = rs._npm_script_shell_identity()
+    assert identity == {"configured_path": str(alias), **rs._fixed_executable(target, "fixture shell")}
+    assert identity["path"] == identity["realpath"] == str(target.resolve(strict=True))
+    assert not Path(identity["path"]).is_symlink()
+
+
+@pytest.mark.parametrize("unsafe", ["space shell", "tab\tshell", "line\nshell", "return\rshell"])
+def test_npm_script_shell_identity_refuses_a_target_unsafe_for_shebang(tmp_path, monkeypatch, unsafe):
+    target = tmp_path / unsafe
+    _executable(target, "#!/bin/sh\nexit 0\n")
+    alias = tmp_path / "trusted-system-shell"
+    alias.symlink_to(target)
+    monkeypatch.setattr(rs, "NPM_SCRIPT_SHELL", alias)
+    with pytest.raises(AdapterError, match="unsafe for a shebang"):
+        rs._npm_script_shell_identity()
+
+
+def test_npm_script_shell_alias_resolves_before_probes_and_detects_drift(runtime, monkeypatch):
+    target = rs.AGENT_SHELL.resolve(strict=True)
+    replacement = runtime.tmp / "replacement-shell"
+    _executable(replacement, "#!/bin/sh\nexit 0\n")
+    agent_shell_identity = rs._fixed_executable(rs.AGENT_SHELL, "fixture agent shell")
+    alias = runtime.tmp / "trusted-system-shell"
+    alias.symlink_to(target)
+    monkeypatch.setattr(rs, "NPM_SCRIPT_SHELL", alias)
+    native_probe = rs._probe
+    observed_shells = []
+
+    def probe(*args, **kwargs):
+        observed_shells.append(kwargs["env"]["npm_config_script_shell"])
+        wrapper = Path(kwargs["env"]["SHELL"]).read_text(encoding="utf-8")
+        assert wrapper.startswith("#!" + str(target) + "\n")
+        assert ("\nexec " + shlex.quote(agent_shell_identity["realpath"])
+                + ' --noprofile --norc "$@"\n') in wrapper
+        assert "#!/bin/sh" not in wrapper
+        return native_probe(*args, **kwargs)
+
+    monkeypatch.setattr(rs, "_probe", probe)
+    adapter = RunSortieAdapter()
+    spec = SystemSpec("r", "runsortie", runtime.config())
+    preparation = adapter.prepare(spec, runtime.tmp)
+    assert preparation["npm_script_shell"]["path"] == str(target)
+    assert preparation["agent_shell"] == agent_shell_identity
+    assert observed_shells and set(observed_shells) == {str(target)}
+    alias.unlink()
+    alias.symlink_to(replacement)
+    with pytest.raises(AdapterError, match="runtime changed"):
+        adapter.scan(request={"input": {"mode": "full", "pr": None}}, source_dir=runtime.tmp / "source",
+                     raw_dir=runtime.tmp / "raw", spec=spec, preparation=preparation, timeout_seconds=30,
+                     trace_mode="off", trace_dir=None)
+    assert runtime.invocations() == []
 
 
 @pytest.mark.parametrize("reported", [None, "v21.19.0", "not-a-node-version"])
@@ -640,6 +705,10 @@ def test_primary_prompt_port_has_the_pinned_native_preimage():
 # --- success and completion ------------------------------------------------------------------
 
 def test_a_complete_run_succeeds_with_claims_and_separate_disposition_metadata(runtime, monkeypatch):
+    npm_shell_target = rs.AGENT_SHELL.resolve(strict=True)
+    npm_shell_alias = runtime.tmp / "trusted-system-shell"
+    npm_shell_alias.symlink_to(npm_shell_target)
+    monkeypatch.setattr(rs, "NPM_SCRIPT_SHELL", npm_shell_alias)
     fieldglass_bin = runtime.root / "fieldglass" / "node_modules" / ".bin"
     for poisoned in ("pi", "git", "node"):
         _executable(fieldglass_bin / poisoned, "#!/bin/sh\nexit 96\n")
@@ -736,7 +805,7 @@ def test_a_complete_run_succeeds_with_claims_and_separate_disposition_metadata(r
     assert call["private_poison_paths"] == [], "operator config/hooks were not copied into the private homes"
     assert Path(env["SHELL"]).name == "scaneval-bash"
     shell_wrapper = (bundle / artifacts["runsortie-agent-shell-wrapper"]).read_text(encoding="utf-8")
-    assert "/bin/bash --noprofile --norc" in shell_wrapper
+    assert shlex.quote(str(rs.AGENT_SHELL.resolve(strict=True))) + " --noprofile --norc" in shell_wrapper
     assert env["LANG"] == env["LC_ALL"] == "C"
     assert not private_root.exists(), "the isolated home and agent state are deleted after bounded inspection"
     assert call["pi_auth"] == call["pi_models_store"] == "{}"
@@ -751,6 +820,13 @@ def test_a_complete_run_succeeds_with_claims_and_separate_disposition_metadata(r
     assert all(not Path(path).is_relative_to(fieldglass_bin) for path in call["npm_shell_resolutions"])
     assert "isolated-bin" in Path(call["npm_shell_resolutions"][0]).parts
     assert "isolated-bin" in Path(call["npm_shell_resolutions"][3]).parts
+    npm_wrapper = (bundle / artifacts["runsortie-npm-script-shell-wrapper"]).read_text(encoding="utf-8")
+    assert "\nexec " + shlex.quote(str(npm_shell_target)) + ' "$@"\n' in npm_wrapper
+    for name in ("runsortie-pi-wrapper", "runsortie-npm-script-shell-wrapper", "runsortie-tsx-wrapper",
+                 "runsortie-agent-shell-wrapper"):
+        wrapper = (bundle / artifacts[name]).read_text(encoding="utf-8")
+        assert wrapper.startswith("#!" + str(npm_shell_target) + "\n")
+        assert "#!/bin/sh" not in wrapper
     isolation = json.loads((bundle / artifacts["runsortie-agent-isolation"]).read_text(encoding="utf-8"))
     assert isolation["syntheticNativePathOnly"] is True
     assert isolation["productionDirectAgentCapability"] == "unsupported"
@@ -2139,7 +2215,7 @@ def test_fd_tree_snapshot_uses_canonical_guard_under_a_symlinked_trusted_prefix(
 def test_linux_fd_tree_snapshot_fails_closed_without_mount_identity(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
-    guard = rs._capture_root(root)
+    guard = rs._capture_root(root)._replace(mount_id=None)
     monkeypatch.setattr(rs.sys, "platform", "linux")
     monkeypatch.setattr(rs, "_fd_mount_id", lambda _descriptor: None)
     with pytest.raises(OSError, match="mount identity is unavailable"):
@@ -2149,13 +2225,10 @@ def test_linux_fd_tree_snapshot_fails_closed_without_mount_identity(tmp_path, mo
 def test_fd_tree_snapshot_refuses_a_nested_mount_id_change(tmp_path, monkeypatch):
     root = tmp_path / "root"
     (root / "child").mkdir(parents=True)
-    guard = rs._capture_root(root)
-    calls = 0
+    guard = rs._capture_root(root)._replace(mount_id="root-mount")
 
-    def mount_id(_descriptor):
-        nonlocal calls
-        calls += 1
-        return "root-mount" if calls == 1 else "nested-mount"
+    def mount_id(descriptor):
+        return "root-mount" if os.fstat(descriptor).st_ino == guard.inode else "nested-mount"
 
     monkeypatch.setattr(rs, "_fd_mount_id", mount_id)
     with pytest.raises(OSError, match="mount boundary"):
