@@ -52,6 +52,7 @@ from scaneval.adapters.deepsec import (
     kind_for_slug,
     line_span,
     native_export_population,
+    process_manifest_path_issue,
     project_id_for,
     read_process_output,
     sessions_from,
@@ -5379,6 +5380,47 @@ def test_a_listed_path_without_a_regex_record_runs_no_ai_batch(tmp_path, monkeyp
             "manifest assigned no AI batch for the listed spelling, and none is a model miss.") in note
 
 
+def test_a_dot_leading_listed_file_with_no_record_has_only_bounded_native_explanations(tmp_path, monkeypatch):
+    """The fake's scan_skip synthetically models non-enumeration; it does not reproduce native discovery."""
+    listed = ".storybook/main.js"
+    bundle = curated_run(tmp_path, monkeypatch, [listed], extra_files={listed: "exec(x);\n"},
+                         control={"scan_skip": [listed]})
+
+    result, execution = documents(bundle)
+    assert listed not in bundle_records(bundle), "scan_skip, not fake discovery, creates the absent record"
+    assert result["claims"] == [] and result["usage"]["cost_usd"] == 0
+    note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
+    assert ("native discovery did not enumerate the path (dot-leading .storybook/main.js is a known example)"
+            in note)
+    assert "this can mean" in note, "native non-enumeration is one bounded possibility, not a reproduced cause"
+    assert "this exact manifest assigned no AI batch for the listed spelling, and none is a model miss" in note
+    assert "the fake" not in note and "reproduced" not in note
+
+
+def test_an_alternate_record_filepath_spelling_stays_unselected_without_becoming_native_triage(tmp_path, monkeypatch):
+    """Synthetic discovery writes the mixed-case file; only FileRecord.filePath is deliberately aliased."""
+    listed = ".GitHub/Workflows/ci.js"
+    recorded = ".github/workflows/ci.js"
+    bundle = curated_run(
+        tmp_path, monkeypatch, [listed], extra_files={listed: "exec(x);\n"},
+        control={"record_file_paths": {listed: recorded}},
+    )
+
+    result, execution = documents(bundle)
+    records = dict(bundle_file_records(bundle))
+    aliased = records[listed + ".json"]
+    assert (aliased["filePath"], aliased["status"], aliased["analysisHistory"], aliased["findings"]) == (
+        recorded, "pending", [], [])
+    scope = curated_scope((listed,), tuple(records.items()), result["claims"], ())
+    assert scope.selected == ()
+    assert listed in scope.listed_without_record
+    assert listed in scope.unselected
+    note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
+    assert f"exact listed filePath spelling ({listed})" in note
+    assert "DeepSec recorded the corresponding file under another spelling" in note
+    assert "native triage" not in note
+
+
 def test_a_curated_run_over_a_tree_with_no_regex_candidate_is_still_not_a_success(tmp_path, monkeypatch):
     bundle = curated_run(tmp_path, monkeypatch, ["src/db.js", "src/server.js"],
                          control={"scan_skip": ["src/db.js", "src/server.js"]})
@@ -5524,7 +5566,12 @@ def test_a_findingless_unlisted_analysis_still_proves_the_manifest_was_not_honor
     assert "0 imported claim(s) are on unlisted paths" in result["error"]["message"]
     assert [claim["primary_location"]["path"] for claim in result["claims"]] == ["src/server.js"]
     assert result["omitted_paths"] == [], "an analyzed unlisted record is not an ordinary curation omission"
-    assert any("1 file record(s) the manifest does not list" in note for note in execution["notes"])
+    note = next(note for note in execution["notes"]
+                if note.startswith("1 file record(s) the manifest does not list"))
+    assert "They show record-state changes or claims outside the declared AI-batch assignment" in note
+    assert "that includes findingless analyzed records" in note
+    assert "does not mean every unexpected record contains a verdict" in note
+    assert "wrote verdicts" not in note
 
 
 def test_a_pending_unlisted_record_with_analysis_history_absent_is_unexpected_not_omitted(tmp_path, monkeypatch):
@@ -5635,6 +5682,22 @@ def test_an_unsafe_or_non_native_process_manifest_path_is_refused(tmp_path, entr
         settings(system_spec(fake_deepsec_root(tmp_path), process_manifest_by_tree={TREE: [entry]}))
 
 
+def test_process_manifest_path_policy_distinguishes_filesystem_impossibility_controls_and_whitespace():
+    control_policy = ("evaluator policy refuses non-NUL C0 control characters (U+0001-U+001F) and DEL "
+                      "(U+007F) in manifest paths")
+    whitespace_policy = "evaluator policy refuses leading or trailing whitespace in manifest paths"
+
+    assert process_manifest_path_issue("src/a\x00b.js") == (
+        "it holds a NUL byte, which no filesystem path can contain")
+    assert process_manifest_path_issue("src/a\x01b.js") == control_policy
+    assert process_manifest_path_issue("src/a\x7fb.js") == control_policy
+    assert process_manifest_path_issue(" src/a.js") == whitespace_policy
+    assert process_manifest_path_issue("src/a.js ") == whitespace_policy
+    assert process_manifest_path_issue("src/a\x85b.js") is None, "internal C1 is not part of the control policy"
+    assert process_manifest_path_issue("\x85src/a.js") == whitespace_policy
+    assert process_manifest_path_issue("src/a.js\x85") == whitespace_policy
+
+
 def test_a_process_manifest_and_files_from_are_mutually_exclusive(tmp_path):
     listing = tmp_path / "files-from.txt"
     listing.write_text("src/server.js\n", encoding="utf-8")
@@ -5667,15 +5730,40 @@ def test_a_curated_run_for_a_tree_the_map_does_not_name_is_refused_unscoped_neve
     ("src/Server.js", "holds no entry spelled exactly so"),
     ("src", "is not a regular file"),
     ("README.md/x.js", "is not a directory"),
-    ("linked/server.js", "is a symbolic link"),
-], ids=["missing", "case-alias", "directory", "file-as-directory", "linked-directory"])
+    ("linked/server.js", "a component of it is a symbolic link, which the evaluator tree check does not follow"),
+    ("linked-file.js", "a component of it is a symbolic link, which the evaluator tree check does not follow"),
+], ids=["missing", "case-alias", "directory", "file-as-directory", "linked-directory", "linked-file"])
 def test_a_listed_path_that_is_not_a_file_of_the_tree_as_spelled_is_refused(tmp_path, listed, reason):
-    """DeepSec matches by exact string, so a path the tree does not hold as spelled would silently select nothing."""
+    """DeepSec matches by exact string; the evaluator check truthfully refuses links without following them."""
     prepared = prepared_input(tmp_path)
     (prepared.source_dir / "linked").symlink_to(prepared.source_dir / "src", target_is_directory=True)
-    with pytest.raises(AdapterError, match=reason):
+    (prepared.source_dir / "linked-file.js").symlink_to(prepared.source_dir / "src" / "server.js")
+    with pytest.raises(AdapterError) as exc:
         curated_scan(tmp_path, prepared, {prepared.tree_hash: [listed]})
+    assert reason in str(exc.value)
     assert list((tmp_path / "raw").iterdir()) == []
+
+
+def test_a_very_long_missing_manifest_path_has_a_bounded_refusal_before_anything_runs(tmp_path, monkeypatch):
+    """Every component is filesystem-safe; only absence from this exact tree makes the path unusable."""
+    prepared = prepared_input(tmp_path)
+    components = [f"missing-{index:02d}-" + "a" * 40 for index in range(20)]
+    listed = "src/" + "/".join(components) + "/file.js"
+    assert all(0 < len(component.encode("utf-8")) <= 255 for component in listed.split("/"))
+    assert process_manifest_path_issue(listed) is None
+    commands = []
+    monkeypatch.setattr(deepsec_module, "run_command", lambda *args, **kwargs: commands.append((args, kwargs)))
+
+    with pytest.raises(AdapterError) as exc:
+        curated_scan(tmp_path, prepared, {prepared.tree_hash: [listed]})
+
+    message = str(exc.value)
+    reason = "cannot use a listed path: the input tree holds no entry spelled exactly so; path "
+    assert len(message) <= 500
+    assert reason in message
+    assert message.index(reason) < message.index(repr(listed)[:40])
+    assert listed not in message, "the valid but very long path is truncated after the exact reason"
+    assert commands == [] and list((tmp_path / "raw").iterdir()) == []
 
 
 def test_a_unicode_normalization_alias_is_refused_by_exact_directory_entry_spelling(tmp_path, monkeypatch):

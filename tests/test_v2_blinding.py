@@ -2359,6 +2359,11 @@ LEAKS = {
     "config-value": {"systems": [{"system_id": "fake-a", "adapter": "fake",
                                   "config": {"prompts": ["Review the WIDGET service."]}}]},
     "config-key": {"systems": [{"system_id": "fake-a", "adapter": "fake", "config": {"widget": {"depth": 2}}}]},
+    "source-manifest-path": {"systems": [{
+        "system_id": "fake-a", "adapter": "fake", "config": {
+            "process_manifest_by_tree": {"sha256:" + "a" * 64: ["src/Widget/handler.js"]},
+        },
+    }]},
 }
 
 
@@ -2375,6 +2380,9 @@ def test_a_run_that_would_carry_an_original_token_to_a_blinded_scan_is_refused(t
 
     message = str(exc.value)
     assert "an original identity token of blinding map widget-metadata" in message
+    assert "change evaluator-controlled identifiers or configuration values when possible" in message
+    assert ("Blinding never renames source paths, so scanner-facing configuration that must name such a path "
+            "requires a standard input") in message
     assert message.endswith(BLINDING_REMEDIATION)
     assert not out.exists() and adapter.calls == 0
 
