@@ -512,7 +512,7 @@ class Containers:
                     for index, stream in enumerate((owned.process.stdout, owned.process.stderr)):
                         os.set_blocking(stream.fileno(), False)
                         selector.register(stream, selectors.EVENT_READ, index)
-                    while (selector.get_map() or owned.exit_code() is None) and not aborted:
+                    while not aborted and (selector.get_map() or owned.exit_code() is None):
                         if time.monotonic() >= deadline:
                             aborted = True
                             break
