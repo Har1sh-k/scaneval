@@ -359,18 +359,24 @@ function describeInvocation(options: Record<string, unknown>, stdinMode: PiRunne
   const rawRoute = request?.route;
   const route = typeof rawRoute === "object" && rawRoute !== null && !Array.isArray(rawRoute)
     ? rawRoute as Record<string, unknown> : null;
-  const driver = typeof route?.driver === "string" && route.driver.length > 0 ? route.driver : null;
-  const model = typeof route?.model === "string" && route.model.length > 0 ? route.model : null;
-  const effort = typeof request?.effort === "string" ? request.effort : null;
+  const rawDriver = route?.driver ?? null;
+  const rawModel = route?.model ?? null;
+  const rawEffort = request?.effort ?? null;
+  const rawPrompt = request?.prompt ?? null;
+  const driver = typeof rawDriver === "string" && rawDriver.length > 0 ? rawDriver : null;
+  const model = typeof rawModel === "string" && rawModel.length > 0 ? rawModel : null;
+  const effort = typeof rawEffort === "string" ? rawEffort : null;
   const prompt = request && route && driver !== null && model !== null
-    && typeof request.prompt === "string" ? request.prompt : null;
+    && typeof rawPrompt === "string" ? rawPrompt : null;
   return {
     model,
     thinking: effort,
     promptChars: prompt === null ? null : prompt.length,
     prompt,
     route: driver ?? "unknown",
-    content: { request: { route: { driver, model }, effort, prompt: request?.prompt ?? null } },
+    content: { request: {
+      route: { driver: rawDriver, model: rawModel }, effort: rawEffort, prompt: rawPrompt,
+    } },
   };
 }
 

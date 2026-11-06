@@ -2725,7 +2725,8 @@ const CALLS: any[] = [
   {{ id: "empty-driver", request: {{ route: {{ driver: "", model: "test/structured" }}, prompt: PROMPT }} }},
   {{ id: "missing-model", request: {{ route: {{ driver: "fieldglass" }}, prompt: PROMPT }} }},
   {{ id: "empty-model", request: {{ route: {{ driver: "fieldglass", model: "" }}, prompt: PROMPT }} }},
-  {{ id: "nontext-prompt", request: {{ route: {{ driver: "fieldglass", model: "test/structured" }}, prompt: 7 }} }},
+  {{ id: "nontext-prompt", request: {{ route: {{ driver: "fieldglass", model: "test/structured" }},
+    effort: 9, prompt: 7 }} }},
 ];
 export async function runRuntimeScan(options: any) {{
   for (const call of CALLS) {{
@@ -2753,6 +2754,13 @@ export async function runRuntimeScan(options: any) {{
                 "missing-model", "empty-model", "nontext-prompt"}
     assert set(requests) == set(spans) == expected
     assert all(event["metadata"]["prompt_chars"] is None for event in requests.values())
+    assert requests["empty-driver"]["metadata"]["route"] == "unknown"
+    assert requests["empty-driver"]["content"]["request"]["route"]["driver"] == ""
+    assert requests["missing-model"]["content"]["request"]["route"]["model"] is None
+    nontext_request = requests["nontext-prompt"]["content"]["request"]
+    assert nontext_request["prompt"] == 7
+    assert nontext_request["effort"] == 9
+    assert requests["nontext-prompt"]["metadata"]["thinking"] is None
     assert all(span["location_known"] is False for span in spans.values())
     assert all(span.get("source_mapping") != "verified_exact" for span in spans.values())
 
