@@ -164,8 +164,12 @@ def _git(args: list[str], cwd: Path, *, timeout: float = 600, extra_env: dict[st
     env = {**env, **(extra_env or {})}
     try:
         completed = subprocess.run(
-            argv, cwd=str(cwd), capture_output=True, text=True, timeout=timeout, env=env,
+            argv, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="strict",
+            timeout=timeout, env=env,
         )
+    except UnicodeDecodeError as exc:
+        raise MaterializationError(
+            f"git {' '.join(args)} in {cwd} produced output that was not valid UTF-8") from exc
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise MaterializationError(f"git {' '.join(args)} failed: {exc}") from exc
     if completed.returncode != 0:
@@ -205,16 +209,26 @@ def _require_commit(commit: str) -> str:
     return commit
 
 
-def verify_cached_snapshot(path: Path, commit: str) -> str:
-    """Check that *path* is a clean checkout of *commit*; return its tree id."""
+def _verify_snapshot(path: Path, commit: str, *, staged_url: str | None = None) -> str:
+    """Check one checkout, with collision context only for a newly staged snapshot."""
     if not (path / ".git").exists():
         raise MaterializationError(f"cache entry is not a git checkout: {path}")
     head = _git(["rev-parse", "HEAD"], path).strip()
     if head != commit:
         raise MaterializationError(f"cache entry {path} is at {head}, expected {commit}")
     if _git(["status", "--porcelain", "--untracked-files=all"], path).strip():
+        if staged_url is not None:
+            raise MaterializationError(
+                f"checkout from {staged_url} at {commit} has local modifications immediately after checkout; "
+                "a likely case/Unicode-normalization collision on the host filesystem prevented the tracked "
+                "paths from being represented exactly")
         raise MaterializationError(f"cache entry {path} has local modifications; the cache is immutable")
     return _git(["rev-parse", f"{commit}^{{tree}}"], path).strip()
+
+
+def verify_cached_snapshot(path: Path, commit: str) -> str:
+    """Check that *path* is a clean checkout of *commit*; return its tree id."""
+    return _verify_snapshot(path, commit)
 
 
 def fetch_snapshot(url: str, commit: str, cache_root: Path, *, timeout: float = 900) -> CachedSnapshot:
@@ -234,6 +248,10 @@ def fetch_snapshot(url: str, commit: str, cache_root: Path, *, timeout: float = 
     staging.mkdir()
     try:
         _git(["init", "-q"], staging)
+        # Apple's Git otherwise inherits a precomposing checkout mode that can rewrite an NFD
+        # pathname before the immutable cache has ever represented the commit. Pin the local
+        # repository to Git's exact path bytes before fetch or checkout materializes any path.
+        _git(["config", "--local", "core.precomposeunicode", "false"], staging)
         for key, value in _LFS_CONFIG:
             _git(["config", "--local", key, value], staging)
         _git(["config", "--local", "core.autocrlf", "false"], staging)
@@ -246,7 +264,7 @@ def fetch_snapshot(url: str, commit: str, cache_root: Path, *, timeout: float = 
             method = "full-fetch"
             _git(["fetch", "-q", "origin"], staging, timeout=timeout)
         _git(["checkout", "-q", "--detach", commit], staging)
-        tree = verify_cached_snapshot(staging, commit)
+        tree = _verify_snapshot(staging, commit, staged_url=url)
         try:
             staging.rename(target)
         except OSError as exc:
