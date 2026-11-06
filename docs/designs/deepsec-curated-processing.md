@@ -165,6 +165,10 @@ records for it carries no marker.
 - The adapter cannot see DeepSec's ignore filter. A listed path with no record is
   reported as "no candidate or ignored", without saying which.
 - A file whose name begins or ends with whitespace cannot be listed.
-- The tests use a fake CLI that mirrors the 2.3.10 selection code and its
-  standard-mode exit codes. No live DeepSec, model, or provider has been run with
+- The fake CLI mirrors only DeepSec 2.3.10's exact
+  `Set.has(record.filePath)` manifest predicate, `--limit` after that selection,
+  and the exit states the tests explicitly cover. Its scan discovery is
+  synthetic: it does not reproduce native dot, ignore, or content matching,
+  backslash handling, uppercase-extension or `.env` discovery, or every possible
+  record/disk spelling. No live DeepSec, model, or provider has been run with
   this mode.

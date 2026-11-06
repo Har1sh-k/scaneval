@@ -1,10 +1,11 @@
 """Third-party DeepSec adapter: a fake CLI, the records it writes, and what the run may claim.
 
-Nothing here calls a model. The fake DeepSec below writes the records the real 2.3.10 writes
-(``FileRecord`` with candidates, findings and an append-only ``analysisHistory`` whose numbers
-are per-file *shares* of a batch, ``RunMeta``, parse-failure dumps, and the ``export --format
-json`` payload) and is driven by a control file beside it, so every failure mode the adapter
-classifies can be produced on demand.
+Nothing here calls a model. The fake DeepSec below writes native-like records shaped like those
+from real DeepSec 2.3.10 (``FileRecord`` with candidates, findings and an append-only
+``analysisHistory`` whose numbers are per-file *shares* of a batch, ``RunMeta``, parse-failure
+dumps, and the ``export --format json`` payload), while its scan discovery is synthetic rather
+than a reproduction of native dot, ignore, or content matching. It is driven by a control file
+beside it to produce the failure modes deliberately covered by these tests.
 
 The control file replaces the environment variable such a switch would normally be: the
 adapter builds its child environment with :func:`~scaneval.adapters.base.build_env`, which
@@ -44,6 +45,7 @@ from scaneval.adapters.deepsec import (
     capture_status,
     candidates_from,
     claim_path,
+    curated_scope,
     finding_ids,
     git_prints_quoted,
     import_export,
@@ -68,10 +70,10 @@ ROOT = Path(__file__).resolve().parents[1]
 CAPTURE_MATRIX = ROOT / "tests" / "fixtures" / "deepsec-capture-matrix.json"
 CLOCK = lambda: datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)  # noqa: E731
 
-# A fake ``deepsec`` executable. It writes the records the real one writes and reads a control
-# file beside itself for the failure modes a test wants. It never writes outside its working
-# directory, and it refuses to run without the generated config, so a run that forgot to build
-# the private workspace fails loudly here rather than producing an empty scan.
+# A fake ``deepsec`` executable. It writes native-like records with the real 2.3.10 shapes, but
+# its source-file discovery is synthetic. A control file beside it drives the failure modes a
+# test wants. It refuses to run without the generated config, so a run that forgot to build the
+# private workspace fails loudly here rather than producing an empty scan.
 FAKE_CLI = '''
 import json, os, re, subprocess, sys, time
 from pathlib import Path
@@ -148,10 +150,26 @@ def do_scan(argv):
     write(base / "project.json", {"projectId": project, "rootPath": root,
                                   "createdAt": "2026-09-25T12:00:00.000Z"})
     # ``scan_skip`` is a file no matcher hits: DeepSec writes no record for it.
-    skipped = set(control().get("scan_skip") or [])
+    settings = control()
+    skipped = set(settings.get("scan_skip") or [])
+    file_paths = settings.get("record_file_paths") or {}
+    missing_history = set(settings.get("omit_analysis_history") or [])
     for name in source_files(root):
         if name not in skipped:
-            write(base / "files" / (name + ".json"), scanned_record(name, project))
+            record = scanned_record(name, project)
+            if name in file_paths:
+                # Test-only divergence between the record's on-disk/source spelling and the
+                # FileRecord.filePath that 2.3.10's manifest predicate actually reads.
+                record["filePath"] = file_paths[name]
+            if name in missing_history:
+                # Deliberately malformed only for the test of absent-vs-empty fresh state.
+                record.pop("analysisHistory")
+            write(base / "files" / (name + ".json"), record)
+    for record_name, file_path in sorted((settings.get("extra_pending_records") or {}).items()):
+        # An exact, synthetic record spelling that need not correspond to source discovery.
+        record = scanned_record(record_name, project)
+        record["filePath"] = file_path
+        write(base / "files" / (record_name + ".json"), record)
     write_scan_run(base, project, root)
     print("scanned %d file(s)" % len(source_files(root)))
 
@@ -248,11 +266,13 @@ def investigate(argv, names, settings):
             # 2.3.10 divides the wall clock among the batch's files; an older one wrote the
             # whole batch clock onto each of them, which is what the knob reproduces.
             wall = 9000 if settings.get("duplicated_duration") else 9000.0 / share
+            findingless = name in set(settings.get("findingless_records") or [])
             entry = {"runId": run_id, "investigatedAt": "2026-09-25T12:01:00.000Z",
                      "durationMs": wall, "durationApiMs": 6000.0 / share,
                      "agentType": "claude-agent-sdk", "model": model,
                      "modelConfig": {"model": model}, "agentSessionId": session,
-                     "findingCount": 1, "numTurns": 4.0 / share, "phase": "process",
+                     "findingCount": 0 if findingless else 1,
+                     "numTurns": 4.0 / share, "phase": "process",
                      "costUsd": 0.12 / share,
                      "usage": {"inputTokens": 1000.0 / share, "outputTokens": 200.0 / share,
                                "cacheReadInputTokens": 40.0 / share,
@@ -261,7 +281,7 @@ def investigate(argv, names, settings):
                 entry["refusal"] = {"refused": True, "reason": "the file was not readable",
                                     "skipped": [{"filePath": name, "reason": "unreadable"}]}
             record["analysisHistory"].append(entry)
-            record["findings"] = [{
+            record["findings"] = [] if findingless else [{
                 "severity": "HIGH", "vulnSlug": "command-injection",
                 "title": "Shell command built from request input in " + name,
                 "description": "The handler passes request input to a shell.",
@@ -271,7 +291,7 @@ def investigate(argv, names, settings):
             record["status"] = "error" if (settings.get("file_error") and name == names[0]) else "analyzed"
             write(path, record)
             result["analyses"] += 1
-            result["findings"] += 1
+            result["findings"] += 0 if findingless else 1
     write(base / "runs" / (run_id + ".json"), {
         "runId": run_id, "projectId": project, "rootPath": root,
         "createdAt": "2026-09-25T12:01:00.000Z", "completedAt": "2026-09-25T12:02:00.000Z",
@@ -5243,12 +5263,18 @@ def curated_run(tmp_path: Path, monkeypatch, paths: list[str], *, control: dict 
                           network_policy="model_provider_only", clock=CLOCK)
 
 
-def bundle_records(bundle: Path) -> dict[str, dict]:
-    """Every FileRecord the bundle kept, by source path, read from the saved raw artifacts."""
+def bundle_file_records(bundle: Path) -> tuple[tuple[str, dict], ...]:
+    """Every saved FileRecord as its exact relative record name and payload."""
     execution = load_document(bundle / "execution.json", "execution-record")
-    return {artifact["id"][len("deepsec-file/"):-len(".json")]:
-            json.loads((bundle / artifact["path"]).read_text(encoding="utf-8"))
-            for artifact in execution["raw_artifacts"] if artifact["id"].startswith("deepsec-file/")}
+    return tuple((artifact["id"][len("deepsec-file/"):],
+                  json.loads((bundle / artifact["path"]).read_text(encoding="utf-8")))
+                 for artifact in execution["raw_artifacts"]
+                 if artifact["id"].startswith("deepsec-file/"))
+
+
+def bundle_records(bundle: Path) -> dict[str, dict]:
+    """Every FileRecord the bundle kept, by its on-disk source-path stem."""
+    return {name[:-len(".json")]: record for name, record in bundle_file_records(bundle)}
 
 
 def process_argv(command: list[str]) -> list[str]:
@@ -5432,7 +5458,7 @@ def test_a_curated_note_does_not_call_a_listed_path_with_an_unreadable_record_na
 
 
 def test_a_curated_run_whose_only_selected_batch_errored_is_an_error(tmp_path, monkeypatch):
-    """The real curated probe: the listed file's batch failed, the unlisted one stayed pending, and process exited 1."""
+    """The modeled curated failure: the listed file's batch failed, the unlisted one stayed pending, and process exited 1."""
     bundle = curated_run(tmp_path, monkeypatch, ["src/db.js"], control={"fail_batches": [0]})
 
     result, _execution = documents(bundle)
@@ -5468,6 +5494,82 @@ def test_an_ai_stage_that_did_not_keep_to_the_manifest_is_reported_with_every_cl
     # It was examined, out of scope, so it is not listed as a path the scanner left alone.
     assert result["omitted_paths"] == [] and result["bundles_resolved"] is False
     assert any("outside the declared AI-batch assignment" in note for note in execution["notes"])
+
+
+def test_a_findingless_unlisted_analysis_still_proves_the_manifest_was_not_honored(tmp_path, monkeypatch):
+    """The unexpected-record guard is independent of imported out-of-scope claims."""
+    bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"], control={
+        "ignore_manifest": True, "findingless_records": ["src/db.js"]})
+
+    result, execution = documents(bundle)
+    unlisted = bundle_records(bundle)["src/db.js"]
+    assert unlisted["status"] == "analyzed"
+    assert len(unlisted["analysisHistory"]) == 1
+    assert unlisted["analysisHistory"][0]["findingCount"] == 0
+    assert unlisted["findings"] == [], "the fake knob must leave no claim that could mask the record guard"
+    assert (result["status"], result["error"]["code"]) == ("partial", "process_manifest_not_honored")
+    assert "1 unlisted file record(s)" in result["error"]["message"]
+    assert "0 imported claim(s) are on unlisted paths" in result["error"]["message"]
+    assert [claim["primary_location"]["path"] for claim in result["claims"]] == ["src/server.js"]
+    assert result["omitted_paths"] == [], "an analyzed unlisted record is not an ordinary curation omission"
+    assert any("1 file record(s) the manifest does not list" in note for note in execution["notes"])
+
+
+def test_a_pending_unlisted_record_with_analysis_history_absent_is_unexpected_not_omitted(tmp_path, monkeypatch):
+    """Fresh state requires an actual empty analysisHistory array, not merely a falsey lookup."""
+    bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"],
+                         control={"omit_analysis_history": ["src/db.js"]})
+
+    result, execution = documents(bundle)
+    assert (result["status"], result["error"]["code"]) == ("partial", "import_loss")
+    records = dict(bundle_file_records(bundle))
+    malformed = records["src/db.js.json"]
+    assert malformed["status"] == "pending" and malformed["findings"] == []
+    assert "analysisHistory" not in malformed, "the fake knob must produce absence rather than an empty list"
+    scope = curated_scope(("src/server.js",), tuple(records.items()), result["claims"], ())
+    assert scope.unexpected == ("src/db.js.json",)
+    assert scope.unselected == () and scope.external == 0
+    assert result["omitted_paths"] == [], "the malformed record must not become an ordinary unselected path"
+    assert any(note.startswith("1 file record(s) the manifest does not list") and "(src/db.js.json)" in note
+               for note in execution["notes"])
+
+
+def test_a_fresh_external_record_is_counted_external_and_never_reported_as_an_omission(tmp_path, monkeypatch):
+    """The record named ``...json`` has stem ``..`` and cannot be published as a tree-relative path."""
+    bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"],
+                         control={"extra_pending_records": {"..": ".."}})
+
+    result, execution = documents(bundle)
+    records = dict(bundle_file_records(bundle))
+    external = records["...json"]
+    assert (external["filePath"], external["status"], external["analysisHistory"], external["findings"]) == (
+        "..", "pending", [], [])
+    scope = curated_scope(("src/server.js",), tuple(records.items()), result["claims"], ())
+    assert scope.external == 1 and scope.unexpected == ()
+    assert scope.unselected == ("src/db.js",)
+    assert result["omitted_paths"] == ["src/db.js"] and "external:.." not in result["omitted_paths"]
+    note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
+    assert "1 of them under a record name outside the tree" in note
+
+
+def test_manifest_selection_uses_record_file_path_not_the_record_s_on_disk_spelling(tmp_path, monkeypatch):
+    """A record stored for db.js is selected as server.js because its FileRecord says server.js."""
+    bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"], control={
+        "record_file_paths": {"src/db.js": "src/server.js"},
+        "scan_skip": ["src/server.js"],
+    })
+
+    result, _execution = documents(bundle)
+    records = dict(bundle_file_records(bundle))
+    assert set(records) == {"src/db.js.json"}, "the native server.js record was deliberately skipped"
+    aliased = records["src/db.js.json"]
+    assert aliased["filePath"] == "src/server.js" and aliased["status"] == "analyzed"
+    assert len(aliased["analysisHistory"]) == 1, "the manifest selected the aliased FileRecord"
+    assert [claim["primary_location"]["path"] for claim in result["claims"]] == ["src/server.js"]
+    scope = curated_scope(("src/server.js",), tuple(records.items()), result["claims"], ())
+    assert scope.selected == ("src/db.js.json",)
+    assert scope.unexpected == ()
+    assert result["omitted_paths"] == []
 
 
 def test_a_manifest_changed_during_the_run_is_reported(tmp_path, monkeypatch):
@@ -5529,12 +5631,14 @@ def test_a_process_manifest_and_files_from_are_mutually_exclusive(tmp_path):
                              process_manifest_by_tree={TREE: ["src/server.js"]}))
 
 
-def curated_scan(tmp_path: Path, prepared: PreparedInput, mapping: dict):
-    """The adapter's own scan() of *prepared* as a full request, with an empty raw directory."""
+def curated_scan(tmp_path: Path, prepared: PreparedInput, mapping: dict, *, raw_setup=None):
+    """The adapter's own scan() of *prepared* as a full request, with a caller-controlled raw directory."""
     adapter = get_adapter("deepsec")
     spec = system_spec(fake_deepsec_root(tmp_path), process_manifest_by_tree=mapping)
     raw = tmp_path / "raw"
     raw.mkdir()
+    if raw_setup is not None:
+        raw_setup(raw)
     request = build_request("run-deepsec", prepared, spec, timeout_seconds=30, trace_mode="off")
     return adapter.scan(request=request, source_dir=prepared.source_dir, raw_dir=raw, spec=spec,
                         preparation={}, timeout_seconds=30, trace_mode="off", trace_dir=None)
@@ -5560,6 +5664,61 @@ def test_a_listed_path_that_is_not_a_file_of_the_tree_as_spelled_is_refused(tmp_
     with pytest.raises(AdapterError, match=reason):
         curated_scan(tmp_path, prepared, {prepared.tree_hash: [listed]})
     assert list((tmp_path / "raw").iterdir()) == []
+
+
+def test_a_unicode_normalization_alias_is_refused_by_exact_directory_entry_spelling(tmp_path, monkeypatch):
+    """The listing seam makes NFC-vs-NFD deterministic even on normalization-insensitive filesystems."""
+    nfc = "src/caf\u00e9.js"
+    nfd = "src/cafe\u0301.js"
+    prepared = prepared_input(tmp_path, {nfc: "exec(x);\n"})
+    original = deepsec_module.list_directory
+    listed_names: list[str] = []
+
+    class ExactEntry:
+        def __init__(self, name: str, path: Path):
+            self.name = name
+            self.path = str(path)
+
+        def is_symlink(self):
+            return False
+
+        def is_file(self, *, follow_symlinks=True):
+            return True
+
+        def is_dir(self, *, follow_symlinks=True):
+            return False
+
+    def exact_listing(path):
+        path = Path(path)
+        if path == prepared.source_dir / "src":
+            listed_names.append(nfc.split("/", 1)[1])
+            return [ExactEntry(nfc.split("/", 1)[1], path / nfc.split("/", 1)[1])]
+        return original(path)
+
+    commands = []
+    monkeypatch.setattr(deepsec_module, "list_directory", exact_listing)
+    monkeypatch.setattr(deepsec_module, "run_command", lambda *args, **kwargs: commands.append((args, kwargs)))
+    with pytest.raises(AdapterError, match="holds no entry spelled exactly so"):
+        curated_scan(tmp_path, prepared, {prepared.tree_hash: [nfd]})
+    assert listed_names == ["caf\u00e9.js"] and listed_names[0] != nfd.split("/", 1)[1]
+    assert commands == [] and list((tmp_path / "raw").iterdir()) == []
+
+
+def test_a_preexisting_dangling_manifest_symlink_is_refused_without_following_or_running(tmp_path, monkeypatch):
+    """Exclusive creation fails closed instead of writing through an attacker-planted raw path."""
+    prepared = prepared_input(tmp_path)
+    outside = tmp_path / "outside-manifest.json"
+    commands = []
+    monkeypatch.setattr(deepsec_module, "run_command", lambda *args, **kwargs: commands.append((args, kwargs)))
+
+    def plant(raw: Path):
+        (raw / "deepsec-process-manifest.json").symlink_to(outside)
+
+    with pytest.raises(AdapterError, match="process manifest could not be written"):
+        curated_scan(tmp_path, prepared, {prepared.tree_hash: ["src/server.js"]}, raw_setup=plant)
+    manifest = tmp_path / "raw" / "deepsec-process-manifest.json"
+    assert manifest.is_symlink() and not outside.exists()
+    assert commands == [], "no DeepSec child command may run after the manifest path is refused"
 
 
 def test_a_process_manifest_is_refused_for_a_pr_review_before_anything_runs(tmp_path):
