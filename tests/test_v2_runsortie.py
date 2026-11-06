@@ -287,7 +287,7 @@ def test_runsortie_is_a_standalone_adapter_and_llm_harness_keeps_its_meaning():
     assert adapter.env_passthrough == ()
     assert adapter.state_dirs == (".fieldglass",) and adapter.state_capture_dirs == ()
     harness = get_adapter("llm-harness")
-    assert harness.name == "llm-harness" and harness.adapter_version == "2.6.0"
+    assert harness.name == "llm-harness" and harness.adapter_version == "2.7.0"
     assert type(harness).__module__ == "scaneval.adapters.llm_harness"
 
 

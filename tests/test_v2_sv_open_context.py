@@ -383,6 +383,7 @@ export async function runRuntimeScan(options: any): Promise<any> {
 # Upstream's retry/isolation composition, reduced to what the image route relies on. When
 # SCANEVAL_SV_HARNESS_ROOT names the pinned checkout, its real pi-runner.ts and exec.ts are used.
 STUB_RUNNER = r"""
+export const PI_RUNNER_STDIN_MODE = "pi-cli-1";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -647,6 +648,9 @@ def test_fixture_run_exercises_research_history_and_tool_policy_without_leaking_
     assert route["credential"] == {"env": DEFAULT_PI_AUTH_ENV, "provider": "openai-codex", "materialized": True,
                                    "removed": True}
     assert output["observed_routes"] == ["pi-oci"]
+    assert output["runner_transport"]["pi_stdin"] == {
+        "declaration": "pi-cli-1", "effective": None,
+    }, "the image route owns argv-to-stdin transport and cannot inherit the harness runner capability"
     assert output["runtime"]["pi_version"] == "1.4.0"
     assert all(entry["sha256"].startswith("sha256:") for entry in output["runtime"]["files"].values())
     # The record keeps availability, execution and consumption apart, and claims no served model.
