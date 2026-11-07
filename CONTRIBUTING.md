@@ -21,7 +21,7 @@ python -m pip install -e ".[dev]" "semgrep==1.177.0"
 npm ci --prefix sdk/typescript
 ```
 
-Semgrep is optional. Without it the tests that run the Semgrep CLI are skipped; `1.177.0` is the version CI uses.
+Semgrep is optional; `1.177.0` is the version CI uses. Without it, the tests that run or import Semgrep are skipped. So are the `ruamel.yaml` C-parser comparisons in `tests/test_v2_blinding.py`, because Semgrep is what installs `ruamel.yaml.clib`; install that package to run them without Semgrep.
 
 ## Run the tests
 
