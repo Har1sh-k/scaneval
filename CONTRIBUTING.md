@@ -43,7 +43,7 @@ A full local run reports some skips, and each names what is missing:
 - **Docker.** The OCI backend tests need a Docker engine and the pinned images. CI runs them with `SCANEVAL_REQUIRE_DOCKER=1`, which turns a missing engine into a failure.
 - **External checkouts and private bundles.** Tests that need a harness checkout or a preserved private bundle are skipped without one.
 - **RunSortie conformance.** This test is opt-in through `SCANEVAL_RUNSORTIE_CONFORMANCE_ROOT`.
-- **`os.waitid` on macOS.** Python 3.11 and 3.12 on macOS have no `os.waitid`, so the tests of RunSortie's retained native path and of process-group cleanup are skipped. Python 3.13 or newer runs them.
+- **`os.waitid` on macOS.** Python 3.11 and 3.12 on macOS have no `os.waitid`, so the tests of RunSortie's retained native path, process-group cleanup, and the Codex quota guard's supervision are skipped. Python 3.13 or newer runs them.
 
 CI runs on Linux with Python 3.11, 3.13 and 3.14.
 
