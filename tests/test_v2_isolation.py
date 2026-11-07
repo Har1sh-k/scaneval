@@ -1466,7 +1466,8 @@ def test_the_runner_runs_an_oci_compatible_adapter_in_containers_and_leaves_noth
         raise AssertionError("replay tried to open a socket or start a process")
 
     monkeypatch.setenv("DOCKER_HOST", "unix:///nonexistent/docker.sock")
-    monkeypatch.setattr(socket, "socket", refused)
+    # Refuse construction rather than replace the class: replay may import ssl first, which subclasses it.
+    monkeypatch.setattr(socket.socket, "__init__", refused)
     monkeypatch.setattr(subprocess, "Popen", refused)
     replayed = tmp_path / "replayed.json"
     assert main(["replay", str(bundle), "--output", str(replayed)]) == 0

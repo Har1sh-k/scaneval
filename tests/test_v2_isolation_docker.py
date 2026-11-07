@@ -1151,7 +1151,8 @@ def test_an_oci_bundle_replays_with_no_engine_and_no_network(scratch, monkeypatc
         raise AssertionError("replay tried to open a socket or start a process")
 
     monkeypatch.setenv("DOCKER_HOST", "unix:///nonexistent/docker.sock")
-    monkeypatch.setattr(socket, "socket", refused)
+    # Refuse construction rather than replace the class: replay may import ssl first, which subclasses it.
+    monkeypatch.setattr(socket.socket, "__init__", refused)
     monkeypatch.setattr(subprocess, "Popen", refused)
     replayed = tmp_path / "replayed.json"
     assert main(["replay", str(bundle), "--output", str(replayed)]) == 0
