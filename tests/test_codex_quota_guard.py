@@ -18,6 +18,10 @@ guard = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = guard
 spec.loader.exec_module(guard)
 TEST_RESET = int(time.time()) + 3600
+# The guard supervises owned process groups through os.waitid, which macOS CPython has from 3.13.
+# Elsewhere it refuses with unsupported_platform, which a regression below checks everywhere.
+WAITID_SKIP = "needs os.waitid, which macOS CPython has from Python 3.13"
+NEEDS_WAITID = pytest.mark.skipif(not guard.supported_platform(), reason=WAITID_SKIP)
 
 
 def usage(used=62, reset=None, secondary=None):
@@ -218,6 +222,8 @@ def events(tmp_path):
 
 def run_controller(controller, command):
     try:
+        if not guard.supported_platform():
+            pytest.skip(WAITID_SKIP)  # the controller supervises its command through os.waitid
         return controller.run(command)
     finally:
         controller.receipts.close()
@@ -358,6 +364,7 @@ def wait_file(path, process=None):
         time.sleep(.01)
 
 
+@NEEDS_WAITID
 def test_cleanup_kills_stubborn_grandchild_after_leader_exit_and_preserves_unrelated(tmp_path):
     heartbeat = tmp_path / "heartbeat"
     descendant = "import pathlib,signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); p=pathlib.Path(%r); exec('while True:\\n p.write_text(str(time.time()))\\n time.sleep(.01)')" % str(heartbeat)
@@ -385,6 +392,7 @@ def test_cleanup_kills_stubborn_grandchild_after_leader_exit_and_preserves_unrel
         unrelated.wait(timeout=5)
 
 
+@NEEDS_WAITID
 def test_exact_container_registrations_and_bounded_cleanup(tmp_path):
     docker = tmp_path / "docker"
     log = tmp_path / "docker-args.json"
@@ -403,6 +411,7 @@ def test_exact_container_registrations_and_bounded_cleanup(tmp_path):
     assert json.loads(log.read_text()) == ["container", "stop", "--time", "0", "--", "a" * 64, "b" * 64]
 
 
+@NEEDS_WAITID
 def test_cleanup_refreshes_cidfile_written_since_last_poll(tmp_path):
     cidfile = tmp_path / "cid"
     containers = guard.Containers([], [cidfile], "/usr/bin/true", .1)
@@ -410,11 +419,13 @@ def test_cleanup_refreshes_cidfile_written_since_last_poll(tmp_path):
     assert containers.stop() == (1, 0)
 
 
+@NEEDS_WAITID
 def test_docker_cleanup_failure_is_reported(tmp_path):
     containers = guard.Containers(["a" * 64], [], "/usr/bin/false", .1)
     assert containers.stop() == (1, 1)
 
 
+@NEEDS_WAITID
 def test_control_cleanup_failure_overrides_an_otherwise_successful_result(monkeypatch):
     observed = {}
     original_stop = guard.OwnedProcess.stop
@@ -435,6 +446,7 @@ def test_control_cleanup_failure_overrides_an_otherwise_successful_result(monkey
     assert result == (None, b"", b""), "failed owned-process cleanup must override successful output"
 
 
+@NEEDS_WAITID
 def test_docker_cleanup_timeout_is_bounded(tmp_path):
     docker = tmp_path / "docker"
     marker = tmp_path / "docker-pid"
@@ -448,6 +460,7 @@ def test_docker_cleanup_timeout_is_bounded(tmp_path):
         os.kill(int(marker.read_text()), 0)
 
 
+@NEEDS_WAITID
 def test_real_permission_failure_cannot_claim_cleanup_success(monkeypatch):
     owned = guard.OwnedProcess([sys.executable, "-c", "import time; time.sleep(30)"])
     real_killpg = os.killpg
@@ -465,6 +478,7 @@ def test_real_permission_failure_cannot_claim_cleanup_success(monkeypatch):
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="Darwin zombie-group proof")
+@NEEDS_WAITID
 def test_failed_darwin_group_query_cannot_claim_cleanup_success(monkeypatch):
     import ctypes
     import types
@@ -482,6 +496,7 @@ def test_failed_darwin_group_query_cannot_claim_cleanup_success(monkeypatch):
         assert owned.stop(.1)
 
 
+@NEEDS_WAITID
 def test_app_server_initialization_timeout_is_bounded():
     source = guard.AppServer([sys.executable, "-c", "import time; time.sleep(30)"], .1)
     start = time.monotonic()
@@ -501,6 +516,7 @@ def test_runtime_expires_before_next_scheduled_poll(tmp_path):
     assert len([event for event in events(tmp_path) if event["event"] == "usage_accepted"]) == 1
 
 
+@NEEDS_WAITID
 def test_dynamic_registry_is_append_only_and_refreshes_at_cleanup(tmp_path):
     registry = tmp_path / "registry.json"
     containers = guard.Containers([], [], "/usr/bin/true", .1, registry)
@@ -591,6 +607,7 @@ sys.exit(2)
     ("running", "still_running", 1), ("bad_id", "unverified", 1),
     ("connection_failure", "unverified", 1), ("daemon_down", "unverified", 1),
 ])
+@NEEDS_WAITID
 def test_cleanup_requires_exact_inspection_and_reachable_daemon_for_missing(tmp_path, mode, state, failures):
     containers = guard.Containers(["a" * 64], [], docker_state_fixture(tmp_path, mode), .1)
     assert containers.stop() == (1, failures)
@@ -605,6 +622,7 @@ def test_container_audit_records_exact_ids_and_state_without_raw_errors(tmp_path
     assert "SENSITIVE" not in (tmp_path / "receipts.jsonl").read_text()
 
 
+@NEEDS_WAITID
 def test_opt_in_removal_targets_only_registered_full_ids(tmp_path):
     executable = tmp_path / "docker-remove"
     log = tmp_path / "remove-args.json"
@@ -620,6 +638,7 @@ def test_opt_in_removal_targets_only_registered_full_ids(tmp_path):
     ("missing", "not_found", 0), ("stopped", "not_removed", 1),
     ("running", "still_running", 1), ("daemon_down", "unverified", 1),
 ])
+@NEEDS_WAITID
 def test_opt_in_removal_requires_absence_or_success(tmp_path, mode, state, failures):
     containers = guard.Containers(["a" * 64], [], docker_state_fixture(tmp_path, mode), .1, remove=True)
     assert containers.stop() == (1, failures)
@@ -667,6 +686,7 @@ def test_cli_refuses_an_unsupported_platform_before_receipts_usage_or_launch(tmp
     assert not marker.exists() and not (tmp_path / "receipt").exists()
 
 
+@NEEDS_WAITID
 def test_cli_refuses_existing_stop_marker_before_usage_or_launch(tmp_path):
     marker = tmp_path / "stopped"
     marker.write_text("keep")
@@ -699,6 +719,7 @@ def test_cidfile_cannot_preexist_and_cannot_be_symlink_or_fifo(tmp_path):
 
 
 @pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT])
+@NEEDS_WAITID
 def test_cli_signal_stops_only_owned_job_and_app_server(tmp_path, signum):
     (tmp_path / "responses.json").write_text(json.dumps([usage()]))
     executable = tmp_path / "fake-codex"
@@ -727,6 +748,7 @@ def test_cli_signal_stops_only_owned_job_and_app_server(tmp_path, signum):
             process.wait()
 
 
+@NEEDS_WAITID
 def test_many_historical_ids_use_one_batched_inspection_and_one_daemon_check(tmp_path):
     ids = [f"{i:064x}" for i in range(1, 81)]
     log = tmp_path / "calls.jsonl"
@@ -811,6 +833,7 @@ def test_registry_metadata_must_be_owned_and_not_replaceable_by_other_users(tmp_
 
 
 @pytest.mark.parametrize("flags", [[], ["--remove-containers"], ["--stop-file","STOP"]])
+@NEEDS_WAITID
 def test_dynamic_registry_requires_all_launch_gate_controls_before_usage(tmp_path,flags,capsys):
     flags = [str(tmp_path / "stopped") if value == "STOP" else value for value in flags]
     result = guard.main(["--receipts",str(tmp_path / "receipts.jsonl"),"--container-registry",str(tmp_path / "registry.json"),
@@ -821,6 +844,7 @@ def test_dynamic_registry_requires_all_launch_gate_controls_before_usage(tmp_pat
 
 
 @pytest.mark.parametrize("parent", ["missing", "writable"])
+@NEEDS_WAITID
 def test_control_parent_is_validated_before_receipts_or_usage_start(tmp_path,parent,capsys):
     directory = tmp_path / parent
     if parent == "writable": directory.mkdir(); directory.chmod(0o777)
