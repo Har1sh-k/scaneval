@@ -60,7 +60,8 @@ from typing import Any, NamedTuple
 from ..materialize import Containment, MaterializationError, git_command
 from . import runsortie_evidence as evidence
 from .base import (Adapter, AdapterError, NativeOutcome, SystemSpec, _process_group_absent_after_reap,
-                   _signal_reserved_process_group, _wait_for_unreaped_exit, active_backend, build_env, run_command)
+                   _require_unreaped_wait, _signal_reserved_process_group, _wait_for_unreaped_exit,
+                   active_backend, build_env, run_command)
 from .llm_harness import (Enclosure, HarnessImport, LostRecord, _native_scan_site, kind_for_harness_class,
                           parse_frontmatter)
 
@@ -1091,6 +1092,8 @@ def _linux_group_has_live_descendant(pgid: int, deadline: float) -> bool | None:
 def _probe(executable: str, *args: str, env: dict[str, str] | None = None,
            cwd: Path | None = None, timeout_seconds: float = PROBE_TIMEOUT_SECONDS) -> str | None:
     """Run one bounded, group-cleaned capability probe and return its complete text output."""
+    # The cleanup below keeps the exited leader unreaped; refuse before there is a process to clean up.
+    _require_unreaped_wait("RunSortie capability probes")
     process: subprocess.Popen | None = None
     try:
         process = subprocess.Popen(
