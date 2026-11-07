@@ -160,6 +160,28 @@ def active_backend() -> Any:
     return _ACTIVE_BACKEND.get()
 
 
+# What the group-cleanup helpers below need from ``os``. CPython provides ``os.waitid`` on Linux,
+# but on macOS only from Python 3.13.
+_UNREAPED_WAIT_NAMES = ("waitid", "P_PID", "WEXITED", "WNOHANG", "WNOWAIT", "killpg")
+
+
+def _unreaped_wait_supported() -> bool:
+    """Whether this Python can observe a leader's exit without reaping it (``waitid(WNOWAIT)``)."""
+    return all(hasattr(os, name) for name in _UNREAPED_WAIT_NAMES)
+
+
+def _require_unreaped_wait(purpose: str) -> None:
+    """Refuse *purpose* before it starts a process when :func:`_unreaped_wait_supported` is false.
+
+    The group cleanup here observes an exited leader with ``waitid(WNOWAIT)``, which leaves it
+    unreaped. Reaping it instead would free its PID and process-group ID for reuse, so the group
+    could no longer be signalled safely.
+    """
+    if not _unreaped_wait_supported():
+        raise AdapterError(f"{purpose} require POSIX waitid(WNOWAIT) support, which this Python lacks "
+                           "(macOS has it from Python 3.13)")
+
+
 def _wait_for_unreaped_exit(pid: int, timeout_seconds: float) -> bool:
     """Observe *pid* exit without releasing its PID/process-group identity.
 
@@ -167,7 +189,8 @@ def _wait_for_unreaped_exit(pid: int, timeout_seconds: float) -> bool:
     ``killpg(pid, ...)`` can then target an unrelated process group if the kernel
     recycles that numeric ID between the probe and signal. ``WNOWAIT`` leaves the
     exited leader waitable, so its PID and process-group ID cannot be recycled while
-    the caller drains descendants.
+    the caller drains descendants. Callers refuse through :func:`_require_unreaped_wait`
+    before they start *pid*.
     """
     deadline = time.monotonic() + max(0.0, timeout_seconds)
     flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
@@ -284,9 +307,7 @@ def run_command(
             "scan in this process and this command was started outside it, from a thread that does "
             "not carry the backend; it was not run on the host")
     if ensure_group_empty:
-        waitid_names = ("waitid", "P_PID", "WEXITED", "WNOHANG", "WNOWAIT", "killpg")
-        if any(not hasattr(os, name) for name in waitid_names):
-            raise AdapterError("process-group emptiness checks require POSIX waitid(WNOWAIT) support")
+        _require_unreaped_wait("process-group emptiness checks")
     started = time.monotonic()
     with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
         try:

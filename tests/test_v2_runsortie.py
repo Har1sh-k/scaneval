@@ -32,7 +32,7 @@ import pytest
 
 from scaneval.adapters import get_adapter
 from scaneval.adapters import runsortie_evidence as ev
-from scaneval.adapters.base import AdapterError, SystemSpec, routed_through
+from scaneval.adapters.base import AdapterError, SystemSpec, _unreaped_wait_supported, routed_through
 from scaneval.adapters import runsortie as rs
 from scaneval.adapters.runsortie import (RunSortieAdapter, SUPPORTED_RUNSORTIE_COMMIT,
                                          SUPPORTED_RUNSORTIE_VERSION, native_config, read_settings)
@@ -50,6 +50,12 @@ FINDINGS = [
     {"id": "FG-SQLI-0002", "severity": "high", "file": "src/db.py", "class": "sql_injection"},
     {"id": "FG-LOG-0003", "severity": "low", "file": "src/app.py", "class": "information_disclosure"},
 ]
+# CPython has os.waitid on Linux, and on macOS only from 3.13. Without it the native path refuses at
+# its first capability probe, which the waitid regressions below check on every platform.
+# Decided once, at import, so a test that removes os.waitid itself still reaches the refusal.
+HAS_WAITID = _unreaped_wait_supported()
+WAITID_SKIP = "needs os.waitid, which macOS CPython has from Python 3.13"
+NEEDS_WAITID = pytest.mark.skipif(not HAS_WAITID, reason=WAITID_SKIP)
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -220,6 +226,8 @@ def _prepared(tmp_path: Path, *, mode: str = "full", target_pi: bool = False, **
 
 def _run(runtime: Runtime, scenario: dict, *, config: dict | None = None, timeout: float = 60,
          name: str = "run") -> tuple[dict, dict, Path]:
+    if not HAS_WAITID:
+        pytest.skip(WAITID_SKIP)  # every run prepares through the capability probes
     scenario = {"invocation_log": str(runtime.log), **scenario}
     runtime.scenario.write_text(json.dumps(scenario), encoding="utf-8")
     adapter = get_adapter("runsortie")
@@ -427,13 +435,15 @@ def test_secure_v1_unsupported_bundle_validates_replays_and_advertises_no_provid
     def refused(*_args, **_kwargs):
         raise AssertionError("unsupported offline replay tried to open a socket or start a process")
 
-    monkeypatch.setattr(socket, "socket", refused)
+    # Refuse construction rather than replace the class: replay may import ssl first, which subclasses it.
+    monkeypatch.setattr(socket.socket, "__init__", refused)
     monkeypatch.setattr(subprocess, "Popen", refused)
     replayed = tmp_path / "replayed-unsupported.json"
     assert main(["replay", str(bundle), "--output", str(replayed)]) == 0
     assert json.loads(replayed.read_text(encoding="utf-8")) == score(plan, result, decisions)
 
 
+@NEEDS_WAITID
 def test_preparation_records_pinned_identities_at_their_real_assurance(runtime):
     preparation = get_adapter("runsortie").prepare(SystemSpec("s", "runsortie", runtime.config(
         credential_env={"engine": "OPENAI_API_KEY"}, work_budget={"version": 1, "maxModelFiles": 3})), runtime.tmp)
@@ -485,6 +495,7 @@ def test_preparation_refuses_near_miss_selected_cli_package_contracts(runtime, r
         RunSortieAdapter().prepare(SystemSpec("r", "runsortie", runtime.config()), runtime.tmp / "cache")
 
 
+@NEEDS_WAITID
 def test_preparation_refuses_pi_without_every_injected_isolation_capability(runtime):
     _executable(runtime.agent_packages["pi"] / "dist" / "bundle" / "cli.js", r'''#!/bin/sh
 if [ "$1" = "--version" ]; then echo 1.4.0; exit 0; fi
@@ -537,6 +548,7 @@ def test_npm_script_shell_identity_refuses_a_target_unsafe_for_shebang(tmp_path,
         rs._npm_script_shell_identity()
 
 
+@NEEDS_WAITID
 def test_npm_script_shell_alias_resolves_before_probes_and_detects_drift(runtime, monkeypatch):
     target = rs.AGENT_SHELL.resolve(strict=True)
     replacement = runtime.tmp / "replacement-shell"
@@ -573,7 +585,9 @@ def test_npm_script_shell_alias_resolves_before_probes_and_detects_drift(runtime
     assert runtime.invocations() == []
 
 
-@pytest.mark.parametrize("reported", [None, "v21.19.0", "not-a-node-version"])
+@pytest.mark.parametrize("reported", [
+    None, pytest.param("v21.19.0", marks=NEEDS_WAITID), pytest.param("not-a-node-version", marks=NEEDS_WAITID),
+])
 def test_preparation_requires_node_22_or_newer(runtime, monkeypatch, reported):
     native_probe = rs._probe
 
@@ -585,6 +599,7 @@ def test_preparation_requires_node_22_or_newer(runtime, monkeypatch, reported):
         RunSortieAdapter().prepare(SystemSpec("r", "runsortie", runtime.config()), runtime.tmp / "cache")
 
 
+@NEEDS_WAITID
 def test_probe_never_signals_a_numeric_group_after_the_leader_was_already_reaped(monkeypatch):
     monkeypatch.setattr(rs, "_wait_for_unreaped_exit",
                         lambda *_args, **_kwargs: (_ for _ in ()).throw(ChildProcessError()))
@@ -596,10 +611,29 @@ def test_probe_never_signals_a_numeric_group_after_the_leader_was_already_reaped
     assert rs._probe(shutil.which("true")) is None
 
 
+@NEEDS_WAITID
 def test_probe_drains_and_refuses_a_successful_launcher_that_leaves_a_group_child(tmp_path):
     launcher = tmp_path / "lingering-help"
     _executable(launcher, "#!/bin/sh\nsleep 30 </dev/null >/dev/null 2>&1 &\necho --help\n")
     assert rs._probe(str(launcher), "--help", timeout_seconds=3) is None
+
+
+def test_probe_refuses_before_launch_where_waitid_is_missing(monkeypatch):
+    # macOS CPython has no os.waitid before 3.13, so the probe could not keep its leader unreaped.
+    monkeypatch.delattr(rs.os, "waitid", raising=False)
+    monkeypatch.setattr(rs.subprocess, "Popen", lambda *_args, **_kwargs: pytest.fail("a probe was launched"))
+    with pytest.raises(AdapterError, match=r"capability probes require POSIX waitid\(WNOWAIT\) support"):
+        rs._probe(shutil.which("true"))
+
+
+def test_preparation_refuses_where_waitid_is_missing_and_removes_the_probe_home(runtime, monkeypatch):
+    probe_parent = runtime.tmp / "probe-parent"
+    probe_parent.mkdir()
+    monkeypatch.setattr(rs.tempfile, "tempdir", str(probe_parent))
+    monkeypatch.delattr(rs.os, "waitid", raising=False)
+    with pytest.raises(AdapterError, match=r"capability probes require POSIX waitid\(WNOWAIT\) support"):
+        RunSortieAdapter().prepare(SystemSpec("r", "runsortie", runtime.config()), runtime.tmp / "cache")
+    assert list(probe_parent.iterdir()) == []
 
 
 @pytest.mark.parametrize("prefix", ["", ".", "relative/bin"])
@@ -612,6 +646,7 @@ def test_preparation_rejects_path_entries_whose_meaning_depends_on_cwd(runtime, 
 @pytest.mark.parametrize("route,driver", [
     ("pi:model-a", "pi"), ("unknown:model-a", "pi"),
 ])
+@NEEDS_WAITID
 def test_engine_driver_identity_uses_the_pinned_fieldglass_route_parser(runtime, route, driver):
     preparation = get_adapter("runsortie").prepare(
         SystemSpec("s", "runsortie", runtime.config(engine_model=route)), runtime.tmp / "cache")
@@ -940,7 +975,8 @@ def test_complete_runsortie_bundle_validates_and_replays_offline(runtime, monkey
     def refused(*_args, **_kwargs):
         raise AssertionError("offline replay tried to open a socket or start a process")
 
-    monkeypatch.setattr(socket, "socket", refused)
+    # Refuse construction rather than replace the class: replay may import ssl first, which subclasses it.
+    monkeypatch.setattr(socket.socket, "__init__", refused)
     monkeypatch.setattr(subprocess, "Popen", refused)
     replayed = tmp_path / "replayed.json"
     assert main(["replay", str(bundle), "--output", str(replayed)]) == 0
@@ -1057,6 +1093,7 @@ def test_zero_findings_with_exit_zero_and_a_ready_baseline_but_no_verification_a
 
 # --- refusals before launch ------------------------------------------------------------------
 
+@NEEDS_WAITID
 def test_a_pr_request_is_unsupported_and_never_launches(runtime):
     adapter = get_adapter("runsortie")
     spec = SystemSpec("runsortie-fake", "runsortie", runtime.config())
@@ -1076,6 +1113,7 @@ def test_a_pr_request_is_unsupported_and_never_launches(runtime):
     assert runtime.invocations() == []
 
 
+@NEEDS_WAITID
 def test_active_oci_backend_is_refused_before_the_native_fake_launches(runtime):
     class OciBackend:
         name = "oci"
@@ -1093,6 +1131,7 @@ def test_active_oci_backend_is_refused_before_the_native_fake_launches(runtime):
     assert runtime.invocations() == []
 
 
+@NEEDS_WAITID
 def test_target_root_pi_configuration_is_refused_before_runsortie_launch(runtime):
     adapter = get_adapter("runsortie")
     spec = SystemSpec("runsortie-fake", "runsortie", runtime.config())
@@ -1107,6 +1146,7 @@ def test_target_root_pi_configuration_is_refused_before_runsortie_launch(runtime
     assert runtime.invocations() == []
 
 
+@NEEDS_WAITID
 def test_a_runtime_changed_after_preparation_is_refused_before_launch(runtime):
     adapter = get_adapter("runsortie")
     spec = SystemSpec("runsortie-fake", "runsortie", runtime.config())
@@ -1121,6 +1161,7 @@ def test_a_runtime_changed_after_preparation_is_refused_before_launch(runtime):
     assert runtime.invocations() == []
 
 
+@NEEDS_WAITID
 def test_agent_shell_identity_drift_is_refused_before_launch(runtime):
     adapter = get_adapter("runsortie")
     spec = SystemSpec("runsortie-fake", "runsortie", runtime.config())
@@ -1138,6 +1179,7 @@ def test_agent_shell_identity_drift_is_refused_before_launch(runtime):
 
 
 @pytest.mark.parametrize("mutation", ["same-version-bytes", "symlink-target"])
+@NEEDS_WAITID
 def test_installed_dependency_tree_mutation_after_preparation_is_refused(runtime, mutation):
     adapter = get_adapter("runsortie")
     spec = SystemSpec("runsortie-fake", "runsortie", runtime.config())
@@ -1163,6 +1205,7 @@ def test_installed_dependency_tree_mutation_after_preparation_is_refused(runtime
     ("pi", "dist/bundle/cli-runtime.js"),
     ("npm", "lib/cli.js"),
 ])
+@NEEDS_WAITID
 def test_selected_launcher_package_mutation_after_preparation_is_refused(runtime, launcher, relative):
     adapter = get_adapter("runsortie")
     spec = SystemSpec("runsortie-fake", "runsortie", runtime.config())
@@ -1855,6 +1898,7 @@ def test_a_named_pipe_receipt_does_not_block_the_invocation(runtime, tmp_path):
     assert execution["provenance"]["captured_state_dirs"] == []
 
 
+@NEEDS_WAITID
 def test_an_initial_tree_with_fieldglass_is_refused(runtime, tmp_path):
     adapter = get_adapter("runsortie")
     spec = SystemSpec("runsortie-fake", "runsortie", runtime.config())
@@ -2365,6 +2409,7 @@ TOOLS = Path(__file__).parent / "fixtures" / "runsortie" / "fake_tools.py"
     ("claude", {"version": 1, "modelCalls": {"primaryReview": 1, "challenger": 3}}, False),
     ("claude", None, True),
 ])
+@NEEDS_WAITID
 def test_real_runsortie_cli_with_fabricated_engine_and_agents(tmp_path, monkeypatch, challenger, budget, empty):
     """Deterministic conformance, not live readiness: the real RunSortie CLI, Node and Git run, and its
     Fieldglass engine and both agents are fabricated processes, so no model and no network is used.

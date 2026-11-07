@@ -7,7 +7,11 @@ import time
 
 import pytest
 
-from scaneval.adapters.base import build_env, run_command
+from scaneval.adapters.base import AdapterError, _unreaped_wait_supported, build_env, run_command
+
+# Group-emptiness checks need os.waitid: on Linux, and on macOS only from CPython 3.13.
+NEEDS_WAITID = pytest.mark.skipif(not _unreaped_wait_supported(),
+                                  reason='needs os.waitid, which macOS CPython has from Python 3.13')
 
 
 def test_interrupt_reaps_scanner_and_stops_its_grandchild(tmp_path):
@@ -93,6 +97,7 @@ def test_normal_and_timeout_preserve_both_output_streams(tmp_path, timeout):
     assert (tmp_path/'err').read_text() == 'err\n'
 
 
+@NEEDS_WAITID
 def test_opt_in_group_empty_check_stops_a_descendant_left_after_normal_exit(tmp_path):
     """RunSortie's leader can exit while one of its native descendants remains in the session."""
     script = r'''
@@ -117,6 +122,20 @@ time.sleep(.15)
     assert (tmp_path/'descendant-heartbeat').read_bytes() == before
 
 
+def test_group_empty_check_refuses_before_launch_where_waitid_is_missing(tmp_path, monkeypatch):
+    """macOS CPython has no os.waitid before 3.13; the check refuses before anything starts."""
+    monkeypatch.delattr(os, 'waitid', raising=False)
+    monkeypatch.setattr(subprocess, 'Popen', lambda *_args, **_kwargs: pytest.fail('the scanner was started'))
+    with pytest.raises(AdapterError, match=r'process-group emptiness checks require POSIX waitid\(WNOWAIT\)'):
+        run_command(
+            [sys.executable, '-c', 'pass'], cwd=tmp_path, timeout_seconds=10,
+            env=build_env(), stdout_path=tmp_path/'out', stderr_path=tmp_path/'err',
+            ensure_group_empty=True,
+        )
+    assert not (tmp_path/'out').exists() and not (tmp_path/'err').exists()
+
+
+@NEEDS_WAITID
 def test_group_empty_cleanup_signals_only_while_leader_is_unreaped(tmp_path, monkeypatch):
     """The leader's waitable zombie reserves the numeric PGID until every signal is done."""
     real_killpg = os.killpg
@@ -144,6 +163,7 @@ subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
     assert signal.SIGKILL in signalled
 
 
+@NEEDS_WAITID
 def test_group_empty_cleanup_feeds_stdin_before_reaping_and_stops_descendants(tmp_path):
     script = r'''
 import pathlib, subprocess, sys

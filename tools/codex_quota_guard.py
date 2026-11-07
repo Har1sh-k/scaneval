@@ -746,6 +746,11 @@ class Controller:
         return code
 
 
+def supported_platform() -> bool:
+    """Whether owned leaders can be observed unreaped: POSIX waitid(WNOWAIT), on macOS from Python 3.13."""
+    return os.name == "posix" and all(hasattr(os, name) for name in ("waitid", "WNOWAIT", "P_PID"))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--receipts", type=Path, required=True, help="New private JSONL receipt file")
@@ -776,7 +781,7 @@ def main(argv: list[str] | None = None) -> int:
     receipts = None
     old_handlers = {}
     try:
-        if os.name != "posix" or not all(hasattr(os, name) for name in ("waitid", "WNOWAIT", "P_PID")):
+        if not supported_platform():
             raise Stop("unsupported_platform")
         options = Options(args.poll_seconds, args.read_timeout_seconds,
                           args.stale_after_seconds, args.max_runtime_seconds, args.grace_seconds)

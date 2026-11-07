@@ -13,6 +13,9 @@ spec = importlib.util.spec_from_file_location("codex_quota_buckets_guard", TOOL)
 guard = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = guard
 spec.loader.exec_module(guard)
+# A launched command is supervised through os.waitid, which macOS CPython has from 3.13.
+NEEDS_WAITID = pytest.mark.skipif(not guard.supported_platform(),
+                                  reason="needs os.waitid, which macOS CPython has from Python 3.13")
 
 
 def bucket(limit_id="codex", used=62):
@@ -124,7 +127,7 @@ def receipt_events(tmp_path):
 
 
 @pytest.mark.parametrize("null_map", [False, True])
-@pytest.mark.parametrize("allow_legacy", [False, True])
+@pytest.mark.parametrize("allow_legacy", [False, pytest.param(True, marks=NEEDS_WAITID)])
 def test_legacy_visibility_is_unknown_and_requires_audited_opt_in(tmp_path, null_map, allow_legacy):
     result = {"rateLimits": bucket()}
     if null_map:
@@ -167,6 +170,7 @@ def test_malformed_map_is_never_downgraded_to_legacy_or_echoed(tmp_path, bad_map
     assert "secret" not in (tmp_path / "receipts.jsonl").read_text()
 
 
+@NEEDS_WAITID
 def test_single_mapped_bucket_has_complete_visibility_without_exception(tmp_path):
     subject = controller(tmp_path, {"rateLimitsByLimitId": {"codex": bucket()}})
     try:
@@ -200,6 +204,7 @@ def test_default_refusal_before_launch_records_selected_and_visible_buckets(tmp_
     assert events[-1]["reason"] == "other_limit_windows_present"
 
 
+@NEEDS_WAITID
 def test_allowed_other_windows_and_selected_custom_bucket_are_audited(tmp_path):
     result = multiple()
     result["rateLimitsByLimitId"]["model-specific"] = bucket("model-specific", 50)
@@ -231,6 +236,7 @@ def test_unavailable_read_reports_unknown_visibility_without_stale_keys(tmp_path
     assert rejected["bucket_visibility_available"] is False
 
 
+@NEEDS_WAITID
 def test_cli_wires_explicit_quota_selection(tmp_path, monkeypatch):
     captured = []
 

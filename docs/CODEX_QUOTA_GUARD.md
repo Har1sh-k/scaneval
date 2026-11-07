@@ -3,8 +3,10 @@
 `tools/codex_quota_guard.py` supervises one command and stops its owned process
 group when Codex usage leaves the allowed range. It is an optional operator
 utility, separate from ScanEval's scanner contracts and benchmark results.
-Python 3.11+ and a POSIX platform with `waitid(WNOWAIT)` are required. The
-protocol was checked against the installed Codex CLI 0.165.0 schema.
+Python 3.11+ and a POSIX platform with `waitid(WNOWAIT)` are required. On
+macOS that means Python 3.13 or newer; under 3.11 or 3.12 the guard refuses
+with `unsupported_platform` and does not start the command. The protocol was
+checked against the installed Codex CLI 0.165.0 schema.
 
 The monitor starts `codex app-server`, performs the initialization handshake,
 then calls only `account/rateLimits/read` with
