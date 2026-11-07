@@ -173,8 +173,9 @@ def _unreaped_wait_supported() -> bool:
 def _require_unreaped_wait(purpose: str) -> None:
     """Refuse *purpose* before it starts a process when :func:`_unreaped_wait_supported` is false.
 
-    Without ``WNOWAIT`` an exited leader can only be observed by reaping it, which frees its
-    PID and process-group ID for reuse, so the group can no longer be signalled safely.
+    The group cleanup here observes an exited leader with ``waitid(WNOWAIT)``, which leaves it
+    unreaped. Reaping it instead would free its PID and process-group ID for reuse, so the group
+    could no longer be signalled safely.
     """
     if not _unreaped_wait_supported():
         raise AdapterError(f"{purpose} require POSIX waitid(WNOWAIT) support, which this Python lacks "
