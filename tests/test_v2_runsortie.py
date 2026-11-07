@@ -433,7 +433,8 @@ def test_secure_v1_unsupported_bundle_validates_replays_and_advertises_no_provid
     def refused(*_args, **_kwargs):
         raise AssertionError("unsupported offline replay tried to open a socket or start a process")
 
-    monkeypatch.setattr(socket, "socket", refused)
+    # Refuse construction rather than replace the class: replay may import ssl first, which subclasses it.
+    monkeypatch.setattr(socket.socket, "__init__", refused)
     monkeypatch.setattr(subprocess, "Popen", refused)
     replayed = tmp_path / "replayed-unsupported.json"
     assert main(["replay", str(bundle), "--output", str(replayed)]) == 0
@@ -972,7 +973,8 @@ def test_complete_runsortie_bundle_validates_and_replays_offline(runtime, monkey
     def refused(*_args, **_kwargs):
         raise AssertionError("offline replay tried to open a socket or start a process")
 
-    monkeypatch.setattr(socket, "socket", refused)
+    # Refuse construction rather than replace the class: replay may import ssl first, which subclasses it.
+    monkeypatch.setattr(socket.socket, "__init__", refused)
     monkeypatch.setattr(subprocess, "Popen", refused)
     replayed = tmp_path / "replayed.json"
     assert main(["replay", str(bundle), "--output", str(replayed)]) == 0
