@@ -122,7 +122,7 @@ python -m pytest -q
 npm test --prefix sdk/typescript
 ```
 
-Tests use local fixtures and mock model runners. They do not launch paid model evaluations. CI checks Python 3.11, 3.13, and 3.14 on Linux, the TypeScript SDK, and demo/replay from an installed wheel. On macOS, Python 3.11 and 3.12 have no `os.waitid`, so the tests of RunSortie's retained native path, process-group cleanup, and the Codex quota guard's supervision are skipped there; use Python 3.13 or newer to run them.
+Tests use local fixtures and mock model runners. They do not launch paid model evaluations. CI checks Python 3.11, 3.13, and 3.14 on Linux, the TypeScript SDK, and demo/replay from an installed wheel. On macOS, Python 3.11 and 3.12 have no `os.waitid`, so the tests that need it, in RunSortie's retained native path, process-group cleanup, and the Codex quota guard, are skipped there; use Python 3.13 or newer to run them.
 
 | Path | Contents |
 |---|---|
