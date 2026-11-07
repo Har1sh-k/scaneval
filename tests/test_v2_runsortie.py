@@ -2407,6 +2407,7 @@ TOOLS = Path(__file__).parent / "fixtures" / "runsortie" / "fake_tools.py"
     ("claude", {"version": 1, "modelCalls": {"primaryReview": 1, "challenger": 3}}, False),
     ("claude", None, True),
 ])
+@NEEDS_WAITID
 def test_real_runsortie_cli_with_fabricated_engine_and_agents(tmp_path, monkeypatch, challenger, budget, empty):
     """Deterministic conformance, not live readiness: the real RunSortie CLI, Node and Git run, and its
     Fieldglass engine and both agents are fabricated processes, so no model and no network is used.
