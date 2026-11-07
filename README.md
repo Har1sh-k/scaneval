@@ -115,6 +115,14 @@ Implementation review: [Inspect AI visibility and observability comparison](docs
 
 [Current capabilities](docs/INITIAL_BUILD.md) describes the implementation. [Design decisions](docs/DESIGN_DECISIONS.md) and [evaluation math](docs/EVALUATION_MATH.md) describe the broader contract and planned work.
 
+## Model cutoffs and recent CVE research
+
+Inspect sourced provider cutoffs and check reviewed public-evidence chronology with
+`scaneval model-cutoffs list` and `scaneval model-cutoffs check`. The read-only
+helper preserves unknown dates and routes, distinguishes training from knowledge
+cutoffs, and reports the 2 Low / 3 Medium / 3 High / 2 Critical research target.
+See [model cutoffs](docs/MODEL_CUTOFFS.md) for usage, evidence limits, and maintenance.
+
 ## Development
 
 ```bash
@@ -143,11 +151,3 @@ Generated runs belong under ignored `results/`; source caches belong under ignor
 ## License
 
 [MIT](LICENSE). Source snapshots and external scanners retain their own licenses.
-
-### Model cutoffs and recent CVE research
-
-Inspect sourced provider cutoffs and check reviewed public-evidence chronology with
-`scaneval model-cutoffs list` and `scaneval model-cutoffs check`. The read-only
-helper preserves unknown dates and routes, distinguishes training from knowledge
-cutoffs, and reports the 2 Low / 3 Medium / 3 High / 2 Critical research target.
-See [model cutoffs](docs/MODEL_CUTOFFS.md) for usage, evidence limits, and maintenance.
