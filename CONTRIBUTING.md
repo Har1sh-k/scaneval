@@ -40,7 +40,7 @@ Tests use local fixtures and fake model runners, and never call a paid model. Ne
 
 A full local run reports some skips, and each names what is missing:
 
-- **Docker.** The OCI backend tests need a Docker engine and the pinned images. CI runs them with `SCANEVAL_REQUIRE_DOCKER=1`, which turns a missing engine into a failure.
+- **Docker.** The OCI backend tests need a Docker engine and the pinned images. CI runs `tests/test_v2_isolation_docker.py`, `tests/test_v2_open_context_docker.py` and `tests/test_v2_experiment_docker.py` with `SCANEVAL_REQUIRE_DOCKER=1`, which turns a missing engine or image into an error instead of a skip. `tests/test_v2_sv_open_context_docker.py` also needs `SCANEVAL_SV_IMAGE` set to a locally built SV-Agent image, and CI does not run it.
 - **External checkouts and private bundles.** Tests that need a harness checkout or a preserved private bundle are skipped without one.
 - **RunSortie conformance.** This test is opt-in through `SCANEVAL_RUNSORTIE_CONFORMANCE_ROOT`.
 - **File names.** Two tests need a filesystem that accepts file names that are not valid UTF-8. The default macOS filesystem refuses them.
