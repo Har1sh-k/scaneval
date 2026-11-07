@@ -1,4 +1,4 @@
-include LICENSE README.md README_PYPI.md pyproject.toml .gitignore
+include LICENSE README.md README_PYPI.md CONTRIBUTING.md pyproject.toml .gitignore
 recursive-include src *.py *.json *.mts *.mjs
 recursive-include docs *.md *.json
 recursive-include examples *.py *.mts *.md *.json *.toml
