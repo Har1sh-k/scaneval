@@ -602,6 +602,24 @@ def test_probe_drains_and_refuses_a_successful_launcher_that_leaves_a_group_chil
     assert rs._probe(str(launcher), "--help", timeout_seconds=3) is None
 
 
+def test_probe_refuses_before_launch_where_waitid_is_missing(monkeypatch):
+    # macOS CPython has no os.waitid before 3.13, so the probe could not keep its leader unreaped.
+    monkeypatch.delattr(rs.os, "waitid", raising=False)
+    monkeypatch.setattr(rs.subprocess, "Popen", lambda *_args, **_kwargs: pytest.fail("a probe was launched"))
+    with pytest.raises(AdapterError, match=r"capability probes require POSIX waitid\(WNOWAIT\) support"):
+        rs._probe(shutil.which("true"))
+
+
+def test_preparation_refuses_where_waitid_is_missing_and_removes_the_probe_home(runtime, monkeypatch):
+    probe_parent = runtime.tmp / "probe-parent"
+    probe_parent.mkdir()
+    monkeypatch.setattr(rs.tempfile, "tempdir", str(probe_parent))
+    monkeypatch.delattr(rs.os, "waitid", raising=False)
+    with pytest.raises(AdapterError, match=r"capability probes require POSIX waitid\(WNOWAIT\) support"):
+        RunSortieAdapter().prepare(SystemSpec("r", "runsortie", runtime.config()), runtime.tmp / "cache")
+    assert list(probe_parent.iterdir()) == []
+
+
 @pytest.mark.parametrize("prefix", ["", ".", "relative/bin"])
 def test_preparation_rejects_path_entries_whose_meaning_depends_on_cwd(runtime, monkeypatch, prefix):
     monkeypatch.setenv("PATH", prefix + os.pathsep + os.environ["PATH"])
