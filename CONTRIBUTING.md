@@ -54,7 +54,7 @@ CI runs on Linux with Python 3.11, 3.13 and 3.14.
 - Add or update tests for what you change. A fix should come with a test that fails without it.
 - Update the docs that describe the behaviour you changed.
 - Don't commit generated runs (they belong under the ignored `results/`), source caches (under the ignored `.repos/`), scanner outputs, private findings, credentials or content traces.
-- Don't commit absolute paths from your own machine. `tests/test_v2_repository_hygiene.py` fails on a path into a real user's home directory and on a committed run record.
+- Don't commit absolute paths from your own machine. `tests/test_v2_repository_hygiene.py` reads the working tree. It fails on a path into a real user's home directory and on any run record outside the ignored directories, committed or not, so keep generated runs under `results/`.
 
 ## Open a pull request
 
