@@ -52,8 +52,10 @@ FINDINGS = [
 ]
 # CPython has os.waitid on Linux, and on macOS only from 3.13. Without it the native path refuses at
 # its first capability probe, which the waitid regressions below check on every platform.
+# Decided once, at import, so a test that removes os.waitid itself still reaches the refusal.
+HAS_WAITID = _unreaped_wait_supported()
 WAITID_SKIP = "needs os.waitid, which macOS CPython has from Python 3.13"
-NEEDS_WAITID = pytest.mark.skipif(not _unreaped_wait_supported(), reason=WAITID_SKIP)
+NEEDS_WAITID = pytest.mark.skipif(not HAS_WAITID, reason=WAITID_SKIP)
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -224,7 +226,7 @@ def _prepared(tmp_path: Path, *, mode: str = "full", target_pi: bool = False, **
 
 def _run(runtime: Runtime, scenario: dict, *, config: dict | None = None, timeout: float = 60,
          name: str = "run") -> tuple[dict, dict, Path]:
-    if not _unreaped_wait_supported():
+    if not HAS_WAITID:
         pytest.skip(WAITID_SKIP)  # every run prepares through the capability probes
     scenario = {"invocation_log": str(runtime.log), **scenario}
     runtime.scenario.write_text(json.dumps(scenario), encoding="utf-8")
