@@ -20,22 +20,29 @@ environment on macOS or Linux:
 
 ```bash
 python -m pip install "scaneval==2.0.0a1"
+scaneval demo demo-run
 ```
 
-Load your saved ScanEval evaluation plan, normalized scan result, and review decisions:
+The demo writes a complete set of saved records to `demo-run`: an evaluation plan, a
+normalized scan result, and review decisions. They are fabricated evaluator fixtures; no
+scanner or model is called. Evaluate them:
 
 ```python
 import json
 from pathlib import Path
 import scaneval
 
-plan = json.loads(Path("plan.json").read_text(encoding="utf-8"))
-result = json.loads(Path("result.json").read_text(encoding="utf-8"))
-decisions = json.loads(Path("decisions.json").read_text(encoding="utf-8"))
+bundle = Path("demo-run")
+plan = json.loads((bundle / "evaluator" / "plan.json").read_text(encoding="utf-8"))
+result = json.loads((bundle / "result.json").read_text(encoding="utf-8"))
+decisions = json.loads((bundle / "evaluator" / "decisions.json").read_text(encoding="utf-8"))
 
 report = scaneval.evaluate(plan, result, decisions)
 print(json.dumps(report, indent=2))
 ```
+
+The report matches the demo's own `demo-run/evaluation.json`. Load your own saved plan,
+result, and decisions the same way.
 
 Scoring requires structured saved records and supplied finding-review decisions bound to
 those records. The plan assigns targets and controls; the decisions say which findings
@@ -43,16 +50,14 @@ establish their alleged issues. Unreviewed findings remain unresolved. The evalu
 validates these inputs and computes scores; producing scanner findings and adjudicating
 natural-language allegations are separate steps.
 
-## Try the offline demo
+## Replay the demo
 
 ```bash
-scaneval demo demo-run
 scaneval replay demo-run --output demo-replay.json
 ```
 
-Open `demo-run/report.html` locally. The demo uses fabricated evaluator fixtures and
-makes no scanner or model calls. Output paths must be new. Run `scaneval --help` for
-commands; the
+Replay recomputes the saved bundle offline. Open `demo-run/report.html` locally. Output
+paths must be new. Run `scaneval --help` for commands; the
 [execution guide](https://github.com/Har1sh-k/scaneval/blob/main/docs/INITIAL_BUILD.md)
 explains scanner configuration, review, and saved evidence.
 
