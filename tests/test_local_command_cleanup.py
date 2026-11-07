@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from scaneval.adapters.base import build_env, run_command
+from scaneval.adapters.base import AdapterError, build_env, run_command
 
 
 def test_interrupt_reaps_scanner_and_stops_its_grandchild(tmp_path):
@@ -115,6 +115,19 @@ time.sleep(.15)
     before = (tmp_path/'descendant-heartbeat').read_bytes()
     time.sleep(.15)
     assert (tmp_path/'descendant-heartbeat').read_bytes() == before
+
+
+def test_group_empty_check_refuses_before_launch_where_waitid_is_missing(tmp_path, monkeypatch):
+    """macOS CPython has no os.waitid before 3.13; the check refuses before anything starts."""
+    monkeypatch.delattr(os, 'waitid', raising=False)
+    monkeypatch.setattr(subprocess, 'Popen', lambda *_args, **_kwargs: pytest.fail('the scanner was started'))
+    with pytest.raises(AdapterError, match=r'process-group emptiness checks require POSIX waitid\(WNOWAIT\)'):
+        run_command(
+            [sys.executable, '-c', 'pass'], cwd=tmp_path, timeout_seconds=10,
+            env=build_env(), stdout_path=tmp_path/'out', stderr_path=tmp_path/'err',
+            ensure_group_empty=True,
+        )
+    assert not (tmp_path/'out').exists() and not (tmp_path/'err').exists()
 
 
 def test_group_empty_cleanup_signals_only_while_leader_is_unreaped(tmp_path, monkeypatch):
