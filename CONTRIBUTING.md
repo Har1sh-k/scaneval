@@ -10,7 +10,7 @@ If you think you have found a security vulnerability in ScanEval itself, don't p
 
 ## Set up a checkout
 
-You need Git, Python 3.11 or newer, and Node.js with npm for the TypeScript SDK. CI uses Node 24. On macOS, use Python 3.13 or newer to run every test; see [expected skips](#expected-skips).
+You need Git, Python 3.11 or newer, and Node.js with npm for the TypeScript SDK. CI uses Node 24. On macOS, use Python 3.13 or newer to run the tests that need `os.waitid`; see [expected skips](#expected-skips).
 
 ```bash
 git clone https://github.com/Har1sh-k/scaneval.git
@@ -45,6 +45,8 @@ A full local run reports some skips, and each names what is missing:
 - **RunSortie conformance.** This test is opt-in through `SCANEVAL_RUNSORTIE_CONFORMANCE_ROOT`.
 - **File names.** Two tests need a filesystem that accepts file names that are not valid UTF-8. The default macOS filesystem refuses them.
 - **`os.waitid` on macOS.** Python 3.11 and 3.12 on macOS have no `os.waitid`, so the tests that need it, in RunSortie's retained native path, process-group cleanup, and the Codex quota guard, are skipped. Python 3.13 or newer runs them.
+
+A few more skip with reasons pytest prints, such as a platform-specific check, or a check parametrized over corpus run configurations when none is committed.
 
 CI runs on Linux with Python 3.11, 3.13 and 3.14.
 
