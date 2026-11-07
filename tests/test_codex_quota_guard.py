@@ -657,6 +657,16 @@ def test_failed_stop_marker_still_cleans_up_and_reports_failure(tmp_path):
     assert controller.source.owned.process.returncode is not None
 
 
+def test_cli_refuses_an_unsupported_platform_before_receipts_usage_or_launch(tmp_path, monkeypatch, capsys):
+    # macOS CPython has no os.waitid before 3.13.
+    monkeypatch.delattr(os, "waitid", raising=False)
+    marker = tmp_path / "launched"
+    assert guard.main(["--receipts", str(tmp_path / "receipt"), "--codex", "never-launch", "--",
+                       sys.executable, "-c", f"open({str(marker)!r}, 'w').close()"]) == 125
+    assert json.loads(capsys.readouterr().err) == {"event": "guard_refused", "reason": "unsupported_platform"}
+    assert not marker.exists() and not (tmp_path / "receipt").exists()
+
+
 def test_cli_refuses_existing_stop_marker_before_usage_or_launch(tmp_path):
     marker = tmp_path / "stopped"
     marker.write_text("keep")
