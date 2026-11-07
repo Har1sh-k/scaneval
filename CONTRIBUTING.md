@@ -46,7 +46,7 @@ A full local run reports some skips, and each names what is missing:
 - **File names.** Two tests need a filesystem that accepts file names that are not valid UTF-8. The default macOS filesystem refuses them.
 - **`os.waitid` on macOS.** Python 3.11 and 3.12 on macOS have no `os.waitid`, so the tests that need it, in RunSortie's retained native path, process-group cleanup, and the Codex quota guard, are skipped. Python 3.13 or newer runs them.
 
-A few more skip with reasons pytest prints, such as a platform-specific check, or a check parametrized over corpus run configurations when none is committed.
+A few more skip with reasons pytest prints, such as a platform-specific check, or a check parametrized over corpus run configurations when the checkout has none.
 
 CI runs on Linux with Python 3.11, 3.13 and 3.14.
 
