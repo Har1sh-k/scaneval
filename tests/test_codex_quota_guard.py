@@ -20,8 +20,10 @@ spec.loader.exec_module(guard)
 TEST_RESET = int(time.time()) + 3600
 # The guard supervises owned process groups through os.waitid, which macOS CPython has from 3.13.
 # Elsewhere it refuses with unsupported_platform, which a regression below checks everywhere.
+# Decided once, at import, so a test that removes os.waitid itself still reaches the refusal.
+GUARD_SUPPORTED = guard.supported_platform()
 WAITID_SKIP = "needs os.waitid, which macOS CPython has from Python 3.13"
-NEEDS_WAITID = pytest.mark.skipif(not guard.supported_platform(), reason=WAITID_SKIP)
+NEEDS_WAITID = pytest.mark.skipif(not GUARD_SUPPORTED, reason=WAITID_SKIP)
 
 
 def usage(used=62, reset=None, secondary=None):
@@ -222,7 +224,7 @@ def events(tmp_path):
 
 def run_controller(controller, command):
     try:
-        if not guard.supported_platform():
+        if not GUARD_SUPPORTED:
             pytest.skip(WAITID_SKIP)  # the controller supervises its command through os.waitid
         return controller.run(command)
     finally:
