@@ -118,9 +118,12 @@ Implementation review: [Inspect AI visibility and observability comparison](docs
 ## Development
 
 ```bash
-python -m pytest -q
+npm ci --prefix sdk/typescript
 npm test --prefix sdk/typescript
+python -m pytest -q -rs
 ```
+
+Run `npm test` first: it also builds the TypeScript SDK that some Python tests use. [Contributing](CONTRIBUTING.md) covers setup, expected skips, and pull requests.
 
 Tests use local fixtures and mock model runners. They do not launch paid model evaluations. CI checks Python 3.11, 3.13, and 3.14 on Linux, the TypeScript SDK, and demo/replay from an installed wheel. On macOS, Python 3.11 and 3.12 have no `os.waitid`, so the tests that need it, in RunSortie's retained native path, process-group cleanup, and the Codex quota guard, are skipped there; use Python 3.13 or newer to run them.
 
