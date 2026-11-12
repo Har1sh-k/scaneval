@@ -87,14 +87,18 @@ and verify the offline demo/replay. Pin an exact alpha version for reproducible 
 ## Tag the release
 
 Once PyPI lists the new files, tag the commit they were built from and create a GitHub
-release for it. That commit is the head of the dispatch run whose
+release for it. That commit is the head of the newest dispatch run whose
 `Publish Python alpha to PyPI` job succeeded; the PyPI attestations for both files name
-it too. A dispatch with `publish=false` skips that job.
+it too. A dispatch with `publish=false` skips that job, yet the run still succeeds, so
+check the job rather than the run. Then confirm that the commit's `pyproject.toml` has the
+version you are tagging:
 
 ```sh
 gh run list --workflow publish-packages.yml --event workflow_dispatch --limit 5 \
   --json databaseId,headSha,createdAt
 gh run view <run id> --json jobs --jq '.jobs[] | "\(.name): \(.conclusion)"'
+git fetch origin
+git show <full commit SHA>:pyproject.toml | grep '^version'
 ```
 
 Write the release notes to a file: the changes since the previous tag, the pinned install,
