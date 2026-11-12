@@ -1,6 +1,6 @@
 # Publishing the Python alpha
 
-The alpha `scaneval==2.0.0a1` is [available on PyPI](https://pypi.org/project/scaneval/2.0.0a1/),
+The alpha `scaneval==2.0.0a2` is [available on PyPI](https://pypi.org/project/scaneval/2.0.0a2/),
 distributed as a Python wheel and source archive. The package exposes
 `scaneval.evaluate(plan, result, decisions)`, the CLI, and optional tracing through
 `scaneval.observer` in the same distribution. The Observer emits trace schema `2.0`.
@@ -77,7 +77,7 @@ After publication, verify the PyPI version and install it in a fresh environment
 
 ```sh
 python -m pip install --no-cache-dir scaneval
-# Or pin this alpha: python -m pip install --no-cache-dir "scaneval==2.0.0a1"
+# Or pin this alpha: python -m pip install --no-cache-dir "scaneval==2.0.0a2"
 python -c "import scaneval; print(scaneval.__version__)"
 ```
 
