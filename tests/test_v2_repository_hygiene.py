@@ -12,7 +12,10 @@ caught before it is staged.
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -80,6 +83,38 @@ def test_no_run_record_is_published():
     found = [str(p.relative_to(ROOT)) for p in published_files()
              if p.name in names and "fixtures" not in p.parts and "schema" not in p.parts]
     assert not found, "run records must not be committed:\n" + "\n".join(found)
+
+
+@pytest.mark.parametrize("layout", ["directory", "symlink"])
+@pytest.mark.parametrize("name", ["results", ".repos"])
+def test_local_storage_is_ignored_as_a_directory_or_a_symlink_to_one(tmp_path: Path, name: str, layout: str):
+    """Runs and source caches can be large, so ``results`` and ``.repos`` may be symlinks elsewhere.
+
+    Git records a symlink as a file, which a directory-only rule such as ``results/`` does not
+    match; ``git add -A`` would then commit a link to one machine's absolute path. The
+    repository's ``.gitignore`` is checked in a scratch repository, so the result does not
+    depend on this checkout or on the operator's own git configuration.
+    """
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    storage = tmp_path / "storage"
+    (storage / "entry").mkdir(parents=True)
+    (storage / "entry" / "data.json").write_text("{}\n", encoding="utf-8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # Inherited GIT_ variables, such as GIT_DIR inside a hook, would point git at another repository.
+    env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+    env.update({"HOME": str(tmp_path), "XDG_CONFIG_HOME": str(tmp_path / "config"),
+                "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
+    subprocess.run(["git", "init", "-q"], cwd=repo, env=env, check=True)
+    shutil.copyfile(ROOT / ".gitignore", repo / ".gitignore")
+    if layout == "symlink":
+        (repo / name).symlink_to(storage, target_is_directory=True)
+    else:
+        shutil.copytree(storage, repo / name)
+    status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=repo, env=env,
+                            check=True, capture_output=True, text=True).stdout
+    assert status.splitlines() == ["?? .gitignore"], f"{name} as a {layout} is not ignored:\n{status}"
 
 
 @pytest.mark.parametrize("config", sorted((ROOT / "corpus").glob("*/run-*.json")))

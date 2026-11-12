@@ -23,8 +23,10 @@ node_modules/
 Thumbs.db
 
 # ScanEval
-.repos/
-results/
+# No trailing slashes: .repos and results may be symlinks to storage elsewhere, which a
+# pattern ending in / does not match.
+.repos
+results
 *.html
 
 # Scanner artifacts
