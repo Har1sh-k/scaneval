@@ -1,7 +1,7 @@
 # Bring your own corpus
 
 This guide documents the organization-owned case pack path as the code implements it today, in
-package version `2.0.0a1`. It is the documentation deliverable named in
+package version `2.0.0a2`. It is the documentation deliverable named in
 [design decisions section 9](DESIGN_DECISIONS.md#9-bring-your-own-test-cases).
 
 For static CVE labels without HITL, use the [machine-review commands](../corpus/diverse/README.md#machine-review-without-hitl)
