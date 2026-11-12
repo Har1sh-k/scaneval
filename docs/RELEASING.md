@@ -83,3 +83,27 @@ python -c "import scaneval; print(scaneval.__version__)"
 
 Then evaluate structured saved records with `scaneval.evaluate(plan, result, decisions)`
 and verify the offline demo/replay. Pin an exact alpha version for reproducible integrations.
+
+## Tag the release
+
+Once PyPI lists the new files, tag the commit they were built from and create a GitHub
+release for it. That commit is the head of the dispatch run whose
+`Publish Python alpha to PyPI` job succeeded; the PyPI attestations for both files name
+it too. A dispatch with `publish=false` skips that job.
+
+```sh
+gh run list --workflow publish-packages.yml --event workflow_dispatch --limit 5 \
+  --json databaseId,headSha,createdAt
+gh run view <run id> --json jobs --jq '.jobs[] | "\(.name): \(.conclusion)"'
+```
+
+Write the release notes to a file: the changes since the previous tag, the pinned install,
+and the SHA-256 digest PyPI lists for each file. `--target` makes GitHub create the tag
+at that commit:
+
+```sh
+gh release create v2.0.0a2 --target <full commit SHA> --prerelease \
+  --title "scaneval 2.0.0a2" --notes-file <notes file>
+```
+
+Each tag is `v` followed by the published version. Alphas are GitHub pre-releases.
