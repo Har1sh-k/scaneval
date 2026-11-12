@@ -1,6 +1,6 @@
 # Initial evaluation core
 
-This alpha implements step 1 of [the design's build order](DESIGN_DECISIONS.md#10-packaging-deliverables-and-build-order) and the first vertical slice of step 2. It is the supported execution and evaluation path, not the completed benchmark. Package version is `2.0.0a1`.
+This alpha implements step 1 of [the design's build order](DESIGN_DECISIONS.md#10-packaging-deliverables-and-build-order) and the first vertical slice of step 2. It is the supported execution and evaluation path, not the completed benchmark. Package version is `2.0.0a2`.
 
 No benchmark results are published. The [current corpus](../corpus/diverse/README.md) contains 50 CVEs across 32 repositories, represented by 48 pinned source snapshots. Its pack records L1 checks; static machine judgments live in a separate sidecar. Existing plans retain draft scope, and no scanner matching decision has been approved. The corpus guide records source provenance, severity distribution, contextual selection rationale and the machine review workflow.
 
