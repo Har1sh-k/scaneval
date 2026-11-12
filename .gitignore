@@ -24,7 +24,8 @@ Thumbs.db
 
 # ScanEval
 .repos/
-results/
+# No trailing slash: results may be a symlink to storage elsewhere, which results/ does not match.
+results
 *.html
 
 # Scanner artifacts
