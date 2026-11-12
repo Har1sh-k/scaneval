@@ -2,15 +2,15 @@
 
 ScanEval evaluates security scanners on versioned cases and records how instrumented harnesses reach their findings. Scoring uses structured outputs and recorded review decisions. Static corpus labels can be assessed separately through evidence-bound machine review.
 
-> Alpha (`2.0.0a1`). No benchmark results are published. The [selected CVE corpus](corpus/diverse/README.md) contains 50 CVEs from 32 repositories across seven target languages: 9 Critical, 13 High, 20 Medium and 8 Low by the documented published-CVSS policy. Its 48 pinned vulnerable exports have mechanical checks and a separate machine-review workflow for static labels. Selection emphasizes contextual security reasoning; scanner miss rates remain unmeasured. Fixed controls remain unvalidated. Scanner outputs and traces stay local.
+> Alpha (`2.0.0a2`). No benchmark results are published. The [selected CVE corpus](corpus/diverse/README.md) contains 50 CVEs from 32 repositories across seven target languages: 9 Critical, 13 High, 20 Medium and 8 Low by the documented published-CVSS policy. Its 48 pinned vulnerable exports have mechanical checks and a separate machine-review workflow for static labels. Selection emphasizes contextual security reasoning; scanner miss rates remain unmeasured. Fixed controls remain unvalidated. Scanner outputs and traces stay local.
 
 ## Python alpha package
 
-The [PyPI alpha `2.0.0a1`](https://pypi.org/project/scaneval/2.0.0a1/) is available. The Python distribution includes the evaluation API, CLI, and optional tracing through `scaneval.observer`. Install the alpha:
+The [PyPI alpha `2.0.0a2`](https://pypi.org/project/scaneval/2.0.0a2/) is available. The Python distribution includes the evaluation API, CLI, and optional tracing through `scaneval.observer`. Install the alpha:
 
 ```bash
 python -m pip install scaneval
-# Or pin this alpha: python -m pip install scaneval==2.0.0a1
+# Or pin this alpha: python -m pip install scaneval==2.0.0a2
 ```
 
 ```python
