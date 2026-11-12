@@ -3,7 +3,7 @@
 Live scanner integrations remain separate from this protocol.
 """
 
-__version__ = "2.0.0a1"
+__version__ = "2.0.0a2"
 
 
 def evaluate(plan: dict, result: dict, decisions: dict) -> dict:
