@@ -101,8 +101,10 @@ def test_results_is_ignored_as_a_directory_or_a_symlink_to_one(tmp_path: Path, l
     (storage / "run" / "result.json").write_text("{}\n", encoding="utf-8")
     repo = tmp_path / "repo"
     repo.mkdir()
-    env = {**os.environ, "HOME": str(tmp_path), "XDG_CONFIG_HOME": str(tmp_path / "config"),
-           "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    # Inherited GIT_ variables, such as GIT_DIR inside a hook, would point git at another repository.
+    env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+    env.update({"HOME": str(tmp_path), "XDG_CONFIG_HOME": str(tmp_path / "config"),
+                "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
     subprocess.run(["git", "init", "-q"], cwd=repo, env=env, check=True)
     shutil.copyfile(ROOT / ".gitignore", repo / ".gitignore")
     if layout == "symlink":
