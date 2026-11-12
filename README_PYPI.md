@@ -6,7 +6,7 @@ supplied review decisions. Import the Python package and call
 The same distribution includes a CLI, versioned data contracts, replay, local reports,
 and optional tracing through `scaneval.observer`.
 
-**Alpha version: `2.0.0a1`.** No benchmark results or scanner comparisons are published.
+**Alpha version: `2.0.0a2`.** No benchmark results or scanner comparisons are published.
 The selected corpus contains 50 CVEs, but fixed controls remain unvalidated and scanner
 miss rates remain unmeasured. Live scanner integrations need separate installations and
 configuration. The default SV-Agent harness pin cannot yet produce a completed
@@ -19,7 +19,7 @@ Requires Python 3.11 or newer. Source materialization also requires Git. From a 
 environment on macOS or Linux:
 
 ```bash
-python -m pip install "scaneval==2.0.0a1"
+python -m pip install "scaneval==2.0.0a2"
 scaneval demo demo-run
 ```
 

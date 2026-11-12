@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -78,6 +79,12 @@ def test_version_and_validate_commands(tmp_path, capsys):
     capsys.readouterr()
     assert main(["validate", "scan-request", str(bundle / "request.json")]) == 0
     assert "Valid scan-request" in capsys.readouterr().out
+
+
+def test_package_version_matches_the_project_metadata():
+    # Reports and --version use __version__; the published distribution takes pyproject.toml's.
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    assert __version__ == tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
 
 
 def test_cli_refuses_to_overwrite_output_file_or_demo_directory(tmp_path, capsys):
