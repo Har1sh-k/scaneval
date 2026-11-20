@@ -19,6 +19,10 @@ execution and evidence path remains below that capability gate for deterministic
 contract tests and future work on an independently attested boundary; those tests are not production
 readiness or evidence that any direct agent is safe to launch.
 
+The later isolated-reviewer revision is recognized for capability reporting only. Its reviewer
+broker boundary does not cover Fieldglass, and the retained v1 launcher and evidence reader are
+specific to the direct-agent revision.
+
 What decides the status. Everything RunSortie leaves behind is read without following a link and
 bounded, staged create-only into the bundle and registered file by file before the workspace
 disappears, and judged by :mod:`scaneval.adapters.runsortie_evidence`. Completion is bound to the
@@ -69,6 +73,7 @@ from .llm_harness import (Enclosure, HarnessImport, LostRecord, _native_scan_sit
 TARGET = "scaneval"
 ENGINE_SOURCE = "bundled:fieldglass"
 SUPPORTED_RUNSORTIE_COMMIT = "af8f2402469dca441f6d9efd5929ddeab5c64957"
+ISOLATED_REVIEWER_RUNSORTIE_COMMIT = "8c5031c3d51904930c3957e0d800d81ba57ee619"
 SUPPORTED_RUNSORTIE_VERSION = "0.1.0"
 AGENTS = ("codex", "claude", "cursor", "gemini")
 VERIFIER_AGENTS = AGENTS
@@ -747,6 +752,22 @@ def _direct_agent_capability(settings: Settings) -> dict[str, Any]:
     }
 
 
+def _runtime_capability(settings: Settings) -> dict[str, Any]:
+    if settings.expected_commit == SUPPORTED_RUNSORTIE_COMMIT:
+        return _direct_agent_capability(settings)
+    return {
+        "runnable": False,
+        "status": "unsupported",
+        "requested_commit": settings.expected_commit,
+        "selected_agents": sorted({settings.primary.agent, settings.challenger.agent}),
+        "required_boundary": "validated Fieldglass and reviewer execution with revision-specific completion evidence",
+        "reasons": [
+            "this RunSortie revision isolates its reviewers but does not establish the same boundary for "
+            "Fieldglass; ScanEval has not validated this revision's launcher and completion evidence",
+        ],
+    }
+
+
 def _route(value: Any, label: str, allowed: tuple[str, ...]) -> Route:
     if not isinstance(value, dict) or not set(value) <= ROUTE_KEYS or not {"agent", "model"} <= set(value):
         raise AdapterError(f"config.{label} must be {{agent, model[, reasoning_effort]}} and nothing else")
@@ -804,8 +825,10 @@ def read_settings(config: dict) -> Settings:
     commit = config.get("expected_commit")
     if not isinstance(commit, str) or not evidence.HEX40.fullmatch(commit):
         raise AdapterError("config.expected_commit must be the exact 40-hex RunSortie commit")
-    if commit != SUPPORTED_RUNSORTIE_COMMIT:
-        raise AdapterError(f"runsortie adapter 0.1.0 supports only RunSortie commit {SUPPORTED_RUNSORTIE_COMMIT}")
+    if commit not in {SUPPORTED_RUNSORTIE_COMMIT, ISOLATED_REVIEWER_RUNSORTIE_COMMIT}:
+        raise AdapterError(
+            f"unrecognized RunSortie commit; expected {SUPPORTED_RUNSORTIE_COMMIT} (direct agents) or "
+            f"{ISOLATED_REVIEWER_RUNSORTIE_COMMIT} (isolated reviewers, preflight only)")
     version = config.get("expected_version")
     if not isinstance(version, str) or not _VERSION.fullmatch(version):
         raise AdapterError("config.expected_version must be the exact RunSortie package version")
@@ -2595,7 +2618,7 @@ class RunSortieAdapter(Adapter):
 
     def prepare(self, spec: SystemSpec, cache_root: Path) -> dict[str, Any]:
         settings = read_settings(spec.config)
-        capability = _direct_agent_capability(settings)
+        capability = _runtime_capability(settings)
         record = {"runnable": bool(capability["runnable"]), "capability": capability,
                   "routes": {"engine": settings.engine_model, "primary": settings.primary._asdict(),
                              "challenger": settings.challenger._asdict(),
@@ -2618,7 +2641,7 @@ class RunSortieAdapter(Adapter):
             if request["input"]["mode"] != "full" or request["input"].get("pr") is not None:
                 raise AdapterError("runsortie carries out fresh full baselines only; this request was refused")
             settings = read_settings(spec.config)
-            capability = _direct_agent_capability(settings)
+            capability = _runtime_capability(settings)
             if not capability["runnable"]:
                 reason = "; ".join(capability["reasons"])
                 return NativeOutcome(
