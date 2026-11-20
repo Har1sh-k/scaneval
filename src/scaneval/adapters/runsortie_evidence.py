@@ -997,6 +997,13 @@ def read_packets(data: bytes | None, *, policy: Policy, records: list["FindingMe
     if failure or not isinstance(value, dict):
         return Packets("invalid", (), frozenset(), None, (), 0, 0,
                        ("primary-review-packets.json is not a version 1 review plan",))
+    version = value.get("version")
+    if type(version) is not int:
+        return Packets("invalid", (), frozenset(), None, (), 0, 0,
+                       ("primary-review-packets.json requires an integer version",))
+    if version != 1:
+        return Packets("invalid", (), frozenset(), None, (), 0, 0,
+                       ("primary-review-packets.json uses an unsupported version; this reader requires version 1",))
     issues: list[str] = []
     if policy.state != "valid" or policy.value is None:
         issues.append("the review plan does not embed the exact validated target security policy")

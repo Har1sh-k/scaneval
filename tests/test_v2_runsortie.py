@@ -1652,6 +1652,28 @@ def test_native_policy_packet_argument_and_accounting_tampering_is_never_accepte
         or receipt["readings"]["verification"]["state"] != "complete"
 
 
+def test_newer_packet_version_cannot_adjudicate_legacy_findings(runtime):
+    result, _, bundle = _run(runtime, {
+        "engine": {"findings": FINDINGS},
+        "primary": {"dispositions": {"FG-SQLI-0002": "dismissed"}},
+        "hooks": {"before_commit": [
+            {"op": "json_set", "path": ".fieldglass/primary-review-packets.json",
+             "keys": ["version"], "value": 2},
+        ]},
+    })
+    receipt = _reconciliation(bundle)
+    assert result["status"] == "partial"
+    assert "review_packets_not_established" in receipt["verdict"]["unmet"]
+    assert receipt["readings"]["packets"] == {
+        "state": "invalid",
+        "issues": [
+            "primary-review-packets.json uses an unsupported version; this reader requires version 1",
+        ],
+    }
+    assert result["bundles_resolved"] is False
+    assert _claim_ids(result) == ["FG-CMDI-0001", "FG-LOG-0003", "FG-SQLI-0002"]
+
+
 @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
 def test_native_json_readers_reject_nonfinite_constants(constant):
     assert ev.read_checkpoint(f'{{"lastBatchHead":{constant}}}'.encode(), "a" * 40).state == "invalid"
