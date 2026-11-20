@@ -1084,6 +1084,130 @@
         }
       }
     },
+    "assigned_population": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Descriptive missing-outcome bounds over assigned control observations, using the existing canonical-control, input and repetition weights. Only current human-approved reviews in reviewed scope establish labels: an emitted false allegation may establish a positive regardless of execution status; quietness also requires successful completed, resolved output for every canonical alias. Other work is unknown. Not a confidence interval, completed-only rate, precision estimate, or promotion requirement. Optional for historical reports.",
+      "required": [
+        "state",
+        "reason",
+        "positive_mass",
+        "negative_mass",
+        "unknown_mass",
+        "lower",
+        "upper"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "ok",
+            "unavailable"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "positive_mass": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "negative_mass": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "unknown_mass": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "lower": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "upper": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "ok"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              },
+              "positive_mass": {
+                "type": "number"
+              },
+              "negative_mass": {
+                "type": "number"
+              },
+              "unknown_mass": {
+                "type": "number"
+              },
+              "lower": {
+                "type": "number"
+              },
+              "upper": {
+                "type": "number"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "positive_mass": {
+                "type": "null"
+              },
+              "negative_mass": {
+                "type": "null"
+              },
+              "unknown_mass": {
+                "type": "null"
+              },
+              "lower": {
+                "type": "null"
+              },
+              "upper": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
     "control": {
       "type": "object",
       "additionalProperties": false,
@@ -1106,8 +1230,11 @@
         "completed_lower",
         "completed_upper"
       ],
-      "description": "One control class. Rates are null, never 0, when their denominator is empty: the resolved rate needs resolved mass and the completed bounds need completed mass. observed_false_allegations also counts confirmed allegations from incomplete output, which stay out of the rates.",
+      "description": "One control class. Rates are null, never 0, when their denominator is empty: the resolved rate needs resolved mass and the completed bounds need completed mass. observed_false_allegations also counts confirmed allegations from incomplete output, which stay out of the completed-only rates. assigned_population optionally reports descriptive bounds over all frozen assigned observations, including supported partial allegations.",
       "properties": {
+        "assigned_population": {
+          "$ref": "#/$defs/assigned_population"
+        },
         "state": {
           "enum": [
             "ok",
