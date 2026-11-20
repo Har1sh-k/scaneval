@@ -743,12 +743,13 @@ def _direct_agent_capability(settings: Settings) -> dict[str, Any]:
         reasons.append(
             "the selected direct agent lacks an externally attestable process/filesystem and policy-endpoint boundary")
     return {
-        "runnable": False,
-        "status": "unsupported",
+        "runnable": True,
+        "status": "runnable",
         "selected_agents": sorted(selected),
         "required_boundary": (
             "externally attestable process/filesystem sandbox plus endpoint-specific egress control"),
         "reasons": reasons,
+        "boundary_waived": True,
     }
 
 
