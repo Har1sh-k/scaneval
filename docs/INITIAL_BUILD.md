@@ -301,7 +301,16 @@ scaneval diagnose runsortie CAPTURE --target TARGET \
   --source-head SOURCE_COMMIT --evidence-head EVIDENCE_COMMIT
 ```
 
-The diagnostic binds the saved evidence bytes to the evidence commit, checks the source parent, and reconciles policy v2 baseline acceptance, the v2 packet plan, review policy v7, verification summary v6, coverage, and budget records. The result covers the saved empty queue and the coverage reported in its native receipts. It performs no scan or model calls and creates no scoring bundle. Captures with findings or review packets require a separate verifier.
+The diagnostic binds the saved evidence bytes to the evidence commit, checks the source parent, and reconciles policy v2 baseline acceptance, the v2 packet plan, review policy v7, verification summary v6, coverage, and budget records. The result covers the saved empty queue and the coverage reported in its native receipts. It performs no scan or model calls and creates no scoring bundle. Verifying run completion for captures with a nonempty queue requires a separate check.
+
+`scaneval diagnose runsortie-packets` checks the packet and finding evidence for a saved v2 queue with members. Supply the SHA-256 recorded by the trusted capture process.
+
+```sh
+scaneval diagnose runsortie-packets CAPTURE/.fieldglass/primary-review-packets.json \
+  --expect-sha256 sha256:MANIFEST_DIGEST
+```
+
+The diagnostic checks membership, the native finding digests, and the packet hashes that bind members to review scopes. It reports the reviewed and observed digests separately. If RunSortie updated a finding after review, supply the trusted digest of the adjacent `verification-summary.json` using `--verification-sha256` to check its recorded evidence transitions. Scan coverage, finding dispositions, and reviewer execution require their own receipts.
 
 **Native PR review (`semgrep` and `deepsec`).** A request whose `input.mode` is `pr` names two commits, `base` and `head`, of a two-commit history in the scanner's workspace, with `HEAD` at `head` and a clean status. An adapter declares that it reads one by listing `pr` in `scan_modes`, and refuses before anything runs a mode it does not implement, a full request that carries `pr`, a `pr` that is not two full commit ids, and a workspace that does not hold that history, which the evaluator checks with git ahead of the scanner. So a PR request is never quietly run as a full scan.
 

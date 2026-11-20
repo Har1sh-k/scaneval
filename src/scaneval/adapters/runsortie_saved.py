@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import uuid
 
@@ -47,8 +48,15 @@ def _json_record(data: bytes, label: str) -> dict:
     def invalid_constant(value: str) -> None:
         raise ValueError(f"invalid JSON constant {value}")
 
+    def finite_float(value: str) -> float:
+        result = float(value)
+        if not math.isfinite(result):
+            raise ValueError("JSON number is outside the finite range")
+        return result
+
     try:
-        result = json.loads(data.decode("utf-8"), object_pairs_hook=pairs, parse_constant=invalid_constant)
+        result = json.loads(data.decode("utf-8"), object_pairs_hook=pairs, parse_constant=invalid_constant,
+                            parse_float=finite_float)
     except (ValueError, RecursionError) as exc:
         raise AdapterError(f"{label} is not strict UTF-8 JSON") from exc
     return _object(result, label)

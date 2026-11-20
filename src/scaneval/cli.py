@@ -979,8 +979,25 @@ def _diagnose_runsortie(args: argparse.Namespace) -> int:
     return 0
 
 
+def _diagnose_runsortie_packets(args: argparse.Namespace) -> int:
+    from .adapters.runsortie_packets import verify_saved_queue
+
+    if args.out is not None:
+        _refuse_trial_path(args.out)
+        if args.out.resolve().is_relative_to(args.manifest.parent.resolve()):
+            raise ContractError("write the diagnostic outside the saved RunSortie evidence directory")
+    content = _readable_json(verify_saved_queue(args.manifest, expected_sha256=args.expect_sha256,
+                                               verification_sha256=args.verification_sha256))
+    if args.out is None:
+        sys.stdout.write(content)
+    else:
+        _write_new(args.out, content)
+    return 0
+
+
 def _diagnose(args: argparse.Namespace) -> int:
-    return {"context-coverage": _diagnose_context_coverage, "runsortie": _diagnose_runsortie}[args.diagnose_command](args)
+    return {"context-coverage": _diagnose_context_coverage, "runsortie": _diagnose_runsortie,
+            "runsortie-packets": _diagnose_runsortie_packets}[args.diagnose_command](args)
 
 
 def _aggregate(args: argparse.Namespace) -> int:
@@ -1465,6 +1482,13 @@ def _add_diagnose_commands(sub: argparse._SubParsersAction) -> None:
     runsortie.add_argument("--source-head", required=True, help="the pinned source commit")
     runsortie.add_argument("--evidence-head", required=True, help="the pinned native evidence commit")
     runsortie.add_argument("--out", type=Path, help="new JSON file outside the capture; default stdout")
+
+    packets = commands.add_parser("runsortie-packets", help="verify a saved RunSortie v2 packet queue offline")
+    packets.add_argument("manifest", type=Path, help="saved .fieldglass/primary-review-packets.json")
+    packets.add_argument("--expect-sha256", required=True, help="sha256: digest from the trusted capture record")
+    packets.add_argument("--verification-sha256",
+                         help="trusted digest of the adjacent verification-summary.json for evidence transitions")
+    packets.add_argument("--out", type=Path, help="new JSON file outside the evidence directory; default stdout")
 
 
 def _add_blinding_commands(sub: argparse._SubParsersAction) -> None:
