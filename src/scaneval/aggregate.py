@@ -331,11 +331,14 @@ def _check_identity(run: _Run, assignment: dict, row: dict, prepared: dict | Non
         raise ContractError("result.json binds to a different input than the manifest recorded")
 
 
-def _timing(bundle: Path, run: _Run, assignment: dict, result: dict) -> tuple | None:
+def _timing(bundle: Path, run: _Run, assignment: dict, result: dict,
+            system: dict | None) -> tuple[datetime | None, datetime | None, float] | None:
     """The execution record's start, finish, and wall seconds, or ``None`` when the bundle has none.
 
-    A record present but naming another invocation, or another status than the result, is refused:
-    it is not the record of this scan.
+    A record present but naming another invocation, another status than the result, or another
+    adapter name/version than this system's run manifest is refused: it is not a consistent record
+    of this scan. The caller keeps that assignment as an unusable bundle, with no detection or
+    quiet credit and unknown delivered burden/usage. Absent legacy receipts remain optional.
     """
     path = bundle / "execution.json"
     if not path.exists():
@@ -348,6 +351,12 @@ def _timing(bundle: Path, run: _Run, assignment: dict, result: dict) -> tuple | 
         if record[key] != value:
             raise ContractError(f"execution.json records {key} {record[key]!r} where the assignment and "
                                 f"its result say {value!r}")
+    if system is None or system["adapter_version"] is None:
+        raise ContractError("execution.json has no resolved adapter identity in its run manifest")
+    adapter = {"name": system["adapter"], "version": system["adapter_version"]}
+    if record["adapter"] != adapter:
+        raise ContractError(f"execution.json records adapter {record['adapter']!r}, but run {run.run_id} "
+                            f"records system {assignment['system_id']} as {adapter!r}")
     return _instant(record["started_at"]), _instant(record["finished_at"]), float(record["wall_seconds"])
 
 
@@ -420,7 +429,7 @@ def _observe(run: _Run, assignment: dict, row: dict | None, prepared: dict | Non
         observed = scoring.observe(plan, result, decisions)
         state = review.review_status(bundle, guard_symlinks=False)
         _check_identity(run, assignment, row, prepared, result)
-        timing = _timing(bundle, run, assignment, result)
+        timing = _timing(bundle, run, assignment, result, system)
     except ContractError:
         return failure("missing", "unusable_bundle")
     placement = tuple(sorted(((control["control_id"], tuple(control["paths"]) if "paths" in control else None)
@@ -522,7 +531,10 @@ def _systems(runs: list[_Run]) -> dict[str, dict]:
     """Every scheduled system, refusing one system id configured or recorded differently in two runs.
 
     A system is what its run configured (:func:`_configuration`) and the adapter its run manifest records it
-    resolved to, by name and ``adapter_version``. Two runs that ran one system id and record different names
+    resolved to, by name and ``adapter_version``. The schedule and each present manifest system row
+    must name the adapter in the frozen configuration, including rows for systems that ran nothing;
+    the runner copies the configured name even when resolution fails. Versions on idle rows remain
+    irrelevant to execution identity. Two runs that ran one system id and record different names
     or versions for it are refused as two configurations are, because a version can change what one
     configuration does: DeepSec 1.1.0 ignores ``config.process_manifest_by_tree`` and 1.2.0 honors it.
 
@@ -549,6 +561,16 @@ def _systems(runs: list[_Run]) -> dict[str, dict]:
         for row in run.schedule["systems"]:
             system_id = row["system_id"]
             configuration = _configuration(run, system_id)
+            configured_adapter = configuration["adapter"]
+            if row["adapter"] != configured_adapter:
+                raise ContractError(
+                    f"the schedule of run {run.run_id} names system {system_id} as adapter {row['adapter']!r}, "
+                    f"but its frozen configuration names {configured_adapter!r}")
+            resolved = recorded.get(system_id)
+            if resolved is not None and resolved["adapter"] != configured_adapter:
+                raise ContractError(
+                    f"run {run.run_id} records system {system_id} as adapter {resolved['adapter']!r}, "
+                    f"but its frozen configuration names {configured_adapter!r}")
             known = systems.get(system_id)
             if known is None:
                 known = systems[system_id] = {"row": row, "configuration": configuration, "runs": [],
@@ -558,7 +580,6 @@ def _systems(runs: list[_Run]) -> dict[str, dict]:
                 raise ContractError(
                     f"system {system_id} is configured differently in runs {known['runs'][0]} and "
                     f"{run.run_id}; one system id must name one configuration to be aggregated")
-            resolved = recorded.get(system_id)
             adapter = (None if resolved is None or resolved["adapter_version"] is None
                        else (resolved["adapter"], resolved["adapter_version"]))
             if system_id not in ran:
@@ -2571,7 +2592,7 @@ def _condition_summary(report: dict) -> list[str]:
 
 
 def comparison_summary(report: dict) -> list[str]:
-    """One line per view and weighting of a comparison: the full-output recall difference."""
+    """Full-output recall differences and unusable bundle counts by view."""
     lines = [f"baseline={report['baseline']['system_id']} candidate={report['candidate']['system_id']} "
              f"configuration_differences={len(report['configuration_differences'])}"]
     lines.extend(_condition_summary(report))
@@ -2580,7 +2601,13 @@ def comparison_summary(report: dict) -> list[str]:
         lines.append(f"view {view['mode']}/{view['profile']} scope baseline={scope['baseline']} "
                      f"candidate={scope['candidate']}")
         for side in ("baseline", "candidate"):
-            lines.extend(_assigned_control_summary(view["systems"][side]["slices"][0], side))
+            system = view["systems"][side]
+            observations = system["observations"]
+            unusable = observations["failures"]["unusable_bundle"]
+            if unusable:
+                lines.append(f"  {side} has unusable bundles for {unusable}/{observations['assignments']} "
+                             "scheduled assignments")
+            lines.extend(_assigned_control_summary(system["slices"][0], side))
         for block in view["differences"][0]["detection"]:
             if block["state"] != "ok":
                 lines.append(f"  {block['weighting']} unavailable")

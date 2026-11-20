@@ -15,6 +15,7 @@ A run directory is read through its 2.1 run manifest, the `evaluator/schedule.js
 
 - a run with a 2.0 manifest, which predates frozen schedules;
 - a schedule or configuration that does not bind to its manifest, or a manifest that records an invocation its schedule never assigned;
+- a scheduled system whose schedule or manifest adapter name disagrees with its frozen configuration, even if the system never ran;
 - one run given twice, or runs whose schedules froze different packs;
 - one system id configured two ways across runs, or recorded there with two adapters or adapter versions (see **Systems** below);
 - a bundle whose result records a `processing` its system's configuration and adapter version do not give (see **Systems** below);
@@ -36,6 +37,8 @@ An input is scored on the targets and controls its schedule froze before the run
 **Evidence scope.** An observation is `reviewed` when its bundle's plan is reviewed and its review record is `human_approved`. It is `diagnostic` when the plan is diagnostic, and `draft` otherwise. A failure takes the scope of its schedule's frozen plan. A system or view is `reviewed` only when every planned observation is. Reviewed mixed with draft reports `draft`.
 
 **Systems.** A system is what its runs configured (adapter, adapter configuration, model, network policy, execution backend, and deadline) and the adapter version their manifests record for it. Two runs that ran one system id and record two versions, or two adapter names, for it are refused like two configurations, because a version can change what one configuration does: DeepSec 1.1.0 ignores `config.process_manifest_by_tree` and 1.2.0 honors it.
+
+When a bundle includes `execution.json`, its adapter name and version must match the system's entry in that run's manifest. A mismatch gives that assignment an `unusable_bundle` failure with no detection, quiet, or completion credit. It stays in the assigned denominators and still counts as executed. Claim volume, wall time, and cost are unknown, and the receipt does not contribute to run timing. Older bundles without an execution receipt remain eligible for scoring. Each comparison system's receipts are checked against its own recorded adapter, so the baseline and candidate can use different adapters or versions. The comparison summary shows the share of scheduled assignments with unusable bundles for each affected system and view.
 
 Whether a run ran a system is read from its own invocation rows, not from the version it recorded. A run ran nothing for a system when every assignment of it is `skipped` (its input was never prepared, or the system was skipped) or has no row (the run stopped before starting it). Such a run pools with runs of any version, whatever version its manifest recorded, so its failures stay in every denominator. That includes a DeepSec system whose preparation failed, which the manifest records with its adapter's version, and a run interrupted before the system's first invocation. It adds no version, and each view names it whenever another run ran the system. A run that ran a system but records no version for it is refused, because what ran is then unknown; `scaneval run` never writes one.
 
