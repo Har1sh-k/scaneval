@@ -290,7 +290,18 @@ Several things are deliberately left unresolved:
 - Synthetic-path tree walks reject cross-device descent everywhere and compare Linux mount ids to reject same-device bind mounts. On platforms without a mount-id facility, same-device bind mounts are an explicit local-backend limitation; `st_dev` still rejects cross-device mounts.
 - Those checks run after the fabricated RunSortie process exits. They are not isolation.
 
-The tests use an explicit test-only capability monkeypatch and a deterministic stand-in that follows the pinned `scanTarget` control flow. An opt-in conformance test (`SCANEVAL_RUNSORTIE_CONFORMANCE_ROOT=<checkout>`) runs the real pinned CLI, Node, and Git with a fabricated engine and fabricated agents, and calls no model and no network. Neither path can be enabled by system configuration. This is deterministic validation, not live readiness: no RunSortie run against a real model has been recorded.
+The tests use an explicit test-only capability monkeypatch and a deterministic stand-in that follows the pinned `scanTarget` control flow. An opt-in conformance test (`SCANEVAL_RUNSORTIE_CONFORMANCE_ROOT=<checkout>`) runs the real pinned CLI, Node, and Git with a fabricated engine and fabricated agents, and calls no model and no network. Neither path can be enabled by system configuration. These tests cover the legacy adapter contract using deterministic fixtures.
+
+**Verify a saved RunSortie smoke capture.**
+
+`scaneval diagnose runsortie` checks the saved empty-review-queue profile produced by RunSortie `8c5031c`. Supply the capture directory containing the native Git checkout in `source/` and the native state in `state/`. Use the source and evidence commit IDs recorded at capture time.
+
+```sh
+scaneval diagnose runsortie CAPTURE --target TARGET \
+  --source-head SOURCE_COMMIT --evidence-head EVIDENCE_COMMIT
+```
+
+The diagnostic binds the saved evidence bytes to the evidence commit, checks the source parent, and reconciles policy v2 baseline acceptance, the v2 packet plan, review policy v7, verification summary v6, coverage, and budget records. The result covers the saved empty queue and the coverage reported in its native receipts. It performs no scan or model calls and creates no scoring bundle. Captures with findings or review packets require a separate verifier.
 
 **Native PR review (`semgrep` and `deepsec`).** A request whose `input.mode` is `pr` names two commits, `base` and `head`, of a two-commit history in the scanner's workspace, with `HEAD` at `head` and a clean status. An adapter declares that it reads one by listing `pr` in `scan_modes`, and refuses before anything runs a mode it does not implement, a full request that carries `pr`, a `pr` that is not two full commit ids, and a workspace that does not hold that history, which the evaluator checks with git ahead of the scanner. So a PR request is never quietly run as a full scan.
 

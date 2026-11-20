@@ -962,8 +962,25 @@ def _diagnose_context_coverage(args: argparse.Namespace) -> int:
     return 0
 
 
+def _diagnose_runsortie(args: argparse.Namespace) -> int:
+    from .adapters.runsortie_saved import verify_capture
+
+    if args.out is not None:
+        _refuse_trial_path(args.out)
+        if args.out.resolve().is_relative_to(args.capture.resolve()):
+            raise ContractError("write the diagnostic outside the saved RunSortie capture")
+    document = verify_capture(args.capture, target=args.target, source_head=args.source_head,
+                              evidence_head=args.evidence_head)
+    content = _readable_json(document)
+    if args.out is not None:
+        _write_new(args.out, content)
+    else:
+        sys.stdout.write(content)
+    return 0
+
+
 def _diagnose(args: argparse.Namespace) -> int:
-    return {"context-coverage": _diagnose_context_coverage}[args.diagnose_command](args)
+    return {"context-coverage": _diagnose_context_coverage, "runsortie": _diagnose_runsortie}[args.diagnose_command](args)
 
 
 def _aggregate(args: argparse.Namespace) -> int:
@@ -1441,6 +1458,13 @@ def _add_diagnose_commands(sub: argparse._SubParsersAction) -> None:
                           help="case pack holding the accepted locations; default is "
                                "evaluator/pack.json of the run the invocation belongs to")
     coverage.add_argument("--out", type=Path, help="new JSON file; default stdout")
+
+    runsortie = commands.add_parser("runsortie", help="verify a saved RunSortie zero-packet capture offline")
+    runsortie.add_argument("capture", type=Path, help="capture directory containing source/ and state/")
+    runsortie.add_argument("--target", required=True, help="the native target name")
+    runsortie.add_argument("--source-head", required=True, help="the pinned source commit")
+    runsortie.add_argument("--evidence-head", required=True, help="the pinned native evidence commit")
+    runsortie.add_argument("--out", type=Path, help="new JSON file outside the capture; default stdout")
 
 
 def _add_blinding_commands(sub: argparse._SubParsersAction) -> None:
