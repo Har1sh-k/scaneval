@@ -114,7 +114,8 @@ def _plan_item(item: dict, kind: str) -> dict:
             **({"target_id": item["target_id"]} if item["target_id"] else {})}
 
 
-def write_bundle(bundle: Path, run_id: str, assignment: dict, row: dict, spec: dict) -> tuple[dict, dict, dict]:
+def write_bundle(bundle: Path, run_id: str, assignment: dict, row: dict, spec: dict,
+                 *, adapter: dict) -> tuple[dict, dict, dict]:
     """Write one invocation bundle and return its result, plan, and review record."""
     frozen = row["plan"]
     items = frozen if frozen["state"] == "frozen" else {"targets": [], "controls": [], "scope": "draft",
@@ -174,7 +175,7 @@ def write_bundle(bundle: Path, run_id: str, assignment: dict, row: dict, spec: d
         execution = {
             "schema_version": "2.0", "run_id": run_id, "invocation_id": assignment["assignment_id"],
             "input_id": assignment["input_id"], "system_id": assignment["system_id"],
-            "repetition": assignment["repetition"], "adapter": {"name": "fake", "version": "1.0.0"},
+            "repetition": assignment["repetition"], "adapter": adapter,
             "versions": {}, "status": spec["status"], "exit_code": 0, "timed_out": spec["status"] == "timeout",
             "command": [], "started_at": start, "finished_at": finish, "wall_seconds": wall,
             "timeout_seconds": 60, "tool_versions": {}, "model_identity": None, "system_config": {},
@@ -212,6 +213,9 @@ def write_run(root: Path, run_id: str, inputs: list[dict], *, systems=("sys-a",)
     (directory / "evaluator").mkdir(parents=True)
     entries = [{"system_id": system_id, "adapter": "fake", "config": {"knob": 1}, **configs.get(system_id, {})}
                for system_id in systems]
+    adapters = {entry["system_id"]: {"name": entry["adapter"],
+                                     "version": versions.get(entry["system_id"]) or "1.0.0"}
+                for entry in entries}
     config = {"schema_version": "2.1", "run_id": run_id, "pack": "pack.json",
               "inputs": [{"input_id": row["input_id"], "snapshot_id": row["snapshot_id"],
                           **({"profile": "metadata_blinded", "blinding_map": "fixture-map.json"}
@@ -266,7 +270,7 @@ def write_run(root: Path, run_id: str, inputs: list[dict], *, systems=("sys-a",)
                                 "bundle_path": path, "review_state": "draft", "skipped_reason": None})
             continue
         result, plan, record = write_bundle(directory / path, run_id, assignment, rows[assignment["input_id"]],
-                                            spec)
+                                            spec, adapter=adapters[assignment["system_id"]])
         invocations.append({**row, "status": result["status"], "claim_records": len(result["claims"]),
                             "plan_scope": plan["scope"], "targets_assigned": len(plan["targets"]),
                             "targets_detected": 0, "pending_matching_count": 0, "bundle_path": path,
@@ -2771,7 +2775,7 @@ def test_timeout_identity_normalizes_equivalent_numbers(tmp_path):
     from scaneval.aggregate import _Run, _configuration, _systems
     config = {"timeout_seconds": 60, "network_policy": "none", "systems": [
         {"system_id": "same", "adapter": "fake", "config": {}}]}
-    schedule = {"systems": [{"system_id": "same"}]}
+    schedule = {"systems": [{"system_id": "same", "adapter": "fake"}]}
     manifest = {"systems": [], "invocations": []}
     first = _Run("first", tmp_path, manifest, schedule, config)
     second = _Run("second", tmp_path, manifest, schedule, {**config, "timeout_seconds": 60.0})
@@ -2802,6 +2806,64 @@ def configuration_requirement(comparison: dict, allowed: list[str]) -> dict:
     document["configuration"]["allowed_differences"] = allowed
     decision = gate.evaluate_gate(document, comparison)
     return next(row for row in decision["requirements"] if row["id"] == "configuration.allowed_differences")
+
+
+@pytest.mark.parametrize(("relative", "kind"), [
+    ("run-manifest.json", "run-manifest"),
+    ("evaluator/schedule.json", "evaluation-schedule"),
+])
+def test_compare_refuses_an_adapter_name_different_from_its_frozen_config(tmp_path, capsys, relative, kind):
+    run = write_run(tmp_path, "run-adapters", [planned("p1", targets=[target("T-p1")])],
+                    systems=("baseline", "candidate"))
+    path = run / relative
+    document = json.loads(path.read_text())
+    next(row for row in document["systems"] if row["system_id"] == "candidate")["adapter"] = "other"
+    validate_document(kind, document)
+    path.write_text(canonical_json(document) + "\n", encoding="utf-8")
+
+    output = tmp_path / "comparison.json"
+    status, _, error = cli(capsys, "compare", str(run), "--baseline", "baseline",
+                           "--candidate", "candidate", "--output", str(output))
+
+    assert status == 2
+    assert "run-adapters" in error
+    assert "candidate" in error
+    assert "adapter 'other'" in error
+    assert "frozen configuration" in error
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("receipt", ["matching", "missing", "wrong_name", "wrong_version"])
+def test_compare_credits_only_execution_receipts_matching_their_own_adapter(tmp_path, receipt):
+    run = write_run(tmp_path, "run-adapters", [planned("p1", targets=[target("T-p1")])],
+                    systems=("baseline", "candidate"), configs={
+                        "baseline": {"adapter": "first-adapter"},
+                        "candidate": {"adapter": "second-adapter"},
+                    }, versions={"baseline": "1.2.3", "candidate": "4.5.6"}, outcomes={
+                        ("p1", "baseline", 1): scan(hits={"T-p1": 1}),
+                        ("p1", "candidate", 1): scan(hits={"T-p1": 1}, execution=receipt != "missing"),
+                    })
+    if receipt in ("wrong_name", "wrong_version"):
+        path = run / "invocations/p1__candidate__r1/execution.json"
+        execution = json.loads(path.read_text())
+        key, value = ("name", "first-adapter") if receipt == "wrong_name" else ("version", "1.2.3")
+        execution["adapter"][key] = value
+        validate_document("execution-record", execution)
+        path.write_text(canonical_json(execution) + "\n", encoding="utf-8")
+
+    report = aggregate.compare([run], baseline="baseline", candidate="candidate", policy=policy())
+
+    assert (report["baseline"]["adapter"], report["baseline"]["adapter_version"]) == ("first-adapter", "1.2.3")
+    assert (report["candidate"]["adapter"], report["candidate"]["adapter_version"]) == ("second-adapter", "4.5.6")
+    baseline = view(report)["systems"]["baseline"]
+    candidate = view(report)["systems"]["candidate"]
+    withheld = receipt in ("wrong_name", "wrong_version")
+    assert detection(slice_of(baseline))["full_output_recall"]["value"] == 1.0
+    assert detection(slice_of(candidate))["full_output_recall"]["value"] == (0.0 if withheld else 1.0)
+    assert slice_of(candidate)["completion"]["value"] == (0.0 if withheld else 1.0)
+    assert candidate["observations"]["failures"]["unusable_bundle"] == int(withheld)
+    assert [(row["assignment_id"], row["reason"]) for row in candidate["observations"]["failed_assignments"]] == (
+        [("p1__candidate__r1", "unusable_bundle")] if withheld else [])
 
 
 def test_one_system_id_recorded_with_two_adapter_versions_is_refused_like_two_configurations(tmp_path):
