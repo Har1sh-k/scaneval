@@ -2144,6 +2144,18 @@ def _check_slices(slices: list[dict[str, Any]], weightings: list[str]) -> None:
     for block in slices:
         if (block["slice"]["dimension"] == "all") != (block["slice"]["value"] is None):
             raise ContractError("only the 'all' slice has no value")
+        for control in block.get("controls", {}).values():
+            assigned = control.get("assigned_population")
+            if assigned is not None and assigned["state"] == "ok":
+                if control["canonical_controls"] == 0:
+                    raise ContractError("assigned control bounds require a nonempty population")
+                positive, negative, unknown = (assigned[key] for key in
+                                               ("positive_mass", "negative_mass", "unknown_mass"))
+                if (abs(positive + negative + unknown - 1) > WEIGHT_TOLERANCE
+                        or assigned["lower"] != positive
+                        or assigned["lower"] > assigned["upper"]
+                        or abs(assigned["upper"] - (1 - negative)) > WEIGHT_TOLERANCE):
+                    raise ContractError("assigned control bounds must partition mass and match their endpoints")
         if [detection["weighting"] for detection in block["detection"]] != list(weightings):
             raise ContractError(f"slice {block['slice']}: each slice carries one detection block per "
                                 f"weighting, in policy order {list(weightings)}")

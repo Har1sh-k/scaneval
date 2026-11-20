@@ -143,6 +143,14 @@ This adapts [PrimeVul's pair evaluation](https://arxiv.org/abs/2403.18624) to re
 
 For mixed-intent correctness, require a valid completed scan, the target hit, and resolved absence of false allegations on every required safe control in that input. Keep this denominator restricted to assigned cases with those annotations; failed or unresolved assignments earn no confirmed success. Report assessable coverage. The upper-bound-on-errors rule does not become upper-bound-on-success credit for pairs or mixed intent.
 
+### Descriptive bounds over assigned control observations
+
+The weighted aggregate reports also provide `assigned_population` for each control class. Over the frozen assigned observations, let $p_o=1$ only for a current human-approved finding review in reviewed scope that confirms an emitted false allegation in digest-bound saved output, including output retained from partial, timed-out, errored or unsupported executions. Let $n_o=1$ only for a current human-approved review in reviewed scope over successful completed output whose entire canonical control is resolved quiet. Otherwise both indicators are 0. Thus $p_o+n_o\leq1$: partial silence, unavailable work, unreviewed decisions and failed/unsupported execution make no negative claim. With the same normalized control/input/repetition weights $w_o$ as the control block,
+
+$$P=\sum_o w_o p_o,\quad N=\sum_o w_o n_o,\quad U=1-P-N,\quad \theta_{assigned}\in[P,1-N].$$
+
+These are descriptive missing-outcome identification bounds, not a confidence interval or an assumption that observed outcomes represent missing ones. See [Horowitz and Manski (1998)](https://doi.org/10.1016/S0304-4076(97)00077-8) for the general missing-data bounds approach; the assigned scanner-control estimand is specific to this framework. An empty or unavailable frozen population has null bounds; a known all-unknown population has $[0,1]$. These bounds do not replace the completed-only rates or enter promotion gate requirements. Details of scope, availability and historical report compatibility are in [aggregation](AGGREGATION.md#assigned-population-false-allegation-bounds).
+
 ## 3. Reviewed precision and review burden
 
 Declare the review population: unique claims represented in the first $B$ positions, or unique claims across full output. They are different populations. Review the bounded list for immediate usefulness; use probability sampling across full output for broader estimates. Retain duplicate delivery counts separately.

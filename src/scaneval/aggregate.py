@@ -1190,10 +1190,15 @@ def _control_outcome(observation: _Observation, control_ids: tuple[str, ...]) ->
     A control with a record the plan lacks was still in a scan that completed in the frozen scope: on a
     successful scan it is a completed observation, and while it is unresolved the false-alarm bound counts
     it as a false allegation rather than dropping it from the completed mass.
+    The separate assigned-population labels require a current human-approved finding review and
+    reviewed scope. A digest-bound emitted allegation can establish a positive at any execution status;
+    only success with every frozen canonical alias resolved quiet establishes a negative. Other outcomes are unknown.
+    No reference-label approval or scanner self-assessment is inferred from those recorded markings.
     """
     observed = observation.observed
     empty = {"completed": False, "resolved": False, "false_allegation": False,
-             "observed_false_allegation": False, "unscored": False}
+             "observed_false_allegation": False, "unscored": False,
+             "assigned_positive": False, "assigned_negative": False}
     if observed is None:
         return empty
     rows = {row["control_id"]: row for row in observed["controls"]}
@@ -1202,11 +1207,16 @@ def _control_outcome(observation: _Observation, control_ids: tuple[str, ...]) ->
     if not scored:
         return {**empty, "completed": observed["completed"], "unscored": True}
     false = any(row["false_allegation"] for row in scored)
+    resolved = false or (not missing and all(row["resolved"] for row in scored))
+    reviewed = observation.review_state == "human_approved" and observation.scope == "reviewed"
+    positive = reviewed and any(row["observed_false_allegation"] for row in scored)
     return {"completed": observed["completed"],
-            "resolved": false or (not missing and all(row["resolved"] for row in scored)),
+            "resolved": resolved,
             "false_allegation": false,
             "observed_false_allegation": any(row["observed_false_allegation"] for row in scored),
-            "unscored": missing}
+            "unscored": missing,
+            "assigned_positive": positive,
+            "assigned_negative": reviewed and observed["completed"] and resolved and not false}
 
 
 # --- one system in one view ---------------------------------------------------------------------
@@ -1487,13 +1497,18 @@ def _detection(corpus: _Corpus, units: Units, pair_units: dict, slice_: tuple[st
 
 
 def _controls(corpus: _Corpus, units: Units, slice_: tuple[str, str | None], policy: dict,
-              resampler: _Resampler | None) -> tuple[dict, dict[str, _Ratio], dict[str, Fraction]]:
+              resampler: _Resampler | None, *,
+              population_reason: str | None = None) -> tuple[dict, dict[str, _Ratio], dict[str, Fraction]]:
     """One control class in one slice: A, C, E masses, the resolved rate, and the completed bounds.
 
     ``A`` is the resolved mass, ``C`` the completed mass, and ``E`` the confirmed false-allegation
     mass, under equal weight per canonical control and, within it, per input and then per run. The
     resolved rate ``E/A`` is null when ``A`` is 0 and the completed bounds ``[E/C, (E+C−A)/C]`` are null
     when ``C`` is 0: no eligible, completed, or resolved control is never read as a rate of zero.
+    The separate assigned-population bounds are [P, 1-N], for supported reviewed positive and
+    negative masses P and N over the frozen assignments, with the remainder unknown. They are
+    descriptive identification bounds, not bootstrap intervals, and do not enter comparison deltas.
+    A missing frozen plan leaves that population unavailable, rather than silently omitting its work.
     """
     uncertainty = policy["uncertainty"]
     outcomes = [outcome for instances in units.values() for _key, _k, found in instances for outcome in found]
@@ -1509,12 +1524,23 @@ def _controls(corpus: _Corpus, units: Units, slice_: tuple[str, str | None], pol
         "completed_mass": None, "assessable_mass": None, "false_allegation_mass": None,
         "resolved_rate": {"value": None, "interval": _unavailable_interval()},
         "completed_lower": None, "completed_upper": {"value": None, "interval": _unavailable_interval()}}
+    assigned = {"state": "unavailable", "reason": population_reason or "no assigned controls in this class",
+                "positive_mass": None, "negative_mass": None, "unknown_mass": None,
+                "lower": None, "upper": None}
+    block["assigned_population"] = assigned
     if not units:
         return block, {}, {}
     attributes = {canonical: corpus.controls[canonical] for canonical in units}
     weights, reason, notes = _weights(attributes, "equal_target", policy, whole_view=slice_[0] == "all")
     if weights is None:
+        assigned["reason"] = population_reason or reason
         return {**block, "state": "unavailable", "reason": reason, "notes": notes}, {}, {}
+    if population_reason is None:
+        positive = _total(weights, _mean_per_item(units, lambda outcome: outcome["assigned_positive"]))
+        negative = _total(weights, _mean_per_item(units, lambda outcome: outcome["assigned_negative"]))
+        assigned.update({"state": "ok", "reason": None, "positive_mass": float(positive),
+                         "negative_mass": float(negative), "unknown_mass": float(1 - positive - negative),
+                         "lower": float(positive), "upper": float(1 - negative)})
 
     def cluster_of(canonical: str) -> str:
         return attributes[canonical][uncertainty["cluster_by"]]
@@ -1755,9 +1781,11 @@ def _evaluate_slice(context: _Context, frame: _Frame, slice_: tuple[str, str | N
         parts.update({("detection", weighting, name): ratio for name, ratio in found.items()})
         exact.update({("detection", weighting, name): value for name, value in masses.items()})
     controls = {}
+    population_reason = ("an assigned input has no frozen plan; its control population is unknown"
+                         if any(corpus.inputs[key]["plan"]["state"] != "frozen" for key in keys) else None)
     for name in CONTROL_CLASSES:
         block, found, masses = _controls(corpus, slice_controls[name], slice_, policy,
-                                         resamplers["controls"])
+                                         resamplers["controls"], population_reason=population_reason)
         controls[name] = block
         parts.update({("controls", name, metric): ratio for metric, ratio in found.items()})
         exact.update({("controls", name, metric): value for metric, value in masses.items()})
@@ -2491,6 +2519,19 @@ def _interval_text(interval: dict) -> str:
     return f"({interval['state']})"
 
 
+def _assigned_control_summary(whole: dict, prefix: str) -> list[str]:
+    lines = []
+    for name, control in whole["controls"].items():
+        assigned = control.get("assigned_population")
+        if assigned is None:  # Historical reports did not record this estimand.
+            continue
+        value = (f"[{_number(assigned['lower'])}, {_number(assigned['upper'])}] "
+                 f"unknown_mass={_number(assigned['unknown_mass'])}" if assigned["state"] == "ok"
+                 else f"unavailable ({assigned['reason']})")
+        lines.append(f"  {prefix} {name} assigned false-allegation bounds={value}")
+    return lines
+
+
 def summary(report: dict) -> list[str]:
     """One line per view and per system of an aggregate report: full-output recall per weighting."""
     lines = []
@@ -2510,6 +2551,7 @@ def summary(report: dict) -> list[str]:
                                f"{_interval_text(metric['interval'])}")
             lines.append(f"  {system['system_id']} scope={system['evidence_scope']} full_output_recall "
                          f"{' '.join(recalls)} completion={_number(whole['completion']['value'])}")
+            lines.extend(_assigned_control_summary(whole, system["system_id"]))
     lines.extend(_condition_summary(report))
     for stratum in report.get("condition_strata", []):
         metrics = stratum["metrics"]
@@ -2537,6 +2579,8 @@ def comparison_summary(report: dict) -> list[str]:
         scope = view["evidence_scope"]
         lines.append(f"view {view['mode']}/{view['profile']} scope baseline={scope['baseline']} "
                      f"candidate={scope['candidate']}")
+        for side in ("baseline", "candidate"):
+            lines.extend(_assigned_control_summary(view["systems"][side]["slices"][0], side))
         for block in view["differences"][0]["detection"]:
             if block["state"] != "ok":
                 lines.append(f"  {block['weighting']} unavailable")
