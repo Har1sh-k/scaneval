@@ -1522,6 +1522,10 @@ def _isolated_probe_identity(identity: dict[str, Any], selected_agents: set[str]
             directory.chmod(0o700)
         _write_private_file(pi_home / "auth.json", b"{}")
         _write_private_file(pi_home / "models-store.json", b"{}")
+        probe_npm_userconfig = private / "npmrc.user"
+        probe_npm_globalconfig = private / "npmrc.global"
+        _write_private_file(probe_npm_userconfig, b"")
+        _write_private_file(probe_npm_globalconfig, b"")
         probe_shell = private / "scaneval-bash"
         _write_private_file(
             probe_shell, (_shell_shebang(identity["npm_script_shell"]["path"]) + "\nexec "
@@ -1535,8 +1539,10 @@ def _isolated_probe_identity(identity: dict[str, Any], selected_agents: set[str]
             "PI_CODING_AGENT_DIR": str(pi_home),
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_TERMINAL_PROMPT": "0", "GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1",
-            "NODE_OPTIONS": "", "npm_config_node_options": "", "npm_config_userconfig": os.devnull,
-            "npm_config_globalconfig": os.devnull, "npm_config_script_shell": identity["npm_script_shell"]["path"],
+            "NODE_OPTIONS": "", "npm_config_node_options": "",
+            "npm_config_userconfig": str(probe_npm_userconfig),
+            "npm_config_globalconfig": str(probe_npm_globalconfig),
+            "npm_config_script_shell": identity["npm_script_shell"]["path"],
             "npm_config_cache": str(npm_cache), "npm_config_offline": "true",
             "npm_config_update_notifier": "false", "NO_UPDATE_NOTIFIER": "1",
         })
@@ -2746,6 +2752,10 @@ class RunSortieAdapter(Adapter):
         pi_models_store = pi_home / "models-store.json"
         _write_private_file(pi_auth, pi_auth_bytes)
         _write_private_file(pi_models_store, pi_models_store_bytes)
+        scan_npm_userconfig = private / "npmrc.user"
+        scan_npm_globalconfig = private / "npmrc.global"
+        _write_private_file(scan_npm_userconfig, b"")
+        _write_private_file(scan_npm_globalconfig, b"")
         engine_credential = settings.credential_env["engine"]
         credential_names = {engine_credential}
 
@@ -2852,7 +2862,8 @@ class RunSortieAdapter(Adapter):
             "GIT_CONFIG_KEY_1": "core.fsmonitor", "GIT_CONFIG_VALUE_1": "false",
             # npm must not read executable-affecting user/global configuration from any home.
             "NODE_OPTIONS": "", "npm_config_node_options": "",
-            "npm_config_userconfig": os.devnull, "npm_config_globalconfig": os.devnull,
+            "npm_config_userconfig": str(scan_npm_userconfig),
+            "npm_config_globalconfig": str(scan_npm_globalconfig),
             "npm_config_script_shell": str(npm_script_wrapper), "npm_config_cache": str(npm_cache_dir),
             "npm_config_logs_max": "0", "npm_config_offline": "true",
             "npm_config_update_notifier": "false", "NO_UPDATE_NOTIFIER": "1"})
