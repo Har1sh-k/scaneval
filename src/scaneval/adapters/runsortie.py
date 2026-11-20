@@ -1161,7 +1161,8 @@ def _probe(executable: str, *args: str, env: dict[str, str] | None = None,
             if not _process_group_absent_after_reap(process.pid, 1.0):
                 return None
             if (live_descendant is None and sys.platform.startswith("linux")) \
-                    or live_descendant is True or (live_descendant is None and signalled):
+                    or live_descendant is True \
+                    or (live_descendant is None and signalled and sys.platform.startswith("linux")):
                 return None
             return output.decode("utf-8", errors="replace") if process.returncode == 0 else None
         finally:
