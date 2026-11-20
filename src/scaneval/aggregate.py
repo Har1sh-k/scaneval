@@ -331,7 +331,8 @@ def _check_identity(run: _Run, assignment: dict, row: dict, prepared: dict | Non
         raise ContractError("result.json binds to a different input than the manifest recorded")
 
 
-def _timing(bundle: Path, run: _Run, assignment: dict, result: dict) -> tuple | None:
+def _timing(bundle: Path, run: _Run, assignment: dict, result: dict,
+            system: dict | None) -> tuple[datetime | None, datetime | None, float] | None:
     """The execution record's start, finish, and wall seconds, or ``None`` when the bundle has none.
 
     A record present but naming another invocation, another status than the result, or another
@@ -350,8 +351,6 @@ def _timing(bundle: Path, run: _Run, assignment: dict, result: dict) -> tuple | 
         if record[key] != value:
             raise ContractError(f"execution.json records {key} {record[key]!r} where the assignment and "
                                 f"its result say {value!r}")
-    system = next((row for row in run.manifest["systems"]
-                   if row["system_id"] == assignment["system_id"]), None)
     if system is None or system["adapter_version"] is None:
         raise ContractError("execution.json has no resolved adapter identity in its run manifest")
     adapter = {"name": system["adapter"], "version": system["adapter_version"]}
@@ -430,7 +429,7 @@ def _observe(run: _Run, assignment: dict, row: dict | None, prepared: dict | Non
         observed = scoring.observe(plan, result, decisions)
         state = review.review_status(bundle, guard_symlinks=False)
         _check_identity(run, assignment, row, prepared, result)
-        timing = _timing(bundle, run, assignment, result)
+        timing = _timing(bundle, run, assignment, result, system)
     except ContractError:
         return failure("missing", "unusable_bundle")
     placement = tuple(sorted(((control["control_id"], tuple(control["paths"]) if "paths" in control else None)
@@ -2593,7 +2592,7 @@ def _condition_summary(report: dict) -> list[str]:
 
 
 def comparison_summary(report: dict) -> list[str]:
-    """One line per view and weighting of a comparison: the full-output recall difference."""
+    """Full-output recall differences and unusable bundle counts by view."""
     lines = [f"baseline={report['baseline']['system_id']} candidate={report['candidate']['system_id']} "
              f"configuration_differences={len(report['configuration_differences'])}"]
     lines.extend(_condition_summary(report))
@@ -2602,7 +2601,13 @@ def comparison_summary(report: dict) -> list[str]:
         lines.append(f"view {view['mode']}/{view['profile']} scope baseline={scope['baseline']} "
                      f"candidate={scope['candidate']}")
         for side in ("baseline", "candidate"):
-            lines.extend(_assigned_control_summary(view["systems"][side]["slices"][0], side))
+            system = view["systems"][side]
+            observations = system["observations"]
+            unusable = observations["failures"]["unusable_bundle"]
+            if unusable:
+                lines.append(f"  {side} has unusable bundles for {unusable}/{observations['assignments']} "
+                             "scheduled assignments")
+            lines.extend(_assigned_control_summary(system["slices"][0], side))
         for block in view["differences"][0]["detection"]:
             if block["state"] != "ok":
                 lines.append(f"  {block['weighting']} unavailable")

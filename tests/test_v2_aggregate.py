@@ -2834,7 +2834,7 @@ def test_compare_refuses_an_adapter_name_different_from_its_frozen_config(tmp_pa
 
 
 @pytest.mark.parametrize("receipt", ["matching", "missing", "wrong_name", "wrong_version"])
-def test_compare_credits_only_execution_receipts_matching_their_own_adapter(tmp_path, receipt):
+def test_compare_credits_only_execution_receipts_matching_their_own_adapter(tmp_path, capsys, receipt):
     run = write_run(tmp_path, "run-adapters", [planned("p1", targets=[target("T-p1")])],
                     systems=("baseline", "candidate"), configs={
                         "baseline": {"adapter": "first-adapter"},
@@ -2851,13 +2851,19 @@ def test_compare_credits_only_execution_receipts_matching_their_own_adapter(tmp_
         validate_document("execution-record", execution)
         path.write_text(canonical_json(execution) + "\n", encoding="utf-8")
 
-    report = aggregate.compare([run], baseline="baseline", candidate="candidate", policy=policy())
+    output = tmp_path / "comparison.json"
+    status, stdout, error = cli(capsys, "compare", str(run), "--baseline", "baseline",
+                                "--candidate", "candidate", "--output", str(output))
+    assert status == 0, error
+    report = load_document(output, "comparison-report")
 
     assert (report["baseline"]["adapter"], report["baseline"]["adapter_version"]) == ("first-adapter", "1.2.3")
     assert (report["candidate"]["adapter"], report["candidate"]["adapter_version"]) == ("second-adapter", "4.5.6")
     baseline = view(report)["systems"]["baseline"]
     candidate = view(report)["systems"]["candidate"]
     withheld = receipt in ("wrong_name", "wrong_version")
+    unusable_lines = [line.strip() for line in stdout.splitlines() if "unusable bundles" in line]
+    assert unusable_lines == (["candidate has unusable bundles for 1/1 scheduled assignments"] if withheld else [])
     assert detection(slice_of(baseline))["full_output_recall"]["value"] == 1.0
     assert detection(slice_of(candidate))["full_output_recall"]["value"] == (0.0 if withheld else 1.0)
     assert slice_of(candidate)["completion"]["value"] == (0.0 if withheld else 1.0)
