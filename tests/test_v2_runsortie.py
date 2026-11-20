@@ -330,7 +330,7 @@ def test_git_plumbing_ignores_and_workspace_guard_rejects_replace_refs(tmp_path,
     ({"root": None}, "config.root"),
     ({"root": "relative/path"}, "absolute path"),
     ({"expected_commit": "abc123"}, "40-hex"),
-    ({"expected_commit": "af8f2402469dca441f6d9efd5929ddeab5c64958"}, "supports only RunSortie commit"),
+    ({"expected_commit": "af8f2402469dca441f6d9efd5929ddeab5c64958"}, "unrecognized RunSortie commit"),
     ({"expected_version": "latest"}, "package version"),
     ({"expected_version": "0.1.1"}, "supports only RunSortie package version"),
     ({"expected_dist_tree_sha256": None}, "expected_dist_tree_sha256"),
@@ -398,11 +398,13 @@ def test_secure_v1_records_and_returns_unsupported_for_every_native_direct_agent
     assert runtime.invocations() == []
 
 
-def test_secure_v1_unsupported_bundle_validates_replays_and_advertises_no_provider_credentials(
-        tmp_path, monkeypatch):
+@pytest.mark.parametrize("commit", [SUPPORTED_RUNSORTIE_COMMIT, rs.ISOLATED_REVIEWER_RUNSORTIE_COMMIT],
+                         ids=["direct-agents", "isolated-reviewers"])
+def test_unsupported_bundle_validates_replays_and_advertises_no_provider_credentials(
+        tmp_path, monkeypatch, commit):
     config = {
         "root": str(tmp_path / "checkout-is-not-inspected"),
-        "expected_commit": SUPPORTED_RUNSORTIE_COMMIT,
+        "expected_commit": commit,
         "expected_version": SUPPORTED_RUNSORTIE_VERSION,
         "expected_dist_tree_sha256": "sha256:" + "0" * 64,
         "engine_model": "fabricated/engine",
@@ -410,10 +412,25 @@ def test_secure_v1_unsupported_bundle_validates_replays_and_advertises_no_provid
         "challenger": {"agent": "claude", "model": "challenger-route"},
         "credential_env": {"engine": "OPENROUTER_API_KEY"},
     }
+    if commit == rs.ISOLATED_REVIEWER_RUNSORTIE_COMMIT:
+        config["challenger"]["agent"] = "codex"
+
+        def legacy_probe(*_args, **_kwargs):
+            pytest.fail("the isolated-reviewer revision must not use the legacy launch contract")
+
+        monkeypatch.setattr(rs, "_direct_agent_capability", legacy_probe)
+    monkeypatch.setattr(rs, "runtime_identity",
+                        lambda *_args, **_kwargs: pytest.fail("refusal must precede runtime probing"))
+    monkeypatch.setattr(rs, "run_command",
+                        lambda *_args, **_kwargs: pytest.fail("unsupported capability must never launch a command"))
     adapter = RunSortieAdapter()
     spec = SystemSpec("runsortie-unsupported", "runsortie", config)
     preparation = adapter.prepare(spec, tmp_path / "cache")
     assert preparation["runnable"] is False
+    if commit == rs.ISOLATED_REVIEWER_RUNSORTIE_COMMIT:
+        assert preparation["capability"]["requested_commit"] == commit
+        assert preparation["capability"]["selected_agents"] == ["codex"]
+        assert "Fieldglass" in preparation["capability"]["reasons"][0]
     bundle = run_invocation(
         prepared=_prepared(tmp_path), adapter=adapter, spec=spec, preparation=preparation,
         out_dir=tmp_path / "out", run_id="run-unsupported", timeout_seconds=30,
@@ -421,6 +438,9 @@ def test_secure_v1_unsupported_bundle_validates_replays_and_advertises_no_provid
     result = load_document(bundle / "result.json", "scan-result")
     execution = load_document(bundle / "execution.json", "execution-record")
     assert result["status"] == execution["status"] == "unsupported"
+    assert result["error"]["code"] == "unsupported_runtime_boundary"
+    if commit == rs.ISOLATED_REVIEWER_RUNSORTIE_COMMIT:
+        assert preparation["capability"]["reasons"][0] in result["error"]["message"]
     assert result["examined_nothing"] is True and result["bundles_resolved"] is False
     assert execution["command"] == [] and execution["exit_code"] is None
     assert execution["raw_artifacts"] == []
@@ -663,7 +683,7 @@ def test_preparation_refuses_an_unpinned_dirty_unbuilt_or_uninstalled_runtime(ru
 
     with pytest.raises(AdapterError, match="does not exist"):
         prepare(root=str(runtime.tmp / "missing"))
-    with pytest.raises(AdapterError, match="supports only RunSortie commit"):
+    with pytest.raises(AdapterError, match="unrecognized RunSortie commit"):
         prepare(expected_commit="0" * 40)
     with pytest.raises(AdapterError, match="supports only RunSortie package version"):
         prepare(expected_version="9.9.9")
