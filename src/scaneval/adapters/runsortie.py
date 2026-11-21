@@ -102,7 +102,7 @@ _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
 CREDENTIAL_ENV_ALLOWLIST = frozenset({
     "AI_GATEWAY_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN",
     "ANT_LING_API_KEY", "AZURE_OPENAI_API_KEY", "BASETEN_API_KEY", "CEREBRAS_API_KEY",
-    "CLOUDFLARE_API_KEY", "COPILOT_GITHUB_TOKEN", "DEEPSEEK_API_KEY", "FIREWORKS_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN", "CLOUDFLARE_API_KEY", "COPILOT_GITHUB_TOKEN", "DEEPSEEK_API_KEY", "FIREWORKS_API_KEY",
     "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_CLOUD_API_KEY", "GROQ_API_KEY", "HF_TOKEN",
     "KIMI_API_KEY", "META_API_KEY", "MINIMAX_API_KEY", "MINIMAX_CN_API_KEY", "MISTRAL_API_KEY",
     "MOONSHOT_API_KEY", "NVIDIA_API_KEY", "OPENCODE_API_KEY", "OPENAI_API_KEY",
@@ -143,6 +143,12 @@ MAX_DEPENDENCY_SYMLINK_HOPS = 64
 MAX_NPM_PACKAGE_ANCESTORS = 8
 PI_ISOLATION_FLAGS = ("--no-tools", "--no-extensions", "--no-mcp", "--no-skills",
                       "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve")
+# Fieldglass's claude: driver runs `claude -p ... --model M --effort E` with no tool flags. The engine-only
+# wrapper puts these first: an empty --tools disables every built-in tool, --setting-sources user loads
+# only the (private, empty) HOME settings, and --strict-mcp-config ignores every MCP configuration.
+# --bare is deliberately absent: it would restrict authentication to ANTHROPIC_API_KEY.
+CLAUDE_ENGINE_TOOL_POLICY_ARGUMENTS = ("--tools", "", "--setting-sources", "user", "--strict-mcp-config")
+CLAUDE_ENGINE_HELP_FLAGS = ("--tools", "--setting-sources", "--strict-mcp-config")
 NPM_SCRIPT_SHELL = Path("/bin/sh")
 AGENT_SHELL = Path("/bin/bash")
 GIT_TIMEOUT_SECONDS = 60
@@ -854,10 +860,8 @@ def read_settings(config: dict) -> Settings:
     engine_model = config.get("engine_model")
     if not isinstance(engine_model, str) or not _ROUTE.fullmatch(engine_model):
         raise AdapterError("config.engine_model (the Fieldglass --llm-model route) is required")
-    if engine_model.startswith("claude:"):
-        raise AdapterError(
-            "config.engine_model may not select Fieldglass's direct claude: driver: the pinned invocation "
-            "does not expose an enforceable empty-tool policy; v1 supports the hardened Pi engine route only")
+    if engine_model.startswith("claude:") and len(engine_model) <= len("claude:"):
+        raise AdapterError("config.engine_model claude: route must name a model (claude:<model>)")
     pi_model = engine_model[3:] if engine_model.startswith("pi:") and len(engine_model) > 3 else engine_model
     if pi_model == "openai-codex" or pi_model.startswith("openai-codex/"):
         raise AdapterError(
@@ -888,15 +892,25 @@ def read_settings(config: dict) -> Settings:
                     severity, _work_budget(config.get("work_budget")), dict(credentials))
 
 
+def _engine_driver(settings: Settings) -> str:
+    """The Fieldglass model driver the pinned route parser selects for ``engine_model``."""
+    engine = settings.engine_model
+    return "claude" if engine.startswith("claude:") and len(engine) > len("claude:") else "pi"
+
+
 def _check_system_model(spec: SystemSpec, settings: Settings) -> None:
     """Refuse a system whose declared model_id is not the engine route RunSortie actually runs."""
     if not spec.model_id:
         return
     engine = settings.engine_model
-    base = engine[3:] if engine.startswith("pi:") and len(engine) > 3 else engine
-    bare = base.partition("/")[2]
-    # model_id is a free label: the route, with or without ``pi:``, or the model id after the provider.
-    routes = {engine, base, f"pi:{base}"} | ({bare, f"pi:{bare}"} if bare else set())
+    if _engine_driver(settings) == "claude":
+        # Fieldglass's claude: driver passes everything after the prefix to ``claude --model``.
+        routes = {engine, engine[len("claude:"):]}
+    else:
+        base = engine[3:] if engine.startswith("pi:") and len(engine) > 3 else engine
+        bare = base.partition("/")[2]
+        # model_id is a free label: the route, with or without ``pi:``, or the model id after the provider.
+        routes = {engine, base, f"pi:{base}"} | ({bare, f"pi:{bare}"} if bare else set())
     if spec.model_id not in routes:
         raise AdapterError(
             f"system model_id {spec.model_id!r} differs from config.engine_model {engine!r}; results would be "
@@ -1583,22 +1597,36 @@ def _isolated_probe_identity(identity: dict[str, Any], selected_agents: set[str]
                 raise AdapterError(f"the isolated {command} probe failed")
             return value
 
+        engine_driver = identity["engine_driver"]["driver"]
+        engine_version_key = "pi" if engine_driver == "pi" else "claude-engine"
         versions = {
             "node": output(identity["node"]["path"], "--version").strip().splitlines()[0][:200],
             "npm": output(identity["npm"]["path"], "--version").strip().splitlines()[0][:200],
             "git": output(identity["git"]["path"], "--version").strip().splitlines()[0][:200],
-            "pi": output(identity["engine_driver"]["realpath"], "--version").strip().splitlines()[0][:200],
+            engine_version_key: output(identity["engine_driver"]["realpath"], "--version").strip().splitlines()[0][:200],
         }
         for agent in sorted(selected_agents):
             versions[agent] = output(identity["agents"][agent]["realpath"], "--version").strip().splitlines()[0][:200]
-        pi_help = output(identity["engine_driver"]["realpath"], "--help")
-        pi_flags = {flag: flag in pi_help for flag in PI_ISOLATION_FLAGS}
-        if not all(pi_flags.values()):
-            missing = ", ".join(flag for flag, present in pi_flags.items() if not present)
-            raise AdapterError(f"the selected Pi CLI does not expose required isolation flag(s): {missing}")
+        engine_help = output(identity["engine_driver"]["realpath"], "--help")
+        if engine_driver == "pi":
+            pi_flags = {flag: flag in engine_help for flag in PI_ISOLATION_FLAGS}
+            if not all(pi_flags.values()):
+                missing = ", ".join(flag for flag, present in pi_flags.items() if not present)
+                raise AdapterError(f"the selected Pi CLI does not expose required isolation flag(s): {missing}")
+            engine_capability: dict[str, Any] = {"pi": {"allIsolationFlags": True, "flags": pi_flags}}
+        elif engine_driver == "claude":
+            claude_flags = {flag: re.search(r"(?<![\w-])" + re.escape(flag) + r"(?![\w-])", engine_help) is not None
+                            for flag in CLAUDE_ENGINE_HELP_FLAGS}
+            if not all(claude_flags.values()):
+                missing = ", ".join(flag for flag, present in claude_flags.items() if not present)
+                raise AdapterError(
+                    f"the selected Claude Code CLI does not expose required engine tool-policy flag(s): {missing}")
+            engine_capability = {"claudeEngine": {"allToolPolicyFlags": True, "flags": claude_flags}}
+        else:
+            raise AdapterError(f"unsupported Fieldglass engine driver {engine_driver!r}")
         capabilities: dict[str, Any] = {
             "probeEnvironment": "invocation-private-empty-home-with-no-credentials",
-            "pi": {"allIsolationFlags": True, "flags": pi_flags},
+            **engine_capability,
             "directAgentSecurityBoundaryAttested": False,
         }
         capabilities["agents"] = {
@@ -1645,7 +1673,7 @@ def runtime_identity(settings: Settings, *, probe_versions: bool, deadline: Dead
     dist_identity = _dist_identity(root, deadline)
     if dist_identity["tree_sha256"] != settings.expected_dist_tree_sha256:
         raise AdapterError("the observed dist/ tree digest does not equal config.expected_dist_tree_sha256")
-    engine_driver = "claude" if settings.engine_model.startswith("claude:") and len(settings.engine_model) > 7 else "pi"
+    engine_driver = _engine_driver(settings)
     root_dependencies = _installed_tree_identity(root / "node_modules", "runsortie/node_modules", deadline)
     identity: dict[str, Any] = {
         "runsortie": {"root": str(root), "configured_root": settings.configured_root, "git_head": git_head,
@@ -1671,9 +1699,11 @@ def runtime_identity(settings: Settings, *, probe_versions: bool, deadline: Dead
         "agents": {agent: _npm_launcher_identity(AGENT_BINARIES[agent], deadline, runtime_path=runtime_path)
                    for agent in sorted(selected_agents)},
     }
-    pinned_identities = {"pi": identity["engine_driver"],
-                         **{agent: identity["agents"][agent] for agent in selected_agents}}
-    for role, selected in pinned_identities.items():
+    # The engine is pinned by its own driver's package (Pi, or the same Claude Code the agents use),
+    # checked separately from the agents even when both resolve ``claude``.
+    pinned_identities = [(engine_driver, identity["engine_driver"]),
+                         *((agent, identity["agents"][agent]) for agent in sorted(selected_agents))]
+    for role, selected in pinned_identities:
         expected_name, expected_version = CLI_PACKAGE_PINS[role]
         if (selected.get("package_name"), selected.get("package_version")) != (expected_name, expected_version):
             raise AdapterError(
@@ -1689,7 +1719,7 @@ def runtime_identity(settings: Settings, *, probe_versions: bool, deadline: Dead
             raise AdapterError("RunSortie and its bundled Fieldglass require a readable Node.js version >=22")
         identity["npm"]["version"] = probes["versions"]["npm"]
         identity["git"]["version"] = probes["versions"]["git"]
-        identity["engine_driver"]["version"] = probes["versions"]["pi"]
+        identity["engine_driver"]["version"] = probes["versions"]["pi" if engine_driver == "pi" else "claude-engine"]
         for agent in selected_agents:
             identity["agents"][agent]["version"] = probes["versions"][agent]
         identity["probe_capabilities"] = probes["capabilities"]
@@ -2800,8 +2830,15 @@ class RunSortieAdapter(Adapter):
         xdg_state, xdg_data = home_dir / ".local" / "state", home_dir / ".local" / "share"
         pi_home = home_dir / ".pi" / "agent"
         isolated_bin = private / "isolated-bin"
+        engine_driver = _engine_driver(settings)
+        if (preparation.get("engine_driver") or {}).get("driver") != engine_driver:
+            raise AdapterError("the prepared engine driver does not match config.engine_model")
+        claude_engine = engine_driver == "claude"
+        # Engine-only directory: never on runtime_path, so RunSortie and its direct agents cannot resolve it.
+        # Only the Fieldglass tsx launch wrapper prepends it, for the engine process tree.
+        engine_bin = private / "engine-bin"
         for directory in (state_dir, cache_dir, npm_cache_dir, home_dir, private_tmp, xdg_config, xdg_cache,
-                          xdg_state, xdg_data, pi_home, isolated_bin):
+                          xdg_state, xdg_data, pi_home, isolated_bin, *((engine_bin,) if claude_engine else ())):
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
             directory.chmod(0o700)
         state_guard, cache_guard = _capture_root(state_dir), _capture_root(cache_dir)
@@ -2827,15 +2864,23 @@ class RunSortieAdapter(Adapter):
                     "cached operator login state is never copied")
             return value
 
-        required_secret(engine_credential, "Pi engine")
+        required_secret(engine_credential, "Claude Code engine" if claude_engine else "Pi engine")
 
         wrapper_specs: list[tuple[str, Path, bytes]] = []
         npm_script_shell = preparation["npm_script_shell"]["path"]
-        pi_wrapper = isolated_bin / "pi"
-        pi_wrapper_bytes = _credential_wrapper(
-            preparation["engine_driver"]["realpath"], shell=npm_script_shell, keep=frozenset({engine_credential}),
-            arguments=PI_ISOLATION_FLAGS)
-        wrapper_specs.append(("Pi isolation wrapper", pi_wrapper, pi_wrapper_bytes))
+        if claude_engine:
+            claude_engine_wrapper = engine_bin / "claude"
+            claude_engine_wrapper_bytes = _credential_wrapper(
+                preparation["engine_driver"]["realpath"], shell=npm_script_shell,
+                keep=frozenset({engine_credential}), arguments=CLAUDE_ENGINE_TOOL_POLICY_ARGUMENTS)
+            wrapper_specs.append(("Claude Code engine tool-policy wrapper", claude_engine_wrapper,
+                                  claude_engine_wrapper_bytes))
+        else:
+            pi_wrapper = isolated_bin / "pi"
+            pi_wrapper_bytes = _credential_wrapper(
+                preparation["engine_driver"]["realpath"], shell=npm_script_shell, keep=frozenset({engine_credential}),
+                arguments=PI_ISOLATION_FLAGS)
+            wrapper_specs.append(("Pi isolation wrapper", pi_wrapper, pi_wrapper_bytes))
         runtime_path = str(isolated_bin) + os.pathsep + preparation["runtime_path"]
         npm_script_wrapper = isolated_bin / "runsortie-npm-script-shell"
         npm_script_wrapper_bytes = (
@@ -2845,9 +2890,17 @@ class RunSortieAdapter(Adapter):
             + shlex.quote(npm_script_shell) + ' "$@"\n').encode("utf-8")
         wrapper_specs.append(("npm lifecycle PATH-reset wrapper", npm_script_wrapper, npm_script_wrapper_bytes))
         tsx_wrapper = isolated_bin / "tsx"
-        tsx_wrapper_bytes = _credential_wrapper(
-            preparation["fieldglass"]["tsx_launcher"]["realpath"], shell=npm_script_shell,
-            keep=frozenset({engine_credential}))
+        if claude_engine:
+            # The engine (and only it) sees the tool-policy claude first; PATH is set absolutely, not inherited.
+            tsx_wrapper_bytes = (
+                _shell_shebang(npm_script_shell) + "\nunset "
+                + " ".join(sorted(CREDENTIAL_ENV_ALLOWLIST - {engine_credential}))
+                + "\nPATH=" + shlex.quote(str(engine_bin) + os.pathsep + runtime_path) + "\nexport PATH\nexec "
+                + shlex.quote(preparation["fieldglass"]["tsx_launcher"]["realpath"]) + ' "$@"\n').encode("utf-8")
+        else:
+            tsx_wrapper_bytes = _credential_wrapper(
+                preparation["fieldglass"]["tsx_launcher"]["realpath"], shell=npm_script_shell,
+                keep=frozenset({engine_credential}))
         wrapper_specs.append(("Fieldglass tsx absolute-launch wrapper", tsx_wrapper, tsx_wrapper_bytes))
         agent_shell_wrapper = isolated_bin / "scaneval-bash"
         agent_shell_wrapper_bytes = (
@@ -2881,6 +2934,8 @@ class RunSortieAdapter(Adapter):
         register("runsortie-primary-prompt", raw / "runsortie-primary-prompt.txt", primary_prompt_bytes)
         wrapper_artifacts = {
             "Pi isolation wrapper": ("runsortie-pi-wrapper", raw / "runsortie-pi-wrapper.sh"),
+            "Claude Code engine tool-policy wrapper": (
+                "runsortie-claude-engine-wrapper", raw / "runsortie-claude-engine-wrapper.sh"),
             "npm lifecycle PATH-reset wrapper": (
                 "runsortie-npm-script-shell-wrapper", raw / "runsortie-npm-script-shell-wrapper.sh"),
             "Fieldglass tsx absolute-launch wrapper": (
@@ -2891,7 +2946,7 @@ class RunSortieAdapter(Adapter):
         for label, _wrapper_path, wrapper_bytes in wrapper_specs:
             artifact_id, artifact_path = wrapper_artifacts[label]
             register(artifact_id, artifact_path, wrapper_bytes)
-        isolation_record = (json.dumps({
+        isolation: dict[str, Any] = {
             "version": 1, "syntheticNativePathOnly": True,
             "productionDirectAgentCapability": "unsupported",
             "directAgentSecurityBoundaryAttested": False,
@@ -2906,7 +2961,18 @@ class RunSortieAdapter(Adapter):
             },
             "piIsolationFlags": list(PI_ISOLATION_FLAGS),
             "roleCredentialRetention": {"pi-engine": [engine_credential], "direct-agent": []},
-        }, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        }
+        if claude_engine:
+            del isolation["piIsolationFlags"]
+            isolation["engineDriver"] = "claude"
+            isolation["claudeEngineToolPolicyArguments"] = list(CLAUDE_ENGINE_TOOL_POLICY_ARGUMENTS)
+            isolation["engineOnlyPath"] = {
+                "directory": str(engine_bin.relative_to(private)),
+                "prependedOnlyBy": "Fieldglass tsx absolute-launch wrapper",
+                "onRunSortieAndDirectAgentPath": False,
+            }
+            isolation["roleCredentialRetention"] = {"claude-engine": [engine_credential], "direct-agent": []}
+        isolation_record = (json.dumps(isolation, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
         register("runsortie-agent-isolation", raw / "runsortie-agent-isolation.json", isolation_record)
         env = build_env(tuple(sorted(credential_names)), {
             "PATH": runtime_path, "HOME": str(home_dir), "TMPDIR": str(private_tmp),

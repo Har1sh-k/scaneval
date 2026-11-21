@@ -159,8 +159,21 @@ class Runtime:
             self.agent_packages[agent] = package_root
             (self.bin / agent).symlink_to(package_root / launcher_relative)
         agent_fixture = r'''#!/bin/sh
+for argument in "$@"; do
+  case "$argument" in
+    --fixture-env-output=*)
+      output=${argument#*=}
+      env | LC_ALL=C sort > "$output"
+      printf '%s\n' "$@" > "$output.args"
+      exit 0
+      ;;
+  esac
+done
 if [ "$1" = "--version" ]; then
   echo "2.1.325 (Claude Code)"
+fi
+if [ "$1" = "--help" ]; then
+  echo "--tools <tools...> --setting-sources <sources> --strict-mcp-config"
 fi
 exit 0
 '''
@@ -365,7 +378,7 @@ def test_git_plumbing_ignores_and_workspace_guard_rejects_replace_refs(tmp_path,
     ({"primary": {"agent": "claude", "model": "m", "token": "x"}}, "nothing else"),
     ({"challenger": {"agent": "unknown", "model": "other"}}, "challenger.agent"),
     ({"challenger": {"agent": "claude", "model": "primary-model"}}, "must differ"),
-    ({"engine_model": "claude:engine-model"}, "hardened Pi engine route only"),
+    ({"engine_model": "claude:"}, "must name a model"),
     ({"engine_model": "openai-codex/gpt-5.1-codex"}, "openai-codex provider"),
     ({"engine_model": "pi:openai-codex/gpt-5.1-codex"}, "openai-codex provider"),
     ({"minimum_severity": "critical"}, "minimum_severity"),
@@ -390,6 +403,22 @@ def test_configuration_is_strict_and_never_holds_an_inline_secret(runtime, chang
 def test_configuration_accepts_only_named_provider_secrets_without_values(runtime):
     settings = read_settings(runtime.config(credential_env={"engine": "OPENROUTER_API_KEY"}))
     assert settings.credential_env == {"engine": "OPENROUTER_API_KEY"}
+
+
+def test_configuration_accepts_a_claude_engine_route_with_a_claude_code_oauth_token(runtime):
+    settings = read_settings(runtime.config(engine_model="claude:claude-opus-5-5",
+                                            credential_env={"engine": "CLAUDE_CODE_OAUTH_TOKEN"}))
+    assert settings.engine_model == "claude:claude-opus-5-5"
+    assert settings.credential_env == {"engine": "CLAUDE_CODE_OAUTH_TOKEN"}
+    assert rs._engine_driver(settings) == "claude"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in rs.CREDENTIAL_ENV_ALLOWLIST
+    for label in ("claude:claude-opus-5-5", "claude-opus-5-5"):
+        rs._check_system_model(SystemSpec("s", "runsortie", {}, model_id=label), settings)
+    for label in ("pi:claude-opus-5-5", "anthropic/claude-opus-5-5", "claude:claude-sonnet-5-5", "claude"):
+        with pytest.raises(AdapterError, match="differs from config.engine_model"):
+            rs._check_system_model(SystemSpec("s", "runsortie", {}, model_id=label), settings)
+    # The Pi route still names Pi as the engine driver.
+    assert rs._engine_driver(read_settings(runtime.config(engine_model="pi:claude-opus-5-5"))) == "pi"
 
 
 @pytest.mark.parametrize(("primary_agent", "challenger_agent"), list(itertools.product(rs.AGENTS, repeat=2)))
@@ -549,6 +578,31 @@ exit 0
         RunSortieAdapter().prepare(SystemSpec("r", "runsortie", runtime.config()), runtime.tmp / "cache")
 
 
+@NEEDS_WAITID
+def test_preparation_pins_a_claude_engine_and_refuses_one_without_every_tool_policy_flag(runtime):
+    config = runtime.config(engine_model="claude:engine-model", credential_env={"engine": "CLAUDE_CODE_OAUTH_TOKEN"})
+    preparation = RunSortieAdapter().prepare(SystemSpec("r", "runsortie", config), runtime.tmp / "cache")
+    assert preparation["engine_driver"]["driver"] == "claude"
+    assert preparation["engine_driver"]["package_name"] == "@anthropic-ai/claude-code"
+    assert preparation["engine_driver"]["package_version"] == rs.CLAUDE_BARE_PACKAGE_VERSION
+    assert preparation["engine_driver"]["realpath"] == str((runtime.bin / "claude").resolve())
+    assert preparation["engine_driver"]["version"] == "2.1.325 (Claude Code)"
+    assert preparation["probe_capabilities"]["claudeEngine"]["allToolPolicyFlags"] is True
+    assert "pi" not in preparation["probe_capabilities"], "a claude engine does not need Pi"
+    _executable(runtime.agent_packages["claude"] / "bin" / "claude.exe", r'''#!/bin/sh
+if [ "$1" = "--version" ]; then echo "2.1.325 (Claude Code)"; fi
+if [ "$1" = "--help" ]; then echo "--tools <tools...> --disallowedTools --setting-sources-extra"; fi
+exit 0
+''')
+    with pytest.raises(AdapterError, match=r"engine tool-policy flag\(s\): --setting-sources, --strict-mcp-config"):
+        RunSortieAdapter().prepare(SystemSpec("r", "runsortie", config), runtime.tmp / "cache")
+    # The Pi route never probes the agent claude's engine flags.
+    pi_preparation = RunSortieAdapter().prepare(SystemSpec("r", "runsortie", runtime.config()), runtime.tmp / "cache")
+    assert pi_preparation["engine_driver"]["driver"] == "pi"
+    assert pi_preparation["probe_capabilities"]["pi"]["allIsolationFlags"] is True
+    assert "claudeEngine" not in pi_preparation["probe_capabilities"]
+
+
 def test_dist_identity_refuses_an_external_module_symlink(runtime):
     outside = runtime.tmp / "outside-runtime.js"
     _write(outside, "export const redirected = true;\n")
@@ -687,7 +741,7 @@ def test_preparation_rejects_path_entries_whose_meaning_depends_on_cwd(runtime, 
 
 
 @pytest.mark.parametrize("route,driver", [
-    ("pi:model-a", "pi"), ("unknown:model-a", "pi"),
+    ("pi:model-a", "pi"), ("unknown:model-a", "pi"), ("claude:model-a", "claude"),
 ])
 @NEEDS_WAITID
 def test_engine_driver_identity_uses_the_pinned_fieldglass_route_parser(runtime, route, driver):
@@ -905,7 +959,11 @@ def test_a_complete_run_succeeds_with_claims_and_separate_disposition_metadata(r
         wrapper = (bundle / artifacts[name]).read_text(encoding="utf-8")
         assert wrapper.startswith("#!" + str(npm_shell_target) + "\n")
         assert "#!/bin/sh" not in wrapper
+    assert "runsortie-claude-engine-wrapper" not in artifacts, "the Pi route builds no claude engine wrapper"
+    assert "engine-bin" not in (bundle / artifacts["runsortie-tsx-wrapper"]).read_text(encoding="utf-8")
     isolation = json.loads((bundle / artifacts["runsortie-agent-isolation"]).read_text(encoding="utf-8"))
+    assert isolation["piIsolationFlags"] == list(rs.PI_ISOLATION_FLAGS) and "engineDriver" not in isolation
+    assert isolation["roleCredentialRetention"] == {"pi-engine": ["OPENROUTER_API_KEY"], "direct-agent": []}
     assert isolation["syntheticNativePathOnly"] is True
     assert isolation["productionDirectAgentCapability"] == "unsupported"
     assert isolation["directAgentSecurityBoundaryAttested"] is False
@@ -927,6 +985,78 @@ def test_a_complete_run_succeeds_with_claims_and_separate_disposition_metadata(r
     plan, decisions = _quiet_review(result)
     controls = score(plan, result, decisions)["metrics"]["controls"]["capability_safe"]
     assert controls["completed"] == 1, "a fully established run can earn quiet credit"
+
+
+def test_a_claude_engine_run_gives_only_the_engine_the_empty_tool_policy_wrapper(runtime, monkeypatch):
+    # Stand in for tsx running Fieldglass: exec the named tool from this process's own PATH, exactly as
+    # the claude: model driver resolves ``claude``. node_modules is ignored, so the checkout stays clean.
+    _executable(runtime.root / "fieldglass" / "node_modules" / "tsx" / "dist" / "cli.mjs",
+                '#!/bin/sh\ntool=$1\nshift\nexec "$tool" "$@"\n')
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "subscription-oauth-token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "exhausted-api-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "other-provider-key")
+    logged = ["PATH", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+    result, execution, bundle = _run(runtime, {
+        "engine": {"findings": FINDINGS},
+        "probe_role_wrappers": ["claude"], "probe_engine_tools": ["claude"],
+        "wrapper_log_env": logged, "log_env": logged,
+    }, config=runtime.config(engine_model="claude:engine-model",
+                             credential_env={"engine": "CLAUDE_CODE_OAUTH_TOKEN"}))
+    assert result["status"] == "success", result.get("error")
+    [call] = runtime.invocations()
+
+    # The engine's claude receives the empty-tool policy before the caller's own arguments.
+    engine_argv = call["engine_tool_argv"]["claude"]
+    assert engine_argv[:5] == ["--tools", "", "--setting-sources", "user", "--strict-mcp-config"]
+    assert len(engine_argv) == 6 and engine_argv[5].startswith("--fixture-env-output=")
+    engine_env = call["engine_tool_env"]["claude"]
+    assert engine_env["CLAUDE_CODE_OAUTH_TOKEN"] == "subscription-oauth-token"
+    assert engine_env["ANTHROPIC_API_KEY"] is None and engine_env["OPENAI_API_KEY"] is None
+    runsortie_path = call["env"]["PATH"].split(os.pathsep)
+    engine_path = engine_env["PATH"].split(os.pathsep)
+    assert Path(engine_path[0]).name == "engine-bin" and engine_path[1:] == runsortie_path
+
+    # RunSortie and the primary/challenger agents resolve the unwrapped claude, with no policy injected.
+    assert all(Path(entry).name != "engine-bin" for entry in runsortie_path)
+    agent_argv = call["role_wrapper_argv"]["claude"]
+    assert len(agent_argv) == 1 and agent_argv[0].startswith("--fixture-env-output=")
+    assert not {"--tools", "--setting-sources", "--strict-mcp-config"} & set(agent_argv)
+    assert call["env"]["ANTHROPIC_API_KEY"] is None and call["env"]["OPENAI_API_KEY"] is None
+    assert call["resolved_pi"] is None or "isolated-bin" not in Path(call["resolved_pi"]).parts, \
+        "a claude engine installs no Pi wrapper"
+
+    artifacts = _artifacts(execution)
+    assert "runsortie-pi-wrapper" not in artifacts
+    engine_wrapper = (bundle / artifacts["runsortie-claude-engine-wrapper"]).read_bytes()
+    claude_real = str((runtime.bin / "claude").resolve())
+    assert engine_wrapper.endswith(("exec " + shlex.quote(claude_real)
+                                    + " --tools '' --setting-sources user --strict-mcp-config \"$@\"\n").encode())
+    [unset_line] = [line for line in engine_wrapper.decode().splitlines() if line.startswith("unset ")]
+    assert "ANTHROPIC_API_KEY" in unset_line.split() and "CLAUDE_CODE_OAUTH_TOKEN" not in unset_line.split()
+    tsx_wrapper = (bundle / artifacts["runsortie-tsx-wrapper"]).read_text(encoding="utf-8")
+    assert "engine-bin" in tsx_wrapper
+    for name in ("runsortie-npm-script-shell-wrapper", "runsortie-agent-shell-wrapper"):
+        assert "engine-bin" not in (bundle / artifacts[name]).read_text(encoding="utf-8")
+    isolation = json.loads((bundle / artifacts["runsortie-agent-isolation"]).read_text(encoding="utf-8"))
+    assert isolation["engineDriver"] == "claude" and "piIsolationFlags" not in isolation
+    assert isolation["claudeEngineToolPolicyArguments"] == list(rs.CLAUDE_ENGINE_TOOL_POLICY_ARGUMENTS)
+    assert isolation["engineOnlyPath"]["onRunSortieAndDirectAgentPath"] is False
+    assert isolation["roleCredentialRetention"] == {"claude-engine": ["CLAUDE_CODE_OAUTH_TOKEN"], "direct-agent": []}
+    assert isolation["credentialEnvironmentRoles"] == {"engine": "CLAUDE_CODE_OAUTH_TOKEN"}
+    assert isolation["immutablePolicy"]["Claude Code engine tool-policy wrapper"] == {
+        "mode": "0o700", "sha256": "sha256:" + hashlib.sha256(engine_wrapper).hexdigest()}
+    for path in bundle.rglob("*"):
+        if path.is_file() and not path.is_symlink():
+            assert b"subscription-oauth-token" not in path.read_bytes(), path
+
+
+def test_a_claude_engine_scan_requires_its_named_token(runtime, monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    result, _execution, _bundle = _run(runtime, {"engine": {"findings": FINDINGS}}, config=runtime.config(
+        engine_model="claude:engine-model", credential_env={"engine": "CLAUDE_CODE_OAUTH_TOKEN"}))
+    assert result["status"] != "success"
+    assert "Claude Code engine requires a nonempty, single-line CLAUDE_CODE_OAUTH_TOKEN" in result["error"]["message"]
+    assert runtime.invocations() == []
 
 
 @pytest.mark.parametrize("operation,expected_state", [
