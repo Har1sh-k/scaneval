@@ -99,7 +99,7 @@ def primary(args: list[str]) -> int:
 
 def challenger(args: list[str], verdict: str = "CONFIRMED VULNERABLE") -> int:
     if args[:1] == ["--version"]:
-        print("2.1.310 (Claude Code)")
+        print("2.1.325 (Claude Code)")
         return 0
     if args[:2] == ["auth", "status"]:
         print(json.dumps({"loggedIn": True, "authMethod": "api_key", "apiProvider": "firstParty",
@@ -144,7 +144,7 @@ def main(argv: list[str]) -> int:
         return 0
     if tool in ("claude", "claude-inconclusive"):
         if args[:1] == ["--version"]:
-            print("2.1.310 (Claude Code)")
+            print("2.1.325 (Claude Code)")
             return 0
         if args[:1] == ["--help"]:
             print("--bare skip hooks, background prefetches, keychain reads; Anthropic auth is strictly ANTHROPIC_API_KEY")

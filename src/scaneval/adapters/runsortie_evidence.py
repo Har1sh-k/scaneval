@@ -1593,6 +1593,7 @@ def read_review_journal(data: bytes | None, *, evaluated: str, target: str, pack
     if failure or not isinstance(value, dict) or set(value) != top_keys or value.get("version") != 1:
         return ReviewJournal("invalid", ("the review-work journal is not a native version-1 record",))
     issues: list[str] = []
+    notices: list[str] = []
     binding = {"target": target, "sourceHead": evaluated, "protocolVersion": 1}
     if value.get("binding") != binding or value.get("bindingHash") != _stable_hash(binding):
         issues.append("the review-work journal binding does not name this target and evaluated head")
@@ -1787,6 +1788,16 @@ def read_review_journal(data: bytes | None, *, evaluated: str, target: str, pack
             remaining.remove(match)
             expected_work_id = _stable_hash({"stage": "challenger",
                                              "logicalScope": f"{group.get('rootCauseKey')}:{match['inputHash']}"})
+            attempts = match.get("attempts", [])
+            if (match.get("state") == "failed" and group.get("verdict") == "INCONCLUSIVE"
+                    and match.get("workId") == expected_work_id and "output" not in match
+                    and "challengerSecurityArgument" not in group and attempts
+                    and all(isinstance(attempt, dict) and attempt.get("status") == "failed" for attempt in attempts)):
+                # A failed challenger the wrapper fail-closed as INCONCLUSIVE is consistent; say why it failed.
+                failure_kind = attempts[-1].get("failureKind")
+                notices.append("challenger failed: "
+                               + (_js_trim(failure_kind)[:300] if _text(failure_kind) else "no failure kind recorded"))
+                continue
             output = match.get("output")
             raw_argument = output.get("securityArgument") if isinstance(output, dict) else None
             checked_argument = _validate_argument(
@@ -1816,7 +1827,8 @@ def read_review_journal(data: bytes | None, *, evaluated: str, target: str, pack
     if verification.state == "complete" and value.get("status") != "complete":
         issues.append("a complete verification does not have a complete review-work journal")
     found = _issues(issues)
-    return ReviewJournal("invalid" if found else "valid", found)
+    # Notices explain a consistent but unmet review (a failed challenger); they never invalidate the journal.
+    return ReviewJournal("invalid" if found else "valid", _issues([*found, *notices]))
 
 
 # --- work budget -----------------------------------------------------------------------------
@@ -2143,6 +2155,79 @@ def reconcile_findings(records: list[FindingMeta], *, minimum_severity: str, ver
     return Reconciliation(frozenset(keep), tuple(entries), tuple(losses))
 
 
+# --- provider failure causes -----------------------------------------------------------------
+
+ALL_LLM_CALLS_FAILED = "all_llm_calls_failed"
+MAX_MODEL_FAILURE_TEXTS = 64
+MAX_MODEL_FAILURE_TEXT_CHARS = 500
+_PROVIDER_CAUSE_ORDER = ("billing", "authentication", "permission", "rate_limit", "other")
+
+
+def all_llm_calls_failed(reasons: Iterable[str]) -> bool:
+    """Whether native acceptance reasons record that every model call failed."""
+    return any(reason == ALL_LLM_CALLS_FAILED or reason.startswith(ALL_LLM_CALLS_FAILED + ":")
+               for reason in reasons if isinstance(reason, str))
+
+
+def classify_provider_failure(text: str) -> tuple[str, str]:
+    """``(cause, label)`` for one native model-call failure text; cause is one of
+    billing, authentication, permission, rate_limit or other."""
+    lowered = text.lower()
+    if "credit balance" in lowered:
+        return "billing", "provider billing (credit balance too low)"
+    if re.search(r"\b402\b", lowered) or any(word in lowered for word in (
+            "billing", "insufficient_quota", "payment required")):
+        return "billing", "provider billing"
+    if re.search(r"\b401\b", lowered) or any(word in lowered for word in (
+            "authentication_error", "invalid x-api-key", "invalid api key", "unauthorized")):
+        return "authentication", "provider authentication (401)"
+    if re.search(r"\b403\b", lowered) or any(word in lowered for word in ("permission_error", "forbidden")):
+        return "permission", "provider permission (403)"
+    if re.search(r"\b429\b", lowered) or any(word in lowered for word in (
+            "rate_limit", "rate limit", "too many requests")):
+        return "rate_limit", "provider rate limit (429)"
+    return "other", f"provider failure ({text[:200]})" if text else "provider failure"
+
+
+def model_work_failures(files: dict[str, bytes]) -> tuple[str, ...]:
+    """Bounded ``failureKind`` texts from the preserved native ``model-work/*.json`` records."""
+    texts: list[str] = []
+
+    def walk(value: Any, depth: int) -> None:
+        if len(texts) >= MAX_MODEL_FAILURE_TEXTS or depth > 16:
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key == "failureKind" and _text(item):
+                    texts.append(_js_trim(item)[:MAX_MODEL_FAILURE_TEXT_CHARS])
+                else:
+                    walk(item, depth + 1)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item, depth + 1)
+
+    for relative in sorted(files):
+        if relative.startswith("model-work/") and relative.endswith(".json"):
+            value, failure = _json(files[relative])
+            if failure is None:
+                walk(value, 0)
+    return tuple(texts)
+
+
+def provider_failure_cause(texts: Iterable[str]) -> str:
+    """The label of the most frequent provider cause among *texts* (ties by severity order)."""
+    counts: dict[str, int] = {}
+    labels: dict[str, str] = {}
+    for text in texts:
+        cause, label = classify_provider_failure(text)
+        counts[cause] = counts.get(cause, 0) + 1
+        labels.setdefault(cause, label)
+    if not counts:
+        return "provider cause not recorded"
+    cause = min(counts, key=lambda name: (-counts[name], _PROVIDER_CAUSE_ORDER.index(name)))
+    return labels[cause]
+
+
 # --- the completion rule ---------------------------------------------------------------------
 
 class Facts(NamedTuple):
@@ -2237,3 +2322,20 @@ def evaluate(facts: Facts) -> Verdict:
     if partial:
         return Verdict("partial", partial[0], tuple(partial))
     return Verdict("success", None, ())
+
+
+# Codes an all-model-calls-failed run may be relabelled over: RunSortie's own runtime/exit codes and
+# the acceptance/partial-only codes. Any integrity, identity, mutation or evidence code is absent here.
+_LLM_PATH_RELABELLABLE = frozenset({
+    "runsortie_no_exit", "runsortie_failed", *EXIT_CODES.values(),
+    "runsortie_no_changes", "runsortie_committed_incomplete", "baseline_retry_required", "baseline_blocked",
+    "review_required", "baseline_not_ready", "checkpoint_not_established", "acceptance_not_established",
+    "target_security_policy_not_established", "review_packets_not_established", "verification_unresolved",
+    "verification_incomplete", "verification_missing", "verification_invalid", "work_budget_exhausted",
+    "work_budget_not_established", "import_loss"})
+
+
+def llm_path_relabel_allowed(verdict: Verdict) -> bool:
+    """Whether *verdict* may be reported as ``llm_path_failed``: every unmet code is relabellable."""
+    return verdict.status in ("error", "partial") and bool(verdict.unmet) and all(
+        code in _LLM_PATH_RELABELLABLE or re.fullmatch(r"runsortie_exit_-?\d+", code) for code in verdict.unmet)

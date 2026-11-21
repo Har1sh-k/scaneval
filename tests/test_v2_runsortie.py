@@ -26,6 +26,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 import zlib
 
 import pytest
@@ -146,7 +147,7 @@ class Runtime:
         (self.bin / "npm").symlink_to(npm_root / "bin" / "npm-cli.js")
         self.npm_package = npm_root
         package_specs = {
-            "claude": ("@anthropic-ai/claude-code", "2.1.310", Path("bin/claude.exe")),
+            "claude": ("@anthropic-ai/claude-code", "2.1.325", Path("bin/claude.exe")),
             "gemini": ("@google/gemini-cli", "1.0.0", Path("bundle/gemini.js")),
             "pi": ("@earendil-works/pi-coding-agent", "1.4.0", Path("dist/bundle/cli.js")),
         }
@@ -158,8 +159,21 @@ class Runtime:
             self.agent_packages[agent] = package_root
             (self.bin / agent).symlink_to(package_root / launcher_relative)
         agent_fixture = r'''#!/bin/sh
+for argument in "$@"; do
+  case "$argument" in
+    --fixture-env-output=*)
+      output=${argument#*=}
+      env | LC_ALL=C sort > "$output"
+      printf '%s\n' "$@" > "$output.args"
+      exit 0
+      ;;
+  esac
+done
 if [ "$1" = "--version" ]; then
-  echo "2.1.310 (Claude Code)"
+  echo "2.1.325 (Claude Code)"
+fi
+if [ "$1" = "--help" ]; then
+  echo "--tools <tools...> --setting-sources <sources> --strict-mcp-config"
 fi
 exit 0
 '''
@@ -299,6 +313,28 @@ def test_runsortie_is_a_standalone_adapter_and_llm_harness_keeps_its_meaning():
     assert type(harness).__module__ == "scaneval.adapters.llm_harness"
 
 
+def test_a_system_model_id_that_is_not_the_engine_route_is_refused(runtime):
+    adapter = get_adapter("runsortie")
+    config = runtime.config(engine_model="anthropic/claude-sonnet-5-5")
+    with pytest.raises(AdapterError, match="differs from config.engine_model"):
+        adapter.prepare(SystemSpec("runsortie-fake", "runsortie", config, model_id="anthropic/claude-sonnet-4-5"),
+                        runtime.tmp / "cache")
+    rs._check_system_model(SystemSpec("s", "runsortie", config, model_id="anthropic/claude-sonnet-5-5"),
+                           read_settings(config))
+    rs._check_system_model(SystemSpec("s", "runsortie", config), read_settings(config))
+    for label in ("pi:anthropic/claude-sonnet-5-5", "claude-sonnet-5-5", "pi:claude-sonnet-5-5"):
+        rs._check_system_model(SystemSpec("s", "runsortie", config, model_id=label), read_settings(config))
+    for label in ("claude-sonnet-4-5", "pi:claude-sonnet-4-5", "anthropic", "openai/claude-sonnet-5-5"):
+        with pytest.raises(AdapterError, match="differs from config.engine_model"):
+            rs._check_system_model(SystemSpec("s", "runsortie", config, model_id=label), read_settings(config))
+    pi = runtime.config(engine_model="pi:anthropic/claude-sonnet-5-5")
+    for label in ("anthropic/claude-sonnet-5-5", "pi:anthropic/claude-sonnet-5-5", "claude-sonnet-5-5"):
+        rs._check_system_model(SystemSpec("s", "runsortie", pi, model_id=label), read_settings(pi))
+    with pytest.raises(AdapterError, match="differs from config.engine_model"):
+        rs._check_system_model(SystemSpec("s", "runsortie", pi, model_id="anthropic/claude-sonnet-4-5"),
+                               read_settings(pi))
+
+
 def test_git_plumbing_ignores_and_workspace_guard_rejects_replace_refs(tmp_path, monkeypatch):
     repo = tmp_path / "replace-repo"
     repo.mkdir()
@@ -342,7 +378,7 @@ def test_git_plumbing_ignores_and_workspace_guard_rejects_replace_refs(tmp_path,
     ({"primary": {"agent": "claude", "model": "m", "token": "x"}}, "nothing else"),
     ({"challenger": {"agent": "unknown", "model": "other"}}, "challenger.agent"),
     ({"challenger": {"agent": "claude", "model": "primary-model"}}, "must differ"),
-    ({"engine_model": "claude:engine-model"}, "hardened Pi engine route only"),
+    ({"engine_model": "claude:"}, "must name a model"),
     ({"engine_model": "openai-codex/gpt-5.1-codex"}, "openai-codex provider"),
     ({"engine_model": "pi:openai-codex/gpt-5.1-codex"}, "openai-codex provider"),
     ({"minimum_severity": "critical"}, "minimum_severity"),
@@ -367,6 +403,22 @@ def test_configuration_is_strict_and_never_holds_an_inline_secret(runtime, chang
 def test_configuration_accepts_only_named_provider_secrets_without_values(runtime):
     settings = read_settings(runtime.config(credential_env={"engine": "OPENROUTER_API_KEY"}))
     assert settings.credential_env == {"engine": "OPENROUTER_API_KEY"}
+
+
+def test_configuration_accepts_a_claude_engine_route_with_a_claude_code_oauth_token(runtime):
+    settings = read_settings(runtime.config(engine_model="claude:claude-opus-5-5",
+                                            credential_env={"engine": "CLAUDE_CODE_OAUTH_TOKEN"}))
+    assert settings.engine_model == "claude:claude-opus-5-5"
+    assert settings.credential_env == {"engine": "CLAUDE_CODE_OAUTH_TOKEN"}
+    assert rs._engine_driver(settings) == "claude"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in rs.CREDENTIAL_ENV_ALLOWLIST
+    for label in ("claude:claude-opus-5-5", "claude-opus-5-5"):
+        rs._check_system_model(SystemSpec("s", "runsortie", {}, model_id=label), settings)
+    for label in ("pi:claude-opus-5-5", "anthropic/claude-opus-5-5", "claude:claude-sonnet-5-5", "claude"):
+        with pytest.raises(AdapterError, match="differs from config.engine_model"):
+            rs._check_system_model(SystemSpec("s", "runsortie", {}, model_id=label), settings)
+    # The Pi route still names Pi as the engine driver.
+    assert rs._engine_driver(read_settings(runtime.config(engine_model="pi:claude-opus-5-5"))) == "pi"
 
 
 @pytest.mark.parametrize(("primary_agent", "challenger_agent"), list(itertools.product(rs.AGENTS, repeat=2)))
@@ -489,7 +541,7 @@ def test_preparation_records_pinned_identities_at_their_real_assurance(runtime):
     assert preparation["agent_shell"]["sha256"].startswith("sha256:")
     assert set(preparation["agents"]) == {"claude"}
     assert preparation["agents"]["claude"]["package_name"] == "@anthropic-ai/claude-code"
-    assert preparation["agents"]["claude"]["package_version"] == "2.1.310"
+    assert preparation["agents"]["claude"]["package_version"] == "2.1.325"
     assert preparation["probe_capabilities"]["pi"]["allIsolationFlags"] is True
     assert preparation["probe_capabilities"]["directAgentSecurityBoundaryAttested"] is False
     assert preparation["probe_capabilities"]["agents"]["claude"] == {
@@ -524,6 +576,31 @@ exit 0
 ''')
     with pytest.raises(AdapterError, match="does not expose required isolation flag"):
         RunSortieAdapter().prepare(SystemSpec("r", "runsortie", runtime.config()), runtime.tmp / "cache")
+
+
+@NEEDS_WAITID
+def test_preparation_pins_a_claude_engine_and_refuses_one_without_every_tool_policy_flag(runtime):
+    config = runtime.config(engine_model="claude:engine-model", credential_env={"engine": "CLAUDE_CODE_OAUTH_TOKEN"})
+    preparation = RunSortieAdapter().prepare(SystemSpec("r", "runsortie", config), runtime.tmp / "cache")
+    assert preparation["engine_driver"]["driver"] == "claude"
+    assert preparation["engine_driver"]["package_name"] == "@anthropic-ai/claude-code"
+    assert preparation["engine_driver"]["package_version"] == rs.CLAUDE_BARE_PACKAGE_VERSION
+    assert preparation["engine_driver"]["realpath"] == str((runtime.bin / "claude").resolve())
+    assert preparation["engine_driver"]["version"] == "2.1.325 (Claude Code)"
+    assert preparation["probe_capabilities"]["claudeEngine"]["allToolPolicyFlags"] is True
+    assert "pi" not in preparation["probe_capabilities"], "a claude engine does not need Pi"
+    _executable(runtime.agent_packages["claude"] / "bin" / "claude.exe", r'''#!/bin/sh
+if [ "$1" = "--version" ]; then echo "2.1.325 (Claude Code)"; fi
+if [ "$1" = "--help" ]; then echo "--tools <tools...> --disallowedTools --setting-sources-extra"; fi
+exit 0
+''')
+    with pytest.raises(AdapterError, match=r"engine tool-policy flag\(s\): --setting-sources, --strict-mcp-config"):
+        RunSortieAdapter().prepare(SystemSpec("r", "runsortie", config), runtime.tmp / "cache")
+    # The Pi route never probes the agent claude's engine flags.
+    pi_preparation = RunSortieAdapter().prepare(SystemSpec("r", "runsortie", runtime.config()), runtime.tmp / "cache")
+    assert pi_preparation["engine_driver"]["driver"] == "pi"
+    assert pi_preparation["probe_capabilities"]["pi"]["allIsolationFlags"] is True
+    assert "claudeEngine" not in pi_preparation["probe_capabilities"]
 
 
 def test_dist_identity_refuses_an_external_module_symlink(runtime):
@@ -664,7 +741,7 @@ def test_preparation_rejects_path_entries_whose_meaning_depends_on_cwd(runtime, 
 
 
 @pytest.mark.parametrize("route,driver", [
-    ("pi:model-a", "pi"), ("unknown:model-a", "pi"),
+    ("pi:model-a", "pi"), ("unknown:model-a", "pi"), ("claude:model-a", "claude"),
 ])
 @NEEDS_WAITID
 def test_engine_driver_identity_uses_the_pinned_fieldglass_route_parser(runtime, route, driver):
@@ -906,6 +983,120 @@ def test_a_complete_run_succeeds_with_claims_and_separate_disposition_metadata(r
     assert controls["completed"] == 1, "a fully established run can earn quiet credit"
 
 
+def test_a_claude_engine_run_gives_only_the_engine_the_empty_tool_policy_wrapper(runtime, monkeypatch):
+    # Stand in for tsx running Fieldglass: exec the named tool from this process's own PATH, exactly as
+    # the claude: model driver resolves ``claude``. node_modules is ignored, so the checkout stays clean.
+    _executable(runtime.root / "fieldglass" / "node_modules" / "tsx" / "dist" / "cli.mjs",
+                '#!/bin/sh\ntool=$1\nshift\nexec "$tool" "$@"\n')
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "subscription-oauth-token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "exhausted-api-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "other-provider-key")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(runtime.tmp / "operator-claude-config"))
+    overrides = {"ANTHROPIC_CONFIG_DIR": str(runtime.tmp / "operator-anthropic-config"),
+                 "ANTHROPIC_PROFILE": "operator-profile"}
+    for name, value in overrides.items():
+        monkeypatch.setenv(name, value)
+    xdg_names = ["XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME"]
+    logged = ["PATH", "HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+              *overrides, *xdg_names]
+    result, execution, bundle = _run(runtime, {
+        "engine": {"findings": FINDINGS},
+        "probe_role_wrappers": ["claude"], "probe_engine_tools": ["claude"],
+        # Even if the overrides reached the engine's inherited environment, its launch wrapper drops them.
+        "engine_probe_env": overrides,
+        "wrapper_log_env": logged, "log_env": logged,
+    }, config=runtime.config(engine_model="claude:engine-model",
+                             credential_env={"engine": "CLAUDE_CODE_OAUTH_TOKEN"}))
+    assert result["status"] == "success", result.get("error")
+    [call] = runtime.invocations()
+
+    # The engine's claude receives the empty-tool policy before the caller's own arguments.
+    engine_argv = call["engine_tool_argv"]["claude"]
+    assert engine_argv[:5] == ["--tools", "", "--setting-sources", "user", "--strict-mcp-config"]
+    assert len(engine_argv) == 6 and engine_argv[5].startswith("--fixture-env-output=")
+    engine_env = call["engine_tool_env"]["claude"]
+    assert engine_env["CLAUDE_CODE_OAUTH_TOKEN"] == "subscription-oauth-token"
+    assert engine_env["ANTHROPIC_API_KEY"] is None and engine_env["OPENAI_API_KEY"] is None
+    runsortie_path = call["env"]["PATH"].split(os.pathsep)
+    engine_path = engine_env["PATH"].split(os.pathsep)
+    assert Path(engine_path[0]).name == "engine-bin" and engine_path[1:] == runsortie_path
+    # The engine has its own empty HOME, a sibling of (never inside) the agents' HOME.
+    agent_home = Path(call["env"]["HOME"])
+    engine_home = Path(engine_env["HOME"])
+    assert engine_home.name == "engine-home" and engine_home.parent == agent_home.parent
+    assert not engine_home.is_relative_to(agent_home) and engine_path[0] == str(engine_home.parent / "engine-bin")
+    assert engine_env["CLAUDE_CONFIG_DIR"] is None
+    assert engine_env["ANTHROPIC_CONFIG_DIR"] is None and engine_env["ANTHROPIC_PROFILE"] is None
+    engine_xdg = {"XDG_CONFIG_HOME": engine_home / ".config", "XDG_CACHE_HOME": engine_home / ".cache",
+                  "XDG_STATE_HOME": engine_home / ".local" / "state",
+                  "XDG_DATA_HOME": engine_home / ".local" / "share"}
+    assert {name: engine_env[name] for name in xdg_names} == {name: str(path) for name, path in engine_xdg.items()}
+
+    # RunSortie and the primary/challenger agents resolve the unwrapped claude, with no policy injected,
+    # keep the shared private HOME, and hold the engine credential they authenticate with.
+    assert all(Path(entry).name != "engine-bin" for entry in runsortie_path)
+    agent_argv = call["role_wrapper_argv"]["claude"]
+    assert len(agent_argv) == 1 and agent_argv[0].startswith("--fixture-env-output=")
+    assert not {"--tools", "--setting-sources", "--strict-mcp-config"} & set(agent_argv)
+    agent_env = call["role_wrapper_env"]["claude"]
+    assert agent_env["CLAUDE_CODE_OAUTH_TOKEN"] == "subscription-oauth-token"
+    assert agent_env["ANTHROPIC_API_KEY"] is None and agent_env["OPENAI_API_KEY"] is None
+    assert agent_env["HOME"] == str(agent_home) and agent_env["HOME"] != str(engine_home)
+    assert agent_env["CLAUDE_CONFIG_DIR"] is None
+    for name in xdg_names:  # the agents keep their existing XDG directories inside their own HOME
+        assert agent_env[name] == call["env"][name] and Path(agent_env[name]).is_relative_to(agent_home)
+    assert call["env"]["ANTHROPIC_API_KEY"] is None and call["env"]["OPENAI_API_KEY"] is None
+    assert call["resolved_pi"] is None or "isolated-bin" not in Path(call["resolved_pi"]).parts, \
+        "a claude engine installs no Pi wrapper"
+
+    artifacts = _artifacts(execution)
+    assert "runsortie-pi-wrapper" not in artifacts
+    engine_wrapper = (bundle / artifacts["runsortie-claude-engine-wrapper"]).read_bytes()
+    claude_real = str((runtime.bin / "claude").resolve())
+    assert engine_wrapper.endswith(("exec " + shlex.quote(claude_real)
+                                    + " --tools '' --setting-sources user --strict-mcp-config \"$@\"\n").encode())
+    [unset_line] = [line for line in engine_wrapper.decode().splitlines() if line.startswith("unset ")]
+    assert "ANTHROPIC_API_KEY" in unset_line.split() and "CLAUDE_CODE_OAUTH_TOKEN" not in unset_line.split()
+    tsx_wrapper = (bundle / artifacts["runsortie-tsx-wrapper"]).read_text(encoding="utf-8")
+    assert "engine-bin" in tsx_wrapper
+    assert "\nHOME=" + shlex.quote(str(engine_home)) + "\n" in tsx_wrapper
+    assert {"CLAUDE_CONFIG_DIR", "ANTHROPIC_CONFIG_DIR", "ANTHROPIC_PROFILE"} <= set(tsx_wrapper.splitlines()[1].split())
+    for name in ("runsortie-npm-script-shell-wrapper", "runsortie-agent-shell-wrapper",
+                 "runsortie-claude-engine-wrapper"):
+        text = (bundle / artifacts[name]).read_text(encoding="utf-8")
+        assert "engine-home" not in text and "\nHOME=" not in text
+        if name != "runsortie-claude-engine-wrapper":
+            assert "engine-bin" not in text
+    isolation = json.loads((bundle / artifacts["runsortie-agent-isolation"]).read_text(encoding="utf-8"))
+    assert isolation["engineDriver"] == "claude" and "piIsolationFlags" not in isolation
+    assert isolation["claudeEngineToolPolicyArguments"] == list(rs.CLAUDE_ENGINE_TOOL_POLICY_ARGUMENTS)
+    assert isolation["engineOnlyPath"]["onRunSortieAndDirectAgentPath"] is False
+    assert isolation["engineOnlyHome"] == {
+        "directory": "engine-home", "setOnlyBy": "Fieldglass tsx absolute-launch wrapper",
+        "claudeConfigDirUnset": True,
+        "xdgDirectories": {"XDG_CONFIG_HOME": "engine-home/.config", "XDG_CACHE_HOME": "engine-home/.cache",
+                           "XDG_STATE_HOME": "engine-home/.local/state", "XDG_DATA_HOME": "engine-home/.local/share"},
+        "unsetConfigOverrides": ["ANTHROPIC_CONFIG_DIR", "ANTHROPIC_PROFILE", "CLAUDE_CONFIG_DIR"],
+        "sharedWithDirectAgents": False}
+    assert isolation["roleCredentialRetention"] == {
+        "claude-engine": ["CLAUDE_CODE_OAUTH_TOKEN"], "direct-agent": ["CLAUDE_CODE_OAUTH_TOKEN"]}
+    assert isolation["credentialEnvironmentRoles"] == {"engine": "CLAUDE_CODE_OAUTH_TOKEN"}
+    assert isolation["immutablePolicy"]["Claude Code engine tool-policy wrapper"] == {
+        "mode": "0o700", "sha256": "sha256:" + hashlib.sha256(engine_wrapper).hexdigest()}
+    for path in bundle.rglob("*"):
+        if path.is_file() and not path.is_symlink():
+            assert b"subscription-oauth-token" not in path.read_bytes(), path
+
+
+def test_a_claude_engine_scan_requires_its_named_token(runtime, monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    result, _execution, _bundle = _run(runtime, {"engine": {"findings": FINDINGS}}, config=runtime.config(
+        engine_model="claude:engine-model", credential_env={"engine": "CLAUDE_CODE_OAUTH_TOKEN"}))
+    assert result["status"] != "success"
+    assert "Claude Code engine requires a nonempty, single-line CLAUDE_CODE_OAUTH_TOKEN" in result["error"]["message"]
+    assert runtime.invocations() == []
+
+
 @pytest.mark.parametrize("operation,expected_state", [
     ({"op": "journal_delete"}, "absent"),
     ({"op": "journal_relocate_wrong_path"}, "absent"),
@@ -1027,6 +1218,57 @@ def test_exact_root_multi_member_packet_and_verification_are_accepted_end_to_end
     assert group["canonicalFindingId"] == "FG-GROUP-0001"
     assert group["duplicateFindingIds"] == ["FG-GROUP-0002"]
     assert group["findingIds"] == ["FG-GROUP-0001", "FG-GROUP-0002"]
+    # The Pi engine route is untouched by the claude engine route: no engine-only wrapper, PATH or HOME.
+    assert "runsortie-pi-wrapper" in artifacts
+    assert "runsortie-claude-engine-wrapper" not in artifacts, "the Pi route builds no claude engine wrapper"
+    tsx_wrapper = (bundle / artifacts["runsortie-tsx-wrapper"]).read_text(encoding="utf-8")
+    assert "engine-bin" not in tsx_wrapper and "engine-home" not in tsx_wrapper and "\nHOME=" not in tsx_wrapper
+    isolation = json.loads((bundle / artifacts["runsortie-agent-isolation"]).read_text(encoding="utf-8"))
+    assert isolation["piIsolationFlags"] == list(rs.PI_ISOLATION_FLAGS)
+    assert not {"engineDriver", "engineOnlyPath", "engineOnlyHome", "claudeEngineToolPolicyArguments"} & set(isolation)
+    assert "Claude Code engine tool-policy wrapper" not in isolation["immutablePolicy"]
+    # The agents inherit RunSortie's environment, engine secret included, and the record says so.
+    assert isolation["roleCredentialRetention"] == {"pi-engine": ["OPENAI_API_KEY"], "direct-agent": ["OPENAI_API_KEY"]}
+
+
+def test_claim_lines_come_from_structural_sink_or_source_location_of_the_same_file(runtime):
+    findings = [
+        {**FINDINGS[0], "structural_evidence": ["source-location=src/app.py:3", "sink-location=./src/app.py:4"]},
+        {**FINDINGS[1], "structural_evidence": ["flow=v to execute", "source-location=src/db.py:1"]},
+        {**FINDINGS[2], "structural_evidence": ["sink-location=src/other.py:9"]},
+    ]
+    result, _, _ = _run(runtime, {"engine": {"findings": findings}})
+    assert result["status"] == "success", result.get("error")
+    locations = {claim["claim_id"]: claim["primary_location"] for claim in result["claims"]}
+    assert locations["FG-CMDI-0001"] == {"path": "src/app.py", "start_line": 4, "end_line": 4}, "sink preferred"
+    assert locations["FG-SQLI-0002"] == {"path": "src/db.py", "start_line": 1, "end_line": 1}
+    assert locations["FG-LOG-0003"] == {"path": "src/app.py"}, "another file's location is not borrowed"
+
+
+def test_a_malformed_scan_site_note_says_file_level_only_when_no_structural_line_was_set(runtime):
+    findings = [
+        {**FINDINGS[0], "scan_site_json_b64": "not-base64", "structural_evidence": ["sink-location=src/app.py:4"]},
+        {**FINDINGS[1], "scan_site_json_b64": "not-base64"},
+        FINDINGS[2],
+    ]
+    result, execution, _ = _run(runtime, {"engine": {"findings": findings}})
+    locations = {claim["claim_id"]: claim["primary_location"] for claim in result["claims"]}
+    assert locations["FG-CMDI-0001"] == {"path": "src/app.py", "start_line": 4, "end_line": 4}
+    assert locations["FG-SQLI-0002"] == {"path": "src/db.py"}
+    notes = execution["notes"]
+    assert "FG-CMDI-0001: scan site could not be decoded; line 4 taken from the structural sink/source location" \
+        in notes
+    assert not any(note.startswith("FG-CMDI-0001:") and "file-level" in note for note in notes)
+    assert "FG-SQLI-0002: scan site could not be decoded; location kept file-level" in notes
+
+
+def test_structural_location_line_requires_a_positive_line_in_the_claim_file():
+    line = rs._structural_location_line
+    assert line({"structural_evidence": ["sink-location=oauthproxy.go:583"]}, "oauthproxy.go") == 583
+    assert line({"structural_evidence": "source-location=a\\b.go:7"}, "a/b.go") == 7
+    assert line({"structural_evidence": ["sink-location=a.go:0", "sink-location=a.go:x"]}, "a.go") is None
+    assert line({"structural_evidence": ["sink-location=a.go"]}, "a.go") is None
+    assert line({}, "a.go") is None
 
 
 def test_native_utf16_sort_order_binds_unicode_packet_hash_plan_and_journal(runtime):
@@ -1266,6 +1508,92 @@ def test_an_engine_failure_after_findings_is_an_error_that_keeps_them(runtime):
     assert "model provider unavailable" in result["error"]["message"], "the stderr tail explains the failure"
     assert len(result["claims"]) == 3 and result["bundles_resolved"] is False
     assert _reconciliation(bundle)["native"]["outcome"] == "failed"
+    assert _reconciliation(bundle)["verdict"]["unmet"] == ["runsortie_runtime", "runsortie_failed"], \
+        "an untampered engine failure records its heads, as real RunSortie does"
+
+
+CREDIT_FAILURE = ('400 {"type":"error","error":{"type":"invalid_request_error","message":'
+                  '"Your credit balance is too low to access the Anthropic API."}}')
+
+
+@pytest.mark.parametrize("text,cause", [
+    (CREDIT_FAILURE, "billing"),
+    ("429 insufficient_quota: You exceeded your current quota", "billing"),
+    ('401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}',
+     "authentication"),
+    ('403 {"type":"error","error":{"type":"permission_error"}}', "permission"),
+    ('429 {"type":"error","error":{"type":"rate_limit_error"}}', "rate_limit"),
+    ('529 {"type":"error","error":{"type":"overloaded_error"}}', "other"),
+])
+def test_provider_failure_texts_are_classified_by_cause(text, cause):
+    assert ev.classify_provider_failure(text)[0] == cause
+
+
+def test_provider_failure_cause_reads_only_bounded_model_work_records():
+    files = {
+        "model-work/a.json": json.dumps({"items": [{"state": "failed", "attempts": [
+            {"failureKind": CREDIT_FAILURE}, {"failureKind": CREDIT_FAILURE}]}]}).encode(),
+        "model-work/b.json": json.dumps({"failureKind": "429 rate_limit_error"}).encode(),
+        "review-work/c.json": json.dumps({"failureKind": "401 authentication_error"}).encode(),
+        "model-work/broken.json": b"{not json",
+    }
+    texts = ev.model_work_failures(files)
+    assert texts == (CREDIT_FAILURE, CREDIT_FAILURE, "429 rate_limit_error")
+    assert ev.provider_failure_cause(texts) == "provider billing (credit balance too low)"
+    assert ev.provider_failure_cause(()) == "provider cause not recorded"
+    assert ev.all_llm_calls_failed(["required_hypotheses_incomplete:1/2", "all_llm_calls_failed"])
+    assert not ev.all_llm_calls_failed(["required_hypotheses_incomplete:1/2"])
+
+
+def test_every_model_call_failing_on_provider_billing_is_llm_path_failed(runtime):
+    work = {"version": 1, "items": [{"state": "failed", "attempts": [
+        {"status": "failed", "at": "2026-11-20T00:00:00.000Z", "failureKind": CREDIT_FAILURE}]}]}
+    result, _, bundle = _run(runtime, {
+        "engine": {"findings": FINDINGS, "exit": 2,
+                   "acceptance": {"status": "inconclusive", "reasons": ["all_llm_calls_failed"]}},
+        "hooks": {"after_engine_write": [{"op": "state_write", "path": "model-work/fixture-work.json",
+                                          "text": json.dumps(work)}]},
+    })
+    assert result["status"] == "error" and result["error"]["code"] == "llm_path_failed"
+    assert result["error"]["message"].startswith(
+        "every model call failed: provider billing (credit balance too low); ")
+    assert "runsortie_runtime" in result["error"]["message"], "the native exit code stays visible"
+    assert len(result["claims"]) == 3
+
+
+def test_every_model_call_failing_never_relabels_a_product_mutation(runtime):
+    result, _, bundle = _run(runtime, {
+        "engine": {"findings": FINDINGS, "acceptance": {"status": "inconclusive", "reasons": ["all_llm_calls_failed"]}},
+        "primary": {"write_outside": "src/app.py", "exit": 1}})
+    unmet = _reconciliation(bundle)["verdict"]["unmet"]
+    assert unmet[0] == "runsortie_runtime" and "product_mutation" in unmet
+    assert result["status"] == "error" and result["error"]["code"] == "runsortie_runtime", \
+        "the integrity break is not hidden behind llm_path_failed"
+    assert not result["error"]["message"].startswith("every model call failed")
+
+
+def test_llm_path_relabel_is_allowed_only_over_runtime_and_partial_only_codes():
+    allowed = ev.llm_path_relabel_allowed
+    assert allowed(ev.Verdict("error", "runsortie_runtime", ("runsortie_runtime",)))
+    assert allowed(ev.Verdict("error", "runsortie_exit_3", ("runsortie_exit_3", "runsortie_failed")))
+    assert allowed(ev.Verdict("partial", "runsortie_committed_incomplete",
+                              ("runsortie_committed_incomplete", "acceptance_not_established")))
+    for code in ("product_mutation", "runtime_identity_changed", "head_mismatch", "evidence_commit_invalid",
+                 "product_mutation_committed", "native_state_invalid", "evidence_head_mismatch"):
+        assert not allowed(ev.Verdict("error", "runsortie_runtime", ("runsortie_runtime", code))), code
+    for code in ("evidence_commit_unmatched", "evidence_preservation_failed"):
+        assert not allowed(ev.Verdict("partial", "runsortie_committed_incomplete",
+                                      ("runsortie_committed_incomplete", code))), code
+    assert not allowed(ev.Verdict("timeout", "timeout", ("the shared ScanEval deadline expired",)))
+    assert not allowed(ev.Verdict("success", None, ()))
+
+
+def test_runsorties_own_one_hour_engine_timeout_is_named(runtime):
+    result, _, _ = _run(runtime, {"engine": {"findings": FINDINGS, "exit": 2,
+                                             "error": "scan engine exceeded the one-hour timeout"}})
+    assert result["status"] == "error" and result["error"]["code"] == "runsortie_runtime"
+    assert result["error"]["message"].startswith(
+        "RunSortie's scan engine exceeded its own one-hour timeout (a RunSortie limit, not the ScanEval deadline)")
 
 
 def test_a_guard_failure_after_findings_is_an_error_that_keeps_them(runtime):
@@ -1338,6 +1666,30 @@ def test_a_failed_challenger_is_partial(runtime):
     receipt = _reconciliation(bundle)
     assert result["status"] == "partial" and "verification_incomplete" in receipt["verdict"]["unmet"]
     assert receipt["native"]["outcome"] == "committed-incomplete"
+
+
+def test_a_failed_challenger_fail_closed_as_inconclusive_is_a_consistent_journal(runtime):
+    result, _, bundle = _run(runtime, {"engine": {"findings": FINDINGS}, "challenger": {"FG-CMDI-0001": "fail"}})
+    receipt = _reconciliation(bundle)
+    assert result["status"] == "partial" and "verification_incomplete" in receipt["verdict"]["unmet"]
+    assert receipt["readings"]["review_work_journal"] == {
+        "state": "valid", "issues": ["challenger failed: fixture challenger failure"]}
+    assert "challenger failed: fixture challenger failure" in result["error"]["message"]
+    assert "does not equal its source-bound verification group" not in result["error"]["message"]
+
+
+def test_a_failed_challenger_paired_with_a_conclusive_group_is_still_refused(runtime):
+    result, _, bundle = _run(runtime, {
+        "engine": {"findings": FINDINGS}, "challenger": {"FG-CMDI-0001": "fail", "FG-SQLI-0002": "fail"},
+        "hooks": {"before_commit": [{"op": "json_set", "path": ".fieldglass/verification-summary.json",
+                                     "keys": ["groups", 0, "verdict"], "value": "CONFIRMED VULNERABLE"}]}})
+    receipt = _reconciliation(bundle)
+    assert result["status"] != "success"
+    journal = receipt["readings"]["review_work_journal"]
+    assert journal["state"] == "invalid"
+    assert "a challenger journal result does not equal its source-bound verification group" in journal["issues"]
+    notice = [issue.startswith("challenger failed: ") for issue in journal["issues"]]
+    assert any(notice) and notice == sorted(notice), "defects precede notices so truncation cannot hide them"
 
 
 def test_an_inconclusive_disposition_the_native_summary_calls_complete_is_still_partial(runtime):
@@ -2385,6 +2737,33 @@ def test_emergency_cleanup_uses_a_fresh_budget_after_the_scan_deadline_expires(t
     assert not root.exists()
 
 
+def test_post_run_evidence_budget_keeps_the_scan_deadline_unless_the_scan_timed_out():
+    grace = rs.POST_RUN_EVIDENCE_GRACE_SECONDS
+    roomy = rs.Deadline(1000)
+    early = rs._post_run_deadline(roomy, False)
+    assert abs(early.ends - roomy.ends) < 1, "an early exit keeps the remaining scan budget"
+    nearly_spent = rs.Deadline(1)
+    floor = rs._post_run_deadline(nearly_spent, False)
+    assert floor.ends - floor.started >= grace - 0.01, "never less than the grace"
+    timed_out = rs._post_run_deadline(roomy, True)
+    assert abs((timed_out.ends - timed_out.started) - grace) < 0.01, "a real timeout keeps only the grace"
+
+
+def test_slow_post_run_evidence_work_after_an_early_exit_is_not_a_timeout(runtime, monkeypatch):
+    # Shrink the grace instead of sleeping 30 s: post-run work longer than the grace must still finish.
+    monkeypatch.setattr(rs, "POST_RUN_EVIDENCE_GRACE_SECONDS", 0.2)
+    native = rs._snapshot_evidence_tree
+
+    def slow_snapshot(*args, **kwargs):
+        time.sleep(0.6)
+        return native(*args, **kwargs)
+
+    monkeypatch.setattr(rs, "_snapshot_evidence_tree", slow_snapshot)
+    result, execution, _bundle = _run(runtime, {"engine": {"findings": FINDINGS}})
+    assert result["status"] == "success" and execution["timed_out"] is False
+    assert _claim_ids(result) == ["FG-CMDI-0001", "FG-LOG-0003", "FG-SQLI-0002"]
+
+
 def test_dependency_symlink_chain_above_the_explicit_hop_bound_is_refused(tmp_path):
     root = tmp_path / "package"
     root.mkdir()
@@ -2481,7 +2860,7 @@ def test_real_runsortie_cli_with_fabricated_engine_and_agents(tmp_path, monkeypa
     package_specs = {
         "npm": ("npm", "10.9.0", "bin/npm-cli.js", "npm-empty" if empty else "npm"),
         "pi": ("@earendil-works/pi-coding-agent", "1.4.0", "dist/bundle/cli.js", "pi"),
-        "claude": ("@anthropic-ai/claude-code", "2.1.310", "bin/claude.js", challenger),
+        "claude": ("@anthropic-ai/claude-code", "2.1.325", "bin/claude.js", challenger),
     }
     for tool, (package_name, package_version, relative, mode) in package_specs.items():
         package_root = tmp_path / "packages" / tool
