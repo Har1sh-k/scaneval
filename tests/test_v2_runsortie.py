@@ -959,11 +959,7 @@ def test_a_complete_run_succeeds_with_claims_and_separate_disposition_metadata(r
         wrapper = (bundle / artifacts[name]).read_text(encoding="utf-8")
         assert wrapper.startswith("#!" + str(npm_shell_target) + "\n")
         assert "#!/bin/sh" not in wrapper
-    assert "runsortie-claude-engine-wrapper" not in artifacts, "the Pi route builds no claude engine wrapper"
-    assert "engine-bin" not in (bundle / artifacts["runsortie-tsx-wrapper"]).read_text(encoding="utf-8")
     isolation = json.loads((bundle / artifacts["runsortie-agent-isolation"]).read_text(encoding="utf-8"))
-    assert isolation["piIsolationFlags"] == list(rs.PI_ISOLATION_FLAGS) and "engineDriver" not in isolation
-    assert isolation["roleCredentialRetention"] == {"pi-engine": ["OPENROUTER_API_KEY"], "direct-agent": []}
     assert isolation["syntheticNativePathOnly"] is True
     assert isolation["productionDirectAgentCapability"] == "unsupported"
     assert isolation["directAgentSecurityBoundaryAttested"] is False
@@ -995,7 +991,8 @@ def test_a_claude_engine_run_gives_only_the_engine_the_empty_tool_policy_wrapper
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "subscription-oauth-token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "exhausted-api-key")
     monkeypatch.setenv("OPENAI_API_KEY", "other-provider-key")
-    logged = ["PATH", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(runtime.tmp / "operator-claude-config"))
+    logged = ["PATH", "HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
     result, execution, bundle = _run(runtime, {
         "engine": {"findings": FINDINGS},
         "probe_role_wrappers": ["claude"], "probe_engine_tools": ["claude"],
@@ -1015,12 +1012,24 @@ def test_a_claude_engine_run_gives_only_the_engine_the_empty_tool_policy_wrapper
     runsortie_path = call["env"]["PATH"].split(os.pathsep)
     engine_path = engine_env["PATH"].split(os.pathsep)
     assert Path(engine_path[0]).name == "engine-bin" and engine_path[1:] == runsortie_path
+    # The engine has its own empty HOME, a sibling of (never inside) the agents' HOME.
+    agent_home = Path(call["env"]["HOME"])
+    engine_home = Path(engine_env["HOME"])
+    assert engine_home.name == "engine-home" and engine_home.parent == agent_home.parent
+    assert not engine_home.is_relative_to(agent_home) and engine_path[0] == str(engine_home.parent / "engine-bin")
+    assert engine_env["CLAUDE_CONFIG_DIR"] is None
 
-    # RunSortie and the primary/challenger agents resolve the unwrapped claude, with no policy injected.
+    # RunSortie and the primary/challenger agents resolve the unwrapped claude, with no policy injected,
+    # keep the shared private HOME, and hold the engine credential they authenticate with.
     assert all(Path(entry).name != "engine-bin" for entry in runsortie_path)
     agent_argv = call["role_wrapper_argv"]["claude"]
     assert len(agent_argv) == 1 and agent_argv[0].startswith("--fixture-env-output=")
     assert not {"--tools", "--setting-sources", "--strict-mcp-config"} & set(agent_argv)
+    agent_env = call["role_wrapper_env"]["claude"]
+    assert agent_env["CLAUDE_CODE_OAUTH_TOKEN"] == "subscription-oauth-token"
+    assert agent_env["ANTHROPIC_API_KEY"] is None and agent_env["OPENAI_API_KEY"] is None
+    assert agent_env["HOME"] == str(agent_home) and agent_env["HOME"] != str(engine_home)
+    assert agent_env["CLAUDE_CONFIG_DIR"] is None
     assert call["env"]["ANTHROPIC_API_KEY"] is None and call["env"]["OPENAI_API_KEY"] is None
     assert call["resolved_pi"] is None or "isolated-bin" not in Path(call["resolved_pi"]).parts, \
         "a claude engine installs no Pi wrapper"
@@ -1035,13 +1044,23 @@ def test_a_claude_engine_run_gives_only_the_engine_the_empty_tool_policy_wrapper
     assert "ANTHROPIC_API_KEY" in unset_line.split() and "CLAUDE_CODE_OAUTH_TOKEN" not in unset_line.split()
     tsx_wrapper = (bundle / artifacts["runsortie-tsx-wrapper"]).read_text(encoding="utf-8")
     assert "engine-bin" in tsx_wrapper
-    for name in ("runsortie-npm-script-shell-wrapper", "runsortie-agent-shell-wrapper"):
-        assert "engine-bin" not in (bundle / artifacts[name]).read_text(encoding="utf-8")
+    assert "\nHOME=" + shlex.quote(str(engine_home)) + "\n" in tsx_wrapper
+    assert "CLAUDE_CONFIG_DIR" in tsx_wrapper.splitlines()[1].split()
+    for name in ("runsortie-npm-script-shell-wrapper", "runsortie-agent-shell-wrapper",
+                 "runsortie-claude-engine-wrapper"):
+        text = (bundle / artifacts[name]).read_text(encoding="utf-8")
+        assert "engine-home" not in text and "\nHOME=" not in text
+        if name != "runsortie-claude-engine-wrapper":
+            assert "engine-bin" not in text
     isolation = json.loads((bundle / artifacts["runsortie-agent-isolation"]).read_text(encoding="utf-8"))
     assert isolation["engineDriver"] == "claude" and "piIsolationFlags" not in isolation
     assert isolation["claudeEngineToolPolicyArguments"] == list(rs.CLAUDE_ENGINE_TOOL_POLICY_ARGUMENTS)
     assert isolation["engineOnlyPath"]["onRunSortieAndDirectAgentPath"] is False
-    assert isolation["roleCredentialRetention"] == {"claude-engine": ["CLAUDE_CODE_OAUTH_TOKEN"], "direct-agent": []}
+    assert isolation["engineOnlyHome"] == {
+        "directory": "engine-home", "setOnlyBy": "Fieldglass tsx absolute-launch wrapper",
+        "claudeConfigDirUnset": True, "sharedWithDirectAgents": False}
+    assert isolation["roleCredentialRetention"] == {
+        "claude-engine": ["CLAUDE_CODE_OAUTH_TOKEN"], "direct-agent": ["CLAUDE_CODE_OAUTH_TOKEN"]}
     assert isolation["credentialEnvironmentRoles"] == {"engine": "CLAUDE_CODE_OAUTH_TOKEN"}
     assert isolation["immutablePolicy"]["Claude Code engine tool-policy wrapper"] == {
         "mode": "0o700", "sha256": "sha256:" + hashlib.sha256(engine_wrapper).hexdigest()}
@@ -1180,6 +1199,17 @@ def test_exact_root_multi_member_packet_and_verification_are_accepted_end_to_end
     assert group["canonicalFindingId"] == "FG-GROUP-0001"
     assert group["duplicateFindingIds"] == ["FG-GROUP-0002"]
     assert group["findingIds"] == ["FG-GROUP-0001", "FG-GROUP-0002"]
+    # The Pi engine route is untouched by the claude engine route: no engine-only wrapper, PATH or HOME.
+    assert "runsortie-pi-wrapper" in artifacts
+    assert "runsortie-claude-engine-wrapper" not in artifacts, "the Pi route builds no claude engine wrapper"
+    tsx_wrapper = (bundle / artifacts["runsortie-tsx-wrapper"]).read_text(encoding="utf-8")
+    assert "engine-bin" not in tsx_wrapper and "engine-home" not in tsx_wrapper and "\nHOME=" not in tsx_wrapper
+    isolation = json.loads((bundle / artifacts["runsortie-agent-isolation"]).read_text(encoding="utf-8"))
+    assert isolation["piIsolationFlags"] == list(rs.PI_ISOLATION_FLAGS)
+    assert not {"engineDriver", "engineOnlyPath", "engineOnlyHome", "claudeEngineToolPolicyArguments"} & set(isolation)
+    assert "Claude Code engine tool-policy wrapper" not in isolation["immutablePolicy"]
+    # The agents inherit RunSortie's environment, engine secret included, and the record says so.
+    assert isolation["roleCredentialRetention"] == {"pi-engine": ["OPENAI_API_KEY"], "direct-agent": ["OPENAI_API_KEY"]}
 
 
 def test_claim_lines_come_from_structural_sink_or_source_location_of_the_same_file(runtime):

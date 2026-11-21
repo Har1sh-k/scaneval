@@ -2837,8 +2837,12 @@ class RunSortieAdapter(Adapter):
         # Engine-only directory: never on runtime_path, so RunSortie and its direct agents cannot resolve it.
         # Only the Fieldglass tsx launch wrapper prepends it, for the engine process tree.
         engine_bin = private / "engine-bin"
+        # The claude engine's own empty HOME, outside the agents' HOME: settings or hooks an agent writes
+        # under its ~/.claude are never loaded by the engine's --setting-sources user.
+        engine_home = private / "engine-home"
         for directory in (state_dir, cache_dir, npm_cache_dir, home_dir, private_tmp, xdg_config, xdg_cache,
-                          xdg_state, xdg_data, pi_home, isolated_bin, *((engine_bin,) if claude_engine else ())):
+                          xdg_state, xdg_data, pi_home, isolated_bin,
+                          *((engine_bin, engine_home) if claude_engine else ())):
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
             directory.chmod(0o700)
         state_guard, cache_guard = _capture_root(state_dir), _capture_root(cache_dir)
@@ -2891,11 +2895,13 @@ class RunSortieAdapter(Adapter):
         wrapper_specs.append(("npm lifecycle PATH-reset wrapper", npm_script_wrapper, npm_script_wrapper_bytes))
         tsx_wrapper = isolated_bin / "tsx"
         if claude_engine:
-            # The engine (and only it) sees the tool-policy claude first; PATH is set absolutely, not inherited.
+            # The engine (and only it) sees the tool-policy claude first and its own empty HOME; both are set
+            # absolutely, not inherited. CLAUDE_CONFIG_DIR is never set, so ~/.claude is under engine_home.
             tsx_wrapper_bytes = (
                 _shell_shebang(npm_script_shell) + "\nunset "
-                + " ".join(sorted(CREDENTIAL_ENV_ALLOWLIST - {engine_credential}))
-                + "\nPATH=" + shlex.quote(str(engine_bin) + os.pathsep + runtime_path) + "\nexport PATH\nexec "
+                + " ".join(sorted((CREDENTIAL_ENV_ALLOWLIST - {engine_credential}) | {"CLAUDE_CONFIG_DIR"}))
+                + "\nPATH=" + shlex.quote(str(engine_bin) + os.pathsep + runtime_path)
+                + "\nHOME=" + shlex.quote(str(engine_home)) + "\nexport PATH HOME\nexec "
                 + shlex.quote(preparation["fieldglass"]["tsx_launcher"]["realpath"]) + ' "$@"\n').encode("utf-8")
         else:
             tsx_wrapper_bytes = _credential_wrapper(
@@ -2960,7 +2966,9 @@ class RunSortieAdapter(Adapter):
                 for label, _path, data, mode in immutable_policy_files
             },
             "piIsolationFlags": list(PI_ISOLATION_FLAGS),
-            "roleCredentialRetention": {"pi-engine": [engine_credential], "direct-agent": []},
+            # The engine secret is in RunSortie's environment, and the primary/challenger agents it spawns
+            # inherit it (that is how they authenticate); only other provider secrets are withheld.
+            "roleCredentialRetention": {"pi-engine": [engine_credential], "direct-agent": [engine_credential]},
         }
         if claude_engine:
             del isolation["piIsolationFlags"]
@@ -2971,7 +2979,14 @@ class RunSortieAdapter(Adapter):
                 "prependedOnlyBy": "Fieldglass tsx absolute-launch wrapper",
                 "onRunSortieAndDirectAgentPath": False,
             }
-            isolation["roleCredentialRetention"] = {"claude-engine": [engine_credential], "direct-agent": []}
+            isolation["engineOnlyHome"] = {
+                "directory": str(engine_home.relative_to(private)),
+                "setOnlyBy": "Fieldglass tsx absolute-launch wrapper",
+                "claudeConfigDirUnset": True,
+                "sharedWithDirectAgents": False,
+            }
+            isolation["roleCredentialRetention"] = {"claude-engine": [engine_credential],
+                                                    "direct-agent": [engine_credential]}
         isolation_record = (json.dumps(isolation, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
         register("runsortie-agent-isolation", raw / "runsortie-agent-isolation.json", isolation_record)
         env = build_env(tuple(sorted(credential_names)), {
