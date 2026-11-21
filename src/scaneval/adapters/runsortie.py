@@ -149,6 +149,8 @@ GIT_TIMEOUT_SECONDS = 60
 PROBE_TIMEOUT_SECONDS = 30
 PREPARATION_TIMEOUT_SECONDS = 300
 POST_RUN_EVIDENCE_GRACE_SECONDS = 30
+# The stderr line RunSortie writes when its own engine hits its product-internal one-hour limit.
+ENGINE_HOUR_LIMIT_TEXT = b"scan engine exceeded the one-hour timeout"
 PRIVATE_CLEANUP_GRACE_SECONDS = 5
 MAX_PROBE_OUTPUT_BYTES = 1024 * 1024
 CLAUDE_BARE_PACKAGE_VERSION = "2.1.325"
@@ -200,6 +202,17 @@ class Deadline:
 
     def check(self) -> None:
         self.remaining()
+
+
+def _post_run_deadline(scan_deadline: Deadline, scan_timed_out: bool) -> Deadline:
+    """Budget for snapshotting, importing and judging evidence once RunSortie has exited.
+
+    After a real scan timeout only the short fixed grace applies.  After an earlier exit the post-run
+    work keeps the rest of the scan deadline, and never less than that grace.
+    """
+    if scan_timed_out:
+        return Deadline(POST_RUN_EVIDENCE_GRACE_SECONDS)
+    return Deadline(max(float(POST_RUN_EVIDENCE_GRACE_SECONDS), scan_deadline.ends - time.monotonic()))
 
 
 class RootGuard(NamedTuple):
@@ -873,6 +886,18 @@ def read_settings(config: dict) -> Settings:
         raise AdapterError("config.root must be an absolute path to the RunSortie checkout")
     return Settings(root.resolve(), configured_root, commit, version, dist_digest, engine_model, primary, challenger,
                     severity, _work_budget(config.get("work_budget")), dict(credentials))
+
+
+def _check_system_model(spec: SystemSpec, settings: Settings) -> None:
+    """Refuse a system whose declared model_id is not the engine route RunSortie actually runs."""
+    if not spec.model_id:
+        return
+    engine = settings.engine_model
+    routes = {engine, engine[3:]} if engine.startswith("pi:") and len(engine) > 3 else {engine}
+    if spec.model_id not in routes:
+        raise AdapterError(
+            f"system model_id {spec.model_id!r} differs from config.engine_model {engine!r}; results would be "
+            "recorded under a model that was not run, so the configuration was refused")
 
 
 def native_config(settings: Settings, *, repo: Path, branch: str) -> dict[str, Any]:
@@ -1835,6 +1860,30 @@ def _write_private_file(path: Path, data: bytes, mode: int = 0o600) -> None:
             os.close(descriptor)
 
 
+def _structural_location_line(record: dict[str, Any], file_path: str) -> int | None:
+    """The line of a ``sink-location=path:line`` (preferred) or ``source-location=path:line`` entry in
+    the finding's ``structural_evidence``, only when that path is the claim's own normalized file path."""
+    entries = record.get("structural_evidence")
+    if isinstance(entries, str):
+        entries = [entries]
+    if not isinstance(entries, list):
+        return None
+    for key in ("sink-location", "source-location"):
+        for entry in entries:
+            if not isinstance(entry, str):
+                continue
+            name, separator, value = entry.partition("=")
+            if not separator or name.strip() != key:
+                continue
+            path, colon, line = value.strip().rpartition(":")
+            path = path.replace("\\", "/")
+            if path.startswith("./"):
+                path = path[2:]
+            if colon and path == file_path and re.fullmatch(r"[0-9]{1,9}", line) and int(line) > 0:
+                return int(line)
+    return None
+
+
 def _import_runsortie_findings(snapshot: EvidenceSnapshot, stage_dir: Path, enclosure: Enclosure,
                                deadline: Deadline) -> HarnessImport:
     """Import finding records only from the already preserved evidence snapshot."""
@@ -1928,6 +1977,10 @@ def _import_runsortie_findings(snapshot: EvidenceSnapshot, stage_dir: Path, encl
                 value = site.get(source)
                 if isinstance(value, str) and value.strip():
                     claim[destination_key] = value
+        else:
+            line = _structural_location_line(record, file_path)
+            if line is not None:
+                claim["primary_location"].update(start_line=line, end_line=line)
         if reasoning and reasoning != "N/A":
             claim["evidence_text"] = reasoning
         severity = record.get("severity")
@@ -2626,6 +2679,7 @@ class RunSortieAdapter(Adapter):
 
     def prepare(self, spec: SystemSpec, cache_root: Path) -> dict[str, Any]:
         settings = read_settings(spec.config)
+        _check_system_model(spec, settings)
         capability = _runtime_capability(settings)
         record = {"runnable": bool(capability["runnable"]), "capability": capability,
                   "routes": {"engine": settings.engine_model, "primary": settings.primary._asdict(),
@@ -2649,6 +2703,7 @@ class RunSortieAdapter(Adapter):
             if request["input"]["mode"] != "full" or request["input"].get("pr") is not None:
                 raise AdapterError("runsortie carries out fresh full baselines only; this request was refused")
             settings = read_settings(spec.config)
+            _check_system_model(spec, settings)
             capability = _runtime_capability(settings)
             if not capability["runnable"]:
                 reason = "; ".join(capability["reasons"])
@@ -2876,12 +2931,13 @@ class RunSortieAdapter(Adapter):
         # Process-group termination may itself consume the tail of the scan budget.  Give evidence
         # already written before termination one independent, bounded chance to be snapshotted,
         # imported, staged and judged.  This never turns a scanner/main-deadline timeout into success.
+        # An earlier exit keeps the remaining scan budget (at least the grace) for that work.
         scan_timed_out = result.timed_out or time.monotonic() >= deadline.ends
         if scan_timed_out:
             deadline.expired = True
             result.timed_out = True
         scan_deadline = deadline
-        deadline = Deadline(POST_RUN_EVIDENCE_GRACE_SECONDS)
+        deadline = _post_run_deadline(scan_deadline, scan_timed_out)
         artifacts += [{"id": "runsortie-stdout", "path": raw / "runsortie-stdout.txt"},
                       {"id": "runsortie-stderr", "path": raw / "runsortie-stderr.txt"}]
         if not result.cleanup_succeeded:
@@ -3023,7 +3079,8 @@ class RunSortieAdapter(Adapter):
                                imported=imported, records=records, artifacts=artifacts, notes=notes,
                                register=register, timeout_seconds=timeout_seconds, deadline=deadline,
                                scan_deadline=scan_deadline,
-                               preservation_failures=preservation_failures)
+                               preservation_failures=preservation_failures,
+                               model_failures=evidence.model_work_failures(state_files))
         except Exception as exc:  # noqa: BLE001 - the claims already read must survive a reader defect
             claims, seen = [], set()
             for claim in imported.claims:
@@ -3045,7 +3102,8 @@ class RunSortieAdapter(Adapter):
                evidence_snapshot, product_before, result, argv, state_read, receipts, review_journal_data,
                agent_isolation_unchanged, imported, records,
                primary_prompt_bytes, artifacts, notes, register, timeout_seconds, deadline: Deadline,
-               scan_deadline: Deadline, preservation_failures: list[str], source_guard: RootGuard) -> NativeOutcome:
+               scan_deadline: Deadline, preservation_failures: list[str], source_guard: RootGuard,
+               model_failures: tuple[str, ...] = ()) -> NativeOutcome:
         """Read history and identity, judge every native record, and build the outcome."""
         history_read = read_history(source, evaluated, evaluated_tree, evidence_snapshot, git_guard, deadline)
         history = history_read.evidence
@@ -3197,18 +3255,30 @@ class RunSortieAdapter(Adapter):
         detail = [issue for reading in (target, history, checkpoint, acceptance, policy, packets, review,
                                         verification, review_journal, budget)
                   for issue in reading.issues][:8] + list(reconciliation.losses[:3]) + [loss.note for loss in imported.losses[:3]]
+        engine_hour_limit = False
         if verdict.status in ("error", "timeout") and result.exit_code not in (0, None):
             stderr = raw / "runsortie-stderr.txt"
             read = read_bounded(stderr, enclosure.write(stderr), MAX_RECEIPT_BYTES, deadline)
             tail = (read.data or b"")[-600:].decode("utf-8", errors="replace").strip()
             if tail:
                 detail.append(f"stderr tail: {tail}")
+            # RunSortie's own product-internal limit, not the ScanEval deadline: the code is kept.
+            engine_hour_limit = ENGINE_HOUR_LIMIT_TEXT in (read.data or b"")
         if verdict.status == "timeout":
             message = f"RunSortie exceeded the shared {timeout_seconds}s deadline; evidence written before it was kept"
         else:
             message = f"RunSortie obligations not met: {message}"
-        error = None if verdict.code is None else {
-            "code": verdict.code, "message": (message + (f" ({'; '.join(detail)})" if detail else ""))[:2000]}
+            if engine_hour_limit:
+                message = ("RunSortie's scan engine exceeded its own one-hour timeout (a RunSortie limit, "
+                           f"not the ScanEval deadline); {message}")
+        code = verdict.code
+        acceptance_reasons = (*acceptance.reasons, *((baseline.acceptance_reasons or ()) if baseline else ()))
+        if code is not None and evidence.all_llm_calls_failed(acceptance_reasons) and (
+                verdict.status == "partial" or (verdict.status == "error" and code.startswith("runsortie_"))):
+            code = "llm_path_failed"
+            message = f"every model call failed: {evidence.provider_failure_cause(model_failures)}; {message}"
+        error = None if code is None else {
+            "code": code, "message": (message + (f" ({'; '.join(detail)})" if detail else ""))[:2000]}
         return NativeOutcome(
             status=verdict.status, exit_code=result.exit_code, timed_out=result.timed_out or deadline.expired, command=argv,
             claims=claims, artifacts=artifacts, notes=notes, error=error, tool_versions=tool_versions,

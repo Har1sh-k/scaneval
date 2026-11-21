@@ -573,6 +573,8 @@ class Run:
                 "root_cause_fingerprint_version": 2, "root_cause_fingerprint": root_fingerprint,
                 "root_cause_evidence_hash": root_hash, "root_cause_identity_status": "exact",
                 "root_cause_evidence": root_evidence,
+                **({"structural_evidence": finding["structural_evidence"]}
+                   if finding.get("structural_evidence") else {}),
             }
             name = finding.get("record", f"{finding['id'].lower()}-finding.md")
             (findings_dir / name).write_text(frontmatter(record) + f"# {record['title']}\n\n## Reasoning\nReason {finding['id']}.\n",
@@ -597,7 +599,8 @@ class Run:
         if engine.get("sleep"):
             time.sleep(engine["sleep"])
         if engine.get("exit", 0):
-            raise RuntimeError(f"scan engine failed with exit {engine['exit']}: model provider unavailable")
+            raise RuntimeError(engine.get(
+                "error", f"scan engine failed with exit {engine['exit']}: model provider unavailable"))
 
     def read_acceptance(self, product_head: str) -> dict:
         value = read_json(self.out / "baseline-acceptance.json")
