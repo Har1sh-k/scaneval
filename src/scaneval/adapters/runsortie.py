@@ -2840,9 +2840,14 @@ class RunSortieAdapter(Adapter):
         # The claude engine's own empty HOME, outside the agents' HOME: settings or hooks an agent writes
         # under its ~/.claude are never loaded by the engine's --setting-sources user.
         engine_home = private / "engine-home"
+        # Its XDG directories too: Claude Code also reads $XDG_CONFIG_HOME/anthropic auth profiles.
+        engine_xdg = {"XDG_CONFIG_HOME": engine_home / ".config", "XDG_CACHE_HOME": engine_home / ".cache",
+                      "XDG_STATE_HOME": engine_home / ".local" / "state",
+                      "XDG_DATA_HOME": engine_home / ".local" / "share"}
         for directory in (state_dir, cache_dir, npm_cache_dir, home_dir, private_tmp, xdg_config, xdg_cache,
                           xdg_state, xdg_data, pi_home, isolated_bin,
-                          *((engine_bin, engine_home) if claude_engine else ())):
+                          *((engine_bin, engine_home, engine_home / ".local", *engine_xdg.values())
+                            if claude_engine else ())):
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
             directory.chmod(0o700)
         state_guard, cache_guard = _capture_root(state_dir), _capture_root(cache_dir)
@@ -2896,12 +2901,16 @@ class RunSortieAdapter(Adapter):
         tsx_wrapper = isolated_bin / "tsx"
         if claude_engine:
             # The engine (and only it) sees the tool-policy claude first and its own empty HOME; both are set
-            # absolutely, not inherited. CLAUDE_CONFIG_DIR is never set, so ~/.claude is under engine_home.
+            # absolutely, not inherited, as are its XDG directories. Config-directory/profile overrides are
+            # unset, so ~/.claude and every anthropic profile lookup resolve under engine_home.
             tsx_wrapper_bytes = (
                 _shell_shebang(npm_script_shell) + "\nunset "
-                + " ".join(sorted((CREDENTIAL_ENV_ALLOWLIST - {engine_credential}) | {"CLAUDE_CONFIG_DIR"}))
+                + " ".join(sorted((CREDENTIAL_ENV_ALLOWLIST - {engine_credential})
+                                  | {"CLAUDE_CONFIG_DIR", "ANTHROPIC_CONFIG_DIR", "ANTHROPIC_PROFILE"}))
                 + "\nPATH=" + shlex.quote(str(engine_bin) + os.pathsep + runtime_path)
-                + "\nHOME=" + shlex.quote(str(engine_home)) + "\nexport PATH HOME\nexec "
+                + "\nHOME=" + shlex.quote(str(engine_home))
+                + "".join(f"\n{name}={shlex.quote(str(path))}" for name, path in engine_xdg.items())
+                + "\nexport PATH HOME " + " ".join(engine_xdg) + "\nexec "
                 + shlex.quote(preparation["fieldglass"]["tsx_launcher"]["realpath"]) + ' "$@"\n').encode("utf-8")
         else:
             tsx_wrapper_bytes = _credential_wrapper(
@@ -2983,6 +2992,8 @@ class RunSortieAdapter(Adapter):
                 "directory": str(engine_home.relative_to(private)),
                 "setOnlyBy": "Fieldglass tsx absolute-launch wrapper",
                 "claudeConfigDirUnset": True,
+                "xdgDirectories": {name: str(path.relative_to(private)) for name, path in engine_xdg.items()},
+                "unsetConfigOverrides": ["ANTHROPIC_CONFIG_DIR", "ANTHROPIC_PROFILE", "CLAUDE_CONFIG_DIR"],
                 "sharedWithDirectAgents": False,
             }
             isolation["roleCredentialRetention"] = {"claude-engine": [engine_credential],

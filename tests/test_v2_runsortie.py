@@ -992,10 +992,18 @@ def test_a_claude_engine_run_gives_only_the_engine_the_empty_tool_policy_wrapper
     monkeypatch.setenv("ANTHROPIC_API_KEY", "exhausted-api-key")
     monkeypatch.setenv("OPENAI_API_KEY", "other-provider-key")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(runtime.tmp / "operator-claude-config"))
-    logged = ["PATH", "HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+    overrides = {"ANTHROPIC_CONFIG_DIR": str(runtime.tmp / "operator-anthropic-config"),
+                 "ANTHROPIC_PROFILE": "operator-profile"}
+    for name, value in overrides.items():
+        monkeypatch.setenv(name, value)
+    xdg_names = ["XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME"]
+    logged = ["PATH", "HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+              *overrides, *xdg_names]
     result, execution, bundle = _run(runtime, {
         "engine": {"findings": FINDINGS},
         "probe_role_wrappers": ["claude"], "probe_engine_tools": ["claude"],
+        # Even if the overrides reached the engine's inherited environment, its launch wrapper drops them.
+        "engine_probe_env": overrides,
         "wrapper_log_env": logged, "log_env": logged,
     }, config=runtime.config(engine_model="claude:engine-model",
                              credential_env={"engine": "CLAUDE_CODE_OAUTH_TOKEN"}))
@@ -1018,6 +1026,11 @@ def test_a_claude_engine_run_gives_only_the_engine_the_empty_tool_policy_wrapper
     assert engine_home.name == "engine-home" and engine_home.parent == agent_home.parent
     assert not engine_home.is_relative_to(agent_home) and engine_path[0] == str(engine_home.parent / "engine-bin")
     assert engine_env["CLAUDE_CONFIG_DIR"] is None
+    assert engine_env["ANTHROPIC_CONFIG_DIR"] is None and engine_env["ANTHROPIC_PROFILE"] is None
+    engine_xdg = {"XDG_CONFIG_HOME": engine_home / ".config", "XDG_CACHE_HOME": engine_home / ".cache",
+                  "XDG_STATE_HOME": engine_home / ".local" / "state",
+                  "XDG_DATA_HOME": engine_home / ".local" / "share"}
+    assert {name: engine_env[name] for name in xdg_names} == {name: str(path) for name, path in engine_xdg.items()}
 
     # RunSortie and the primary/challenger agents resolve the unwrapped claude, with no policy injected,
     # keep the shared private HOME, and hold the engine credential they authenticate with.
@@ -1030,6 +1043,8 @@ def test_a_claude_engine_run_gives_only_the_engine_the_empty_tool_policy_wrapper
     assert agent_env["ANTHROPIC_API_KEY"] is None and agent_env["OPENAI_API_KEY"] is None
     assert agent_env["HOME"] == str(agent_home) and agent_env["HOME"] != str(engine_home)
     assert agent_env["CLAUDE_CONFIG_DIR"] is None
+    for name in xdg_names:  # the agents keep their existing XDG directories inside their own HOME
+        assert agent_env[name] == call["env"][name] and Path(agent_env[name]).is_relative_to(agent_home)
     assert call["env"]["ANTHROPIC_API_KEY"] is None and call["env"]["OPENAI_API_KEY"] is None
     assert call["resolved_pi"] is None or "isolated-bin" not in Path(call["resolved_pi"]).parts, \
         "a claude engine installs no Pi wrapper"
@@ -1045,7 +1060,7 @@ def test_a_claude_engine_run_gives_only_the_engine_the_empty_tool_policy_wrapper
     tsx_wrapper = (bundle / artifacts["runsortie-tsx-wrapper"]).read_text(encoding="utf-8")
     assert "engine-bin" in tsx_wrapper
     assert "\nHOME=" + shlex.quote(str(engine_home)) + "\n" in tsx_wrapper
-    assert "CLAUDE_CONFIG_DIR" in tsx_wrapper.splitlines()[1].split()
+    assert {"CLAUDE_CONFIG_DIR", "ANTHROPIC_CONFIG_DIR", "ANTHROPIC_PROFILE"} <= set(tsx_wrapper.splitlines()[1].split())
     for name in ("runsortie-npm-script-shell-wrapper", "runsortie-agent-shell-wrapper",
                  "runsortie-claude-engine-wrapper"):
         text = (bundle / artifacts[name]).read_text(encoding="utf-8")
@@ -1058,7 +1073,11 @@ def test_a_claude_engine_run_gives_only_the_engine_the_empty_tool_policy_wrapper
     assert isolation["engineOnlyPath"]["onRunSortieAndDirectAgentPath"] is False
     assert isolation["engineOnlyHome"] == {
         "directory": "engine-home", "setOnlyBy": "Fieldglass tsx absolute-launch wrapper",
-        "claudeConfigDirUnset": True, "sharedWithDirectAgents": False}
+        "claudeConfigDirUnset": True,
+        "xdgDirectories": {"XDG_CONFIG_HOME": "engine-home/.config", "XDG_CACHE_HOME": "engine-home/.cache",
+                           "XDG_STATE_HOME": "engine-home/.local/state", "XDG_DATA_HOME": "engine-home/.local/share"},
+        "unsetConfigOverrides": ["ANTHROPIC_CONFIG_DIR", "ANTHROPIC_PROFILE", "CLAUDE_CONFIG_DIR"],
+        "sharedWithDirectAgents": False}
     assert isolation["roleCredentialRetention"] == {
         "claude-engine": ["CLAUDE_CODE_OAUTH_TOKEN"], "direct-agent": ["CLAUDE_CODE_OAUTH_TOKEN"]}
     assert isolation["credentialEnvironmentRoles"] == {"engine": "CLAUDE_CODE_OAUTH_TOKEN"}

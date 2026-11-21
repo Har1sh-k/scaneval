@@ -1355,6 +1355,8 @@ def main(argv: list[str]) -> int:
                 lifecycle_env = dict(os.environ)
                 lifecycle_env["PATH"] = (str(Path(config_value["engine"]["localPath"]) / "node_modules" / ".bin")
                                          + os.pathsep + lifecycle_env["PATH"])
+                # Variables something upstream of the engine launch might add to its inherited environment.
+                lifecycle_env.update(scenario.get("engine_probe_env", {}))
                 completed = subprocess.run(
                     [os.environ["npm_config_script_shell"], "-c", 'tsx "$1" "$2"', "sh", tool,
                      f"--fixture-env-output={output}"],
