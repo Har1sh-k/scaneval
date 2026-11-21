@@ -147,7 +147,7 @@ class Runtime:
         (self.bin / "npm").symlink_to(npm_root / "bin" / "npm-cli.js")
         self.npm_package = npm_root
         package_specs = {
-            "claude": ("@anthropic-ai/claude-code", "2.1.310", Path("bin/claude.exe")),
+            "claude": ("@anthropic-ai/claude-code", "2.1.325", Path("bin/claude.exe")),
             "gemini": ("@google/gemini-cli", "1.0.0", Path("bundle/gemini.js")),
             "pi": ("@earendil-works/pi-coding-agent", "1.4.0", Path("dist/bundle/cli.js")),
         }
@@ -160,7 +160,7 @@ class Runtime:
             (self.bin / agent).symlink_to(package_root / launcher_relative)
         agent_fixture = r'''#!/bin/sh
 if [ "$1" = "--version" ]; then
-  echo "2.1.310 (Claude Code)"
+  echo "2.1.325 (Claude Code)"
 fi
 exit 0
 '''
@@ -504,7 +504,7 @@ def test_preparation_records_pinned_identities_at_their_real_assurance(runtime):
     assert preparation["agent_shell"]["sha256"].startswith("sha256:")
     assert set(preparation["agents"]) == {"claude"}
     assert preparation["agents"]["claude"]["package_name"] == "@anthropic-ai/claude-code"
-    assert preparation["agents"]["claude"]["package_version"] == "2.1.310"
+    assert preparation["agents"]["claude"]["package_version"] == "2.1.325"
     assert preparation["probe_capabilities"]["pi"]["allIsolationFlags"] is True
     assert preparation["probe_capabilities"]["directAgentSecurityBoundaryAttested"] is False
     assert preparation["probe_capabilities"]["agents"]["claude"] == {
@@ -2625,7 +2625,7 @@ def test_real_runsortie_cli_with_fabricated_engine_and_agents(tmp_path, monkeypa
     package_specs = {
         "npm": ("npm", "10.9.0", "bin/npm-cli.js", "npm-empty" if empty else "npm"),
         "pi": ("@earendil-works/pi-coding-agent", "1.4.0", "dist/bundle/cli.js", "pi"),
-        "claude": ("@anthropic-ai/claude-code", "2.1.310", "bin/claude.js", challenger),
+        "claude": ("@anthropic-ai/claude-code", "2.1.325", "bin/claude.js", challenger),
     }
     for tool, (package_name, package_version, relative, mode) in package_specs.items():
         package_root = tmp_path / "packages" / tool
