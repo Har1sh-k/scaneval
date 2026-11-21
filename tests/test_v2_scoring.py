@@ -316,6 +316,20 @@ def test_unresolved_match_is_pending_not_a_hit_or_false_alarm():
     assert any("Unresolved target matches" in warning for warning in out["warnings"])
 
 
+def test_targets_with_only_unreviewed_candidates_are_named_in_a_warning_without_changing_recall():
+    """A draft run reads known_target_recall 0.0; the warning says the candidates were never reviewed."""
+    claims = [claim("c1", "first candidate", rank=1), claim("c2", "second candidate", rank=2),
+              claim("c3", "third candidate", rank=3)]
+    out = score_fixture(claims, matches=[("c1", "T1", "unresolved", "draft"), ("c2", "T2", "unresolved", "draft"),
+                                         ("c3", "T2", "rejected", "reviewed: not this root cause")])
+    assert out["metrics"]["known_target_recall"] == 0.0
+    assert ("1 target(s) have unreviewed candidate claims; known_target_recall counts them as missed until "
+            "reviewed.") in out["warnings"]
+
+    reviewed = score_fixture(claims[:1], matches=[("c1", "T1", "rejected", "reviewed")])
+    assert not any("unreviewed candidate claims" in warning for warning in reviewed["warnings"])
+
+
 def test_partial_output_keeps_claim_burden_and_target_hit_but_not_success_completion():
     c = claim("partial-hit", "partial root cause", rank=1)
     out = score_fixture(

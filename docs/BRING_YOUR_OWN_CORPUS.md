@@ -604,6 +604,7 @@ reporting-main__semgrep-local-rules__r1 status=success claims=1 plan=draft revie
  "metrics":{"targets_assigned":1,"targets_detected":0,"known_target_recall":0.0,"pending_matching_count":1},
  "warnings":["Draft labels (not independently reviewed): pipeline diagnostics, not benchmark evidence.",
              "Unresolved target matches earn no confirmed detection credit.",
+             "1 target(s) have unreviewed candidate claims; known_target_recall counts them as missed until reviewed.",
              "Random-order expectation is not native prioritization or a promotion metric."]}
 ```
 

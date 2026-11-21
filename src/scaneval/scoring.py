@@ -327,6 +327,13 @@ clock, randomness or LLM calls are used.
         warnings.append("Unresolved bundles: claim budgets and total atomic-claim burden are pending.")
     if claims["pending_matching"]:
         warnings.append("Unresolved target matches earn no confirmed detection credit.")
+    reviewed_targets = {match["target_id"] for match in decisions["claim_matches"]
+                        if match["decision"] in ("accepted", "rejected")}
+    unreviewed = sum(1 for row in observation["targets"]
+                     if row["unresolved_match"] and row["target_id"] not in reviewed_targets)
+    if unreviewed:
+        warnings.append(f"{unreviewed} target(s) have unreviewed candidate claims; known_target_recall counts "
+                        "them as missed until reviewed.")
     if result["ranking"] == "unranked":
         warnings.append("Random-order expectation is not native prioritization or a promotion metric.")
     if result["status"] != "success":
