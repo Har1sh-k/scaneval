@@ -75,6 +75,15 @@ _LFS_CONFIG = (
     ("filter.lfs.process", ""),
     ("filter.lfs.required", "false"),
 )
+# Local configuration every synthetic history sets before it adds a file: no automatic gc or
+# maintenance. A large add leaves thousands of loose objects, and git would otherwise start a
+# detached ``maintenance run --auto`` / ``gc --auto`` that repacks and prunes ``.git/objects``
+# after the commit has returned, while an adapter is already walking that directory.
+_NO_AUTO_MAINTENANCE_CONFIG = (
+    ("gc.auto", "0"),
+    ("maintenance.auto", "false"),
+    ("gc.autoDetach", "false"),
+)
 
 
 class MaterializationError(RuntimeError):
@@ -644,9 +653,14 @@ def prepare_synthetic_history(source_dir: Path, *, message: str = "snapshot") ->
     if (source_dir / ".git").exists():
         raise MaterializationError(f"{source_dir} already has git history")
     _git(["init", "-q"], source_dir)
+    # Before anything is added, so the blobs are the exported bytes: see :data:`HISTORY_ATTRIBUTES`.
+    info = source_dir / ".git" / "info"
+    info.mkdir(exist_ok=True)
+    (info / "attributes").write_text(HISTORY_ATTRIBUTES, encoding="utf-8")
     for key, value in (
         ("user.name", "ScanEval"), ("user.email", "scaneval@localhost"),
         ("commit.gpgsign", "false"), ("core.autocrlf", "false"), *_LFS_CONFIG,
+        *_NO_AUTO_MAINTENANCE_CONFIG,
     ):
         _git(["config", "--local", key, value], source_dir)
     # Force-add so an upstream .gitignore cannot drop exported files from the synthetic tree.
@@ -839,14 +853,16 @@ def audit_condition_history(source: Path, *, synthetic: dict | None = None,
 PR_HISTORY_IDENTITY = "ScanEval <scaneval@localhost>"
 PR_HISTORY_DATE = "2000-01-01T00:00:00+00:00"
 PR_HISTORY_MESSAGES = {"base": "base", "head": "head"}
-# What ``.git/info/attributes`` holds in the synthetic history of a PR input: every conversion git
+# What ``.git/info/attributes`` holds in every synthetic history (a PR input's and the single-commit
+# one of :func:`prepare_synthetic_history`): every conversion git
 # applies to content, unset for every path. ``text`` covers ``text=auto`` and the legacy ``crlf``
 # attribute, ``eol`` the line ending a checkout writes, ``ident`` the ``$Id$`` keyword, ``filter``
 # any clean or smudge filter (LFS included), and ``working-tree-encoding`` re-encoding. The file
 # outranks every ``.gitattributes`` in a tree and every attributes file a configuration names, and
 # that is why it is the one place this is said: an in-tree ``* text=auto`` or an operator's
 # ``~/.config/git/attributes`` cannot switch a conversion back on for a path it matches.
-PR_HISTORY_ATTRIBUTES = "* -text -eol -ident -filter -working-tree-encoding\n"
+HISTORY_ATTRIBUTES = "* -text -eol -ident -filter -working-tree-encoding\n"
+PR_HISTORY_ATTRIBUTES = HISTORY_ATTRIBUTES
 # Where a PR input's base export sits beneath its trial directory: ``base/source``.
 PR_BASE_DIR = "base"
 
@@ -916,7 +932,7 @@ def prepare_pr_history(source_dir: Path, base_dir: Path) -> dict:
         ("user.name", "ScanEval"), ("user.email", "scaneval@localhost"), ("commit.gpgsign", "false"),
         ("core.autocrlf", "false"), ("core.fileMode", "true"), ("diff.renames", "true"),
         ("core.attributesFile", os.devnull), ("core.hooksPath", os.devnull), ("core.fsmonitor", "false"),
-        *_LFS_CONFIG,
+        *_LFS_CONFIG, *_NO_AUTO_MAINTENANCE_CONFIG,
     ):
         _git(["config", "--local", key, value], source_dir)
     _git(["--work-tree", str(base_dir), "add", "-A", "-f", "."], source_dir)

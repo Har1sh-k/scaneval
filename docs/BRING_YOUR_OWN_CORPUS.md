@@ -505,6 +505,14 @@ the source cache, and every exported input; a workspace root that does not exist
 `--only-input` (input ids) and `--only-system` narrow the run and are refused when they name
 something the configuration does not contain. What was narrowed away is recorded in the manifest's
 `selection` and in the schedule's notes.
+When 3 consecutive invocations of one system end with its adapter reporting `llm_path_failed`
+(every model call failed), that system stops being invoked: each of its remaining assignments is a
+`skipped` invocation whose reason names the system, other systems keep running, and a manifest
+warning names the system and the invocation where it stopped. Only adapters that report
+`llm_path_failed` can trigger this (on main, the LLM harness adapter). Only a result showing the
+model path worked (`success`, or `partial` with any other error code) resets the count;
+`unsupported`, `timeout`, and other errors neither count nor reset it.
+`--stop-after-llm-path-failures N` changes the count; `0` disables the stop.
 
 `run` exits `1`, not `0`, when any input could not be prepared, when any invocation ended in
 `error`, `timeout`, or `skipped`, or when the manifest status is not `completed`. The bundles it
@@ -599,6 +607,7 @@ reporting-main__semgrep-local-rules__r1 status=success claims=1 plan=draft revie
  "metrics":{"targets_assigned":1,"targets_detected":0,"known_target_recall":0.0,"pending_matching_count":1},
  "warnings":["Draft labels (not independently reviewed): pipeline diagnostics, not benchmark evidence.",
              "Unresolved target matches earn no confirmed detection credit.",
+             "1 target(s) have unreviewed candidate claims; known_target_recall counts them as missed until reviewed.",
              "Random-order expectation is not native prioritization or a promotion metric."]}
 ```
 

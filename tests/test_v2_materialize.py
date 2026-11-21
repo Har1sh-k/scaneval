@@ -346,6 +346,31 @@ def test_synthetic_history_is_single_neutral_commit_covering_ignored_files(tmp_p
         prepare_synthetic_history(source)
 
 
+@pytest.mark.parametrize("kind", ["synthetic", "pr"])
+def test_synthetic_histories_switch_off_automatic_gc_and_maintenance(tmp_path, kind):
+    """A detached ``gc --auto`` used to prune ``.git/objects`` while an adapter walked it."""
+    head = write_tree(tmp_path / "head", {"a.py": "2\n"})
+    if kind == "synthetic":
+        prepare_synthetic_history(head)
+    else:
+        prepare_pr_history(head, write_tree(tmp_path / "base", {"a.py": "1\n"}))
+
+    for key, value in (("gc.auto", "0"), ("maintenance.auto", "false"), ("gc.autoDetach", "false")):
+        assert git("config", "--local", "--get", key, cwd=head) == value
+
+
+def test_synthetic_history_blobs_are_the_exported_bytes_under_an_in_tree_gitattributes(tmp_path):
+    """``* text=auto eol=lf`` used to store an LF blob for a CRLF file while the worktree kept CRLF."""
+    source = write_bytes_tree(tmp_path / "source", {".gitattributes": b"* text=auto eol=lf\n",
+                                                    "notes.txt": b"one\r\ntwo\r\n"})
+
+    history = prepare_synthetic_history(source)
+
+    expected = git("hash-object", "--no-filters", "notes.txt", cwd=source)
+    assert git("rev-parse", f"{history['commit']}:notes.txt", cwd=source) == expected
+    assert git_bytes("cat-file", "blob", f"{history['commit']}:notes.txt", cwd=source) == b"one\r\ntwo\r\n"
+
+
 def test_inspect_commit_reports_parent_and_dates_without_caching(tmp_path, upstream):
     from scaneval.materialize import inspect_commit
     repo, first = upstream
