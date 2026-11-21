@@ -3184,8 +3184,8 @@ class RunSortieAdapter(Adapter):
             scan_deadline.expired = True
             result.timed_out = True
         baseline = target.baseline
-        # A native failure recorded on RunSortie's catch path carries no heads; it is already an error,
-        # and a head it does name must still be the evaluated one.
+        # A native failure recorded on RunSortie's catch path may omit its heads (it is already an error);
+        # a head it does name must still be the evaluated one.
         named = (target.repository_head, target.product_head)
         heads_bound = ((all(head in (None, evaluated) for head in named) if target.outcome == "failed"
                         else all(head == evaluated for head in named))
