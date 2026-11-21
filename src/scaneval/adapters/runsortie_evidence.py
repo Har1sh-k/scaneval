@@ -1828,7 +1828,7 @@ def read_review_journal(data: bytes | None, *, evaluated: str, target: str, pack
         issues.append("a complete verification does not have a complete review-work journal")
     found = _issues(issues)
     # Notices explain a consistent but unmet review (a failed challenger); they never invalidate the journal.
-    return ReviewJournal("invalid" if found else "valid", _issues([*notices, *found]))
+    return ReviewJournal("invalid" if found else "valid", _issues([*found, *notices]))
 
 
 # --- work budget -----------------------------------------------------------------------------
@@ -2322,3 +2322,20 @@ def evaluate(facts: Facts) -> Verdict:
     if partial:
         return Verdict("partial", partial[0], tuple(partial))
     return Verdict("success", None, ())
+
+
+# Codes an all-model-calls-failed run may be relabelled over: RunSortie's own runtime/exit codes and
+# the acceptance/partial-only codes. Any integrity, identity, mutation or evidence code is absent here.
+_LLM_PATH_RELABELLABLE = frozenset({
+    "runsortie_no_exit", "runsortie_failed", *EXIT_CODES.values(),
+    "runsortie_no_changes", "runsortie_committed_incomplete", "baseline_retry_required", "baseline_blocked",
+    "review_required", "baseline_not_ready", "checkpoint_not_established", "acceptance_not_established",
+    "target_security_policy_not_established", "review_packets_not_established", "verification_unresolved",
+    "verification_incomplete", "verification_missing", "verification_invalid", "work_budget_exhausted",
+    "work_budget_not_established", "import_loss"})
+
+
+def llm_path_relabel_allowed(verdict: Verdict) -> bool:
+    """Whether *verdict* may be reported as ``llm_path_failed``: every unmet code is relabellable."""
+    return verdict.status in ("error", "partial") and bool(verdict.unmet) and all(
+        code in _LLM_PATH_RELABELLABLE or re.fullmatch(r"runsortie_exit_-?\d+", code) for code in verdict.unmet)

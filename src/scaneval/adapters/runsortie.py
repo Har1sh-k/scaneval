@@ -893,7 +893,10 @@ def _check_system_model(spec: SystemSpec, settings: Settings) -> None:
     if not spec.model_id:
         return
     engine = settings.engine_model
-    routes = {engine, engine[3:]} if engine.startswith("pi:") and len(engine) > 3 else {engine}
+    base = engine[3:] if engine.startswith("pi:") and len(engine) > 3 else engine
+    bare = base.partition("/")[2]
+    # model_id is a free label: the route, with or without ``pi:``, or the model id after the provider.
+    routes = {engine, base, f"pi:{base}"} | ({bare, f"pi:{bare}"} if bare else set())
     if spec.model_id not in routes:
         raise AdapterError(
             f"system model_id {spec.model_id!r} differs from config.engine_model {engine!r}; results would be "
@@ -1964,8 +1967,6 @@ def _import_runsortie_findings(snapshot: EvidenceSnapshot, stage_dir: Path, encl
             "raw_artifact_id": f"runsortie-findings/{name}",
         }
         site, site_error = _native_scan_site(record)
-        if site_error:
-            notes.append(f"{finding_id}: {site_error}; location kept file-level")
         if site is not None:
             line = site.get("line")
             if isinstance(line, int) and not isinstance(line, bool) and line > 0:
@@ -1981,6 +1982,10 @@ def _import_runsortie_findings(snapshot: EvidenceSnapshot, stage_dir: Path, encl
             line = _structural_location_line(record, file_path)
             if line is not None:
                 claim["primary_location"].update(start_line=line, end_line=line)
+            if site_error:
+                notes.append(f"{finding_id}: {site_error}; " + (
+                    "location kept file-level" if line is None
+                    else f"line {line} taken from the structural sink/source location"))
         if reasoning and reasoning != "N/A":
             claim["evidence_text"] = reasoning
         severity = record.get("severity")
@@ -3273,8 +3278,8 @@ class RunSortieAdapter(Adapter):
                            f"not the ScanEval deadline); {message}")
         code = verdict.code
         acceptance_reasons = (*acceptance.reasons, *((baseline.acceptance_reasons or ()) if baseline else ()))
-        if code is not None and evidence.all_llm_calls_failed(acceptance_reasons) and (
-                verdict.status == "partial" or (verdict.status == "error" and code.startswith("runsortie_"))):
+        if code is not None and evidence.all_llm_calls_failed(acceptance_reasons) \
+                and evidence.llm_path_relabel_allowed(verdict):
             code = "llm_path_failed"
             message = f"every model call failed: {evidence.provider_failure_cause(model_failures)}; {message}"
         error = None if code is None else {

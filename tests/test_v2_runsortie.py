@@ -309,9 +309,17 @@ def test_a_system_model_id_that_is_not_the_engine_route_is_refused(runtime):
     rs._check_system_model(SystemSpec("s", "runsortie", config, model_id="anthropic/claude-sonnet-5-5"),
                            read_settings(config))
     rs._check_system_model(SystemSpec("s", "runsortie", config), read_settings(config))
+    for label in ("pi:anthropic/claude-sonnet-5-5", "claude-sonnet-5-5", "pi:claude-sonnet-5-5"):
+        rs._check_system_model(SystemSpec("s", "runsortie", config, model_id=label), read_settings(config))
+    for label in ("claude-sonnet-4-5", "pi:claude-sonnet-4-5", "anthropic", "openai/claude-sonnet-5-5"):
+        with pytest.raises(AdapterError, match="differs from config.engine_model"):
+            rs._check_system_model(SystemSpec("s", "runsortie", config, model_id=label), read_settings(config))
     pi = runtime.config(engine_model="pi:anthropic/claude-sonnet-5-5")
-    rs._check_system_model(SystemSpec("s", "runsortie", pi, model_id="anthropic/claude-sonnet-5-5"),
-                           read_settings(pi))
+    for label in ("anthropic/claude-sonnet-5-5", "pi:anthropic/claude-sonnet-5-5", "claude-sonnet-5-5"):
+        rs._check_system_model(SystemSpec("s", "runsortie", pi, model_id=label), read_settings(pi))
+    with pytest.raises(AdapterError, match="differs from config.engine_model"):
+        rs._check_system_model(SystemSpec("s", "runsortie", pi, model_id="anthropic/claude-sonnet-4-5"),
+                               read_settings(pi))
 
 
 def test_git_plumbing_ignores_and_workspace_guard_rejects_replace_refs(tmp_path, monkeypatch):
@@ -1058,6 +1066,23 @@ def test_claim_lines_come_from_structural_sink_or_source_location_of_the_same_fi
     assert locations["FG-LOG-0003"] == {"path": "src/app.py"}, "another file's location is not borrowed"
 
 
+def test_a_malformed_scan_site_note_says_file_level_only_when_no_structural_line_was_set(runtime):
+    findings = [
+        {**FINDINGS[0], "scan_site_json_b64": "not-base64", "structural_evidence": ["sink-location=src/app.py:4"]},
+        {**FINDINGS[1], "scan_site_json_b64": "not-base64"},
+        FINDINGS[2],
+    ]
+    result, execution, _ = _run(runtime, {"engine": {"findings": findings}})
+    locations = {claim["claim_id"]: claim["primary_location"] for claim in result["claims"]}
+    assert locations["FG-CMDI-0001"] == {"path": "src/app.py", "start_line": 4, "end_line": 4}
+    assert locations["FG-SQLI-0002"] == {"path": "src/db.py"}
+    notes = execution["notes"]
+    assert "FG-CMDI-0001: scan site could not be decoded; line 4 taken from the structural sink/source location" \
+        in notes
+    assert not any(note.startswith("FG-CMDI-0001:") and "file-level" in note for note in notes)
+    assert "FG-SQLI-0002: scan site could not be decoded; location kept file-level" in notes
+
+
 def test_structural_location_line_requires_a_positive_line_in_the_claim_file():
     line = rs._structural_location_line
     assert line({"structural_evidence": ["sink-location=oauthproxy.go:583"]}, "oauthproxy.go") == 583
@@ -1304,6 +1329,8 @@ def test_an_engine_failure_after_findings_is_an_error_that_keeps_them(runtime):
     assert "model provider unavailable" in result["error"]["message"], "the stderr tail explains the failure"
     assert len(result["claims"]) == 3 and result["bundles_resolved"] is False
     assert _reconciliation(bundle)["native"]["outcome"] == "failed"
+    assert _reconciliation(bundle)["verdict"]["unmet"] == ["runsortie_runtime", "runsortie_failed"], \
+        "an untampered engine failure records its heads, as real RunSortie does"
 
 
 CREDIT_FAILURE = ('400 {"type":"error","error":{"type":"invalid_request_error","message":'
@@ -1353,6 +1380,33 @@ def test_every_model_call_failing_on_provider_billing_is_llm_path_failed(runtime
         "every model call failed: provider billing (credit balance too low); ")
     assert "runsortie_runtime" in result["error"]["message"], "the native exit code stays visible"
     assert len(result["claims"]) == 3
+
+
+def test_every_model_call_failing_never_relabels_a_product_mutation(runtime):
+    result, _, bundle = _run(runtime, {
+        "engine": {"findings": FINDINGS, "acceptance": {"status": "inconclusive", "reasons": ["all_llm_calls_failed"]}},
+        "primary": {"write_outside": "src/app.py", "exit": 1}})
+    unmet = _reconciliation(bundle)["verdict"]["unmet"]
+    assert unmet[0] == "runsortie_runtime" and "product_mutation" in unmet
+    assert result["status"] == "error" and result["error"]["code"] == "runsortie_runtime", \
+        "the integrity break is not hidden behind llm_path_failed"
+    assert not result["error"]["message"].startswith("every model call failed")
+
+
+def test_llm_path_relabel_is_allowed_only_over_runtime_and_partial_only_codes():
+    allowed = ev.llm_path_relabel_allowed
+    assert allowed(ev.Verdict("error", "runsortie_runtime", ("runsortie_runtime",)))
+    assert allowed(ev.Verdict("error", "runsortie_exit_3", ("runsortie_exit_3", "runsortie_failed")))
+    assert allowed(ev.Verdict("partial", "runsortie_committed_incomplete",
+                              ("runsortie_committed_incomplete", "acceptance_not_established")))
+    for code in ("product_mutation", "runtime_identity_changed", "head_mismatch", "evidence_commit_invalid",
+                 "product_mutation_committed", "native_state_invalid", "evidence_head_mismatch"):
+        assert not allowed(ev.Verdict("error", "runsortie_runtime", ("runsortie_runtime", code))), code
+    for code in ("evidence_commit_unmatched", "evidence_preservation_failed"):
+        assert not allowed(ev.Verdict("partial", "runsortie_committed_incomplete",
+                                      ("runsortie_committed_incomplete", code))), code
+    assert not allowed(ev.Verdict("timeout", "timeout", ("the shared ScanEval deadline expired",)))
+    assert not allowed(ev.Verdict("success", None, ()))
 
 
 def test_runsorties_own_one_hour_engine_timeout_is_named(runtime):
@@ -1455,6 +1509,8 @@ def test_a_failed_challenger_paired_with_a_conclusive_group_is_still_refused(run
     journal = receipt["readings"]["review_work_journal"]
     assert journal["state"] == "invalid"
     assert "a challenger journal result does not equal its source-bound verification group" in journal["issues"]
+    notice = [issue.startswith("challenger failed: ") for issue in journal["issues"]]
+    assert any(notice) and notice == sorted(notice), "defects precede notices so truncation cannot hide them"
 
 
 def test_an_inconclusive_disposition_the_native_summary_calls_complete_is_still_partial(runtime):
