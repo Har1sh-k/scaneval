@@ -320,11 +320,19 @@ def test_targets_with_only_unreviewed_candidates_are_named_in_a_warning_without_
     """A draft run reads known_target_recall 0.0; the warning says the candidates were never reviewed."""
     claims = [claim("c1", "first candidate", rank=1), claim("c2", "second candidate", rank=2),
               claim("c3", "third candidate", rank=3)]
+    # T2 has one rejected and one still-unresolved candidate: recall counts it as missed, so it is counted.
     out = score_fixture(claims, matches=[("c1", "T1", "unresolved", "draft"), ("c2", "T2", "unresolved", "draft"),
                                          ("c3", "T2", "rejected", "reviewed: not this root cause")])
     assert out["metrics"]["known_target_recall"] == 0.0
-    assert ("1 target(s) have unreviewed candidate claims; known_target_recall counts them as missed until "
+    assert ("2 target(s) have unreviewed candidate claims; known_target_recall counts them as missed until "
             "reviewed.") in out["warnings"]
+
+    # T1 is detected through c3 although c1 is still unresolved for it: only T2 is counted.
+    detected = score_fixture(claims, matches=[("c1", "T1", "unresolved", "draft"), ("c3", "T1", "accepted", "reviewed"),
+                                              ("c2", "T2", "unresolved", "draft")])
+    assert detected["metrics"]["targets_detected"] == 1
+    assert ("1 target(s) have unreviewed candidate claims; known_target_recall counts them as missed until "
+            "reviewed.") in detected["warnings"]
 
     reviewed = score_fixture(claims[:1], matches=[("c1", "T1", "rejected", "reviewed")])
     assert not any("unreviewed candidate claims" in warning for warning in reviewed["warnings"])
