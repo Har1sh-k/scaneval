@@ -26,6 +26,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 import zlib
 
 import pytest
@@ -146,7 +147,7 @@ class Runtime:
         (self.bin / "npm").symlink_to(npm_root / "bin" / "npm-cli.js")
         self.npm_package = npm_root
         package_specs = {
-            "claude": ("@anthropic-ai/claude-code", "2.1.310", Path("bin/claude.exe")),
+            "claude": ("@anthropic-ai/claude-code", "2.1.325", Path("bin/claude.exe")),
             "gemini": ("@google/gemini-cli", "1.0.0", Path("bundle/gemini.js")),
             "pi": ("@earendil-works/pi-coding-agent", "1.4.0", Path("dist/bundle/cli.js")),
         }
@@ -159,7 +160,7 @@ class Runtime:
             (self.bin / agent).symlink_to(package_root / launcher_relative)
         agent_fixture = r'''#!/bin/sh
 if [ "$1" = "--version" ]; then
-  echo "2.1.310 (Claude Code)"
+  echo "2.1.325 (Claude Code)"
 fi
 exit 0
 '''
@@ -297,6 +298,28 @@ def test_runsortie_is_a_standalone_adapter_and_llm_harness_keeps_its_meaning():
     harness = get_adapter("llm-harness")
     assert harness.name == "llm-harness" and harness.adapter_version == "2.7.0"
     assert type(harness).__module__ == "scaneval.adapters.llm_harness"
+
+
+def test_a_system_model_id_that_is_not_the_engine_route_is_refused(runtime):
+    adapter = get_adapter("runsortie")
+    config = runtime.config(engine_model="anthropic/claude-sonnet-5-5")
+    with pytest.raises(AdapterError, match="differs from config.engine_model"):
+        adapter.prepare(SystemSpec("runsortie-fake", "runsortie", config, model_id="anthropic/claude-sonnet-4-5"),
+                        runtime.tmp / "cache")
+    rs._check_system_model(SystemSpec("s", "runsortie", config, model_id="anthropic/claude-sonnet-5-5"),
+                           read_settings(config))
+    rs._check_system_model(SystemSpec("s", "runsortie", config), read_settings(config))
+    for label in ("pi:anthropic/claude-sonnet-5-5", "claude-sonnet-5-5", "pi:claude-sonnet-5-5"):
+        rs._check_system_model(SystemSpec("s", "runsortie", config, model_id=label), read_settings(config))
+    for label in ("claude-sonnet-4-5", "pi:claude-sonnet-4-5", "anthropic", "openai/claude-sonnet-5-5"):
+        with pytest.raises(AdapterError, match="differs from config.engine_model"):
+            rs._check_system_model(SystemSpec("s", "runsortie", config, model_id=label), read_settings(config))
+    pi = runtime.config(engine_model="pi:anthropic/claude-sonnet-5-5")
+    for label in ("anthropic/claude-sonnet-5-5", "pi:anthropic/claude-sonnet-5-5", "claude-sonnet-5-5"):
+        rs._check_system_model(SystemSpec("s", "runsortie", pi, model_id=label), read_settings(pi))
+    with pytest.raises(AdapterError, match="differs from config.engine_model"):
+        rs._check_system_model(SystemSpec("s", "runsortie", pi, model_id="anthropic/claude-sonnet-4-5"),
+                               read_settings(pi))
 
 
 def test_git_plumbing_ignores_and_workspace_guard_rejects_replace_refs(tmp_path, monkeypatch):
@@ -489,7 +512,7 @@ def test_preparation_records_pinned_identities_at_their_real_assurance(runtime):
     assert preparation["agent_shell"]["sha256"].startswith("sha256:")
     assert set(preparation["agents"]) == {"claude"}
     assert preparation["agents"]["claude"]["package_name"] == "@anthropic-ai/claude-code"
-    assert preparation["agents"]["claude"]["package_version"] == "2.1.310"
+    assert preparation["agents"]["claude"]["package_version"] == "2.1.325"
     assert preparation["probe_capabilities"]["pi"]["allIsolationFlags"] is True
     assert preparation["probe_capabilities"]["directAgentSecurityBoundaryAttested"] is False
     assert preparation["probe_capabilities"]["agents"]["claude"] == {
@@ -1029,6 +1052,46 @@ def test_exact_root_multi_member_packet_and_verification_are_accepted_end_to_end
     assert group["findingIds"] == ["FG-GROUP-0001", "FG-GROUP-0002"]
 
 
+def test_claim_lines_come_from_structural_sink_or_source_location_of_the_same_file(runtime):
+    findings = [
+        {**FINDINGS[0], "structural_evidence": ["source-location=src/app.py:3", "sink-location=./src/app.py:4"]},
+        {**FINDINGS[1], "structural_evidence": ["flow=v to execute", "source-location=src/db.py:1"]},
+        {**FINDINGS[2], "structural_evidence": ["sink-location=src/other.py:9"]},
+    ]
+    result, _, _ = _run(runtime, {"engine": {"findings": findings}})
+    assert result["status"] == "success", result.get("error")
+    locations = {claim["claim_id"]: claim["primary_location"] for claim in result["claims"]}
+    assert locations["FG-CMDI-0001"] == {"path": "src/app.py", "start_line": 4, "end_line": 4}, "sink preferred"
+    assert locations["FG-SQLI-0002"] == {"path": "src/db.py", "start_line": 1, "end_line": 1}
+    assert locations["FG-LOG-0003"] == {"path": "src/app.py"}, "another file's location is not borrowed"
+
+
+def test_a_malformed_scan_site_note_says_file_level_only_when_no_structural_line_was_set(runtime):
+    findings = [
+        {**FINDINGS[0], "scan_site_json_b64": "not-base64", "structural_evidence": ["sink-location=src/app.py:4"]},
+        {**FINDINGS[1], "scan_site_json_b64": "not-base64"},
+        FINDINGS[2],
+    ]
+    result, execution, _ = _run(runtime, {"engine": {"findings": findings}})
+    locations = {claim["claim_id"]: claim["primary_location"] for claim in result["claims"]}
+    assert locations["FG-CMDI-0001"] == {"path": "src/app.py", "start_line": 4, "end_line": 4}
+    assert locations["FG-SQLI-0002"] == {"path": "src/db.py"}
+    notes = execution["notes"]
+    assert "FG-CMDI-0001: scan site could not be decoded; line 4 taken from the structural sink/source location" \
+        in notes
+    assert not any(note.startswith("FG-CMDI-0001:") and "file-level" in note for note in notes)
+    assert "FG-SQLI-0002: scan site could not be decoded; location kept file-level" in notes
+
+
+def test_structural_location_line_requires_a_positive_line_in_the_claim_file():
+    line = rs._structural_location_line
+    assert line({"structural_evidence": ["sink-location=oauthproxy.go:583"]}, "oauthproxy.go") == 583
+    assert line({"structural_evidence": "source-location=a\\b.go:7"}, "a/b.go") == 7
+    assert line({"structural_evidence": ["sink-location=a.go:0", "sink-location=a.go:x"]}, "a.go") is None
+    assert line({"structural_evidence": ["sink-location=a.go"]}, "a.go") is None
+    assert line({}, "a.go") is None
+
+
 def test_native_utf16_sort_order_binds_unicode_packet_hash_plan_and_journal(runtime):
     """U+10000 sorts before U+E000 in JavaScript UTF-16 order, opposite Python code-point order."""
     astral, bmp = "\U00010000-capability", "\ue000-capability"
@@ -1266,6 +1329,92 @@ def test_an_engine_failure_after_findings_is_an_error_that_keeps_them(runtime):
     assert "model provider unavailable" in result["error"]["message"], "the stderr tail explains the failure"
     assert len(result["claims"]) == 3 and result["bundles_resolved"] is False
     assert _reconciliation(bundle)["native"]["outcome"] == "failed"
+    assert _reconciliation(bundle)["verdict"]["unmet"] == ["runsortie_runtime", "runsortie_failed"], \
+        "an untampered engine failure records its heads, as real RunSortie does"
+
+
+CREDIT_FAILURE = ('400 {"type":"error","error":{"type":"invalid_request_error","message":'
+                  '"Your credit balance is too low to access the Anthropic API."}}')
+
+
+@pytest.mark.parametrize("text,cause", [
+    (CREDIT_FAILURE, "billing"),
+    ("429 insufficient_quota: You exceeded your current quota", "billing"),
+    ('401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}',
+     "authentication"),
+    ('403 {"type":"error","error":{"type":"permission_error"}}', "permission"),
+    ('429 {"type":"error","error":{"type":"rate_limit_error"}}', "rate_limit"),
+    ('529 {"type":"error","error":{"type":"overloaded_error"}}', "other"),
+])
+def test_provider_failure_texts_are_classified_by_cause(text, cause):
+    assert ev.classify_provider_failure(text)[0] == cause
+
+
+def test_provider_failure_cause_reads_only_bounded_model_work_records():
+    files = {
+        "model-work/a.json": json.dumps({"items": [{"state": "failed", "attempts": [
+            {"failureKind": CREDIT_FAILURE}, {"failureKind": CREDIT_FAILURE}]}]}).encode(),
+        "model-work/b.json": json.dumps({"failureKind": "429 rate_limit_error"}).encode(),
+        "review-work/c.json": json.dumps({"failureKind": "401 authentication_error"}).encode(),
+        "model-work/broken.json": b"{not json",
+    }
+    texts = ev.model_work_failures(files)
+    assert texts == (CREDIT_FAILURE, CREDIT_FAILURE, "429 rate_limit_error")
+    assert ev.provider_failure_cause(texts) == "provider billing (credit balance too low)"
+    assert ev.provider_failure_cause(()) == "provider cause not recorded"
+    assert ev.all_llm_calls_failed(["required_hypotheses_incomplete:1/2", "all_llm_calls_failed"])
+    assert not ev.all_llm_calls_failed(["required_hypotheses_incomplete:1/2"])
+
+
+def test_every_model_call_failing_on_provider_billing_is_llm_path_failed(runtime):
+    work = {"version": 1, "items": [{"state": "failed", "attempts": [
+        {"status": "failed", "at": "2026-11-20T00:00:00.000Z", "failureKind": CREDIT_FAILURE}]}]}
+    result, _, bundle = _run(runtime, {
+        "engine": {"findings": FINDINGS, "exit": 2,
+                   "acceptance": {"status": "inconclusive", "reasons": ["all_llm_calls_failed"]}},
+        "hooks": {"after_engine_write": [{"op": "state_write", "path": "model-work/fixture-work.json",
+                                          "text": json.dumps(work)}]},
+    })
+    assert result["status"] == "error" and result["error"]["code"] == "llm_path_failed"
+    assert result["error"]["message"].startswith(
+        "every model call failed: provider billing (credit balance too low); ")
+    assert "runsortie_runtime" in result["error"]["message"], "the native exit code stays visible"
+    assert len(result["claims"]) == 3
+
+
+def test_every_model_call_failing_never_relabels_a_product_mutation(runtime):
+    result, _, bundle = _run(runtime, {
+        "engine": {"findings": FINDINGS, "acceptance": {"status": "inconclusive", "reasons": ["all_llm_calls_failed"]}},
+        "primary": {"write_outside": "src/app.py", "exit": 1}})
+    unmet = _reconciliation(bundle)["verdict"]["unmet"]
+    assert unmet[0] == "runsortie_runtime" and "product_mutation" in unmet
+    assert result["status"] == "error" and result["error"]["code"] == "runsortie_runtime", \
+        "the integrity break is not hidden behind llm_path_failed"
+    assert not result["error"]["message"].startswith("every model call failed")
+
+
+def test_llm_path_relabel_is_allowed_only_over_runtime_and_partial_only_codes():
+    allowed = ev.llm_path_relabel_allowed
+    assert allowed(ev.Verdict("error", "runsortie_runtime", ("runsortie_runtime",)))
+    assert allowed(ev.Verdict("error", "runsortie_exit_3", ("runsortie_exit_3", "runsortie_failed")))
+    assert allowed(ev.Verdict("partial", "runsortie_committed_incomplete",
+                              ("runsortie_committed_incomplete", "acceptance_not_established")))
+    for code in ("product_mutation", "runtime_identity_changed", "head_mismatch", "evidence_commit_invalid",
+                 "product_mutation_committed", "native_state_invalid", "evidence_head_mismatch"):
+        assert not allowed(ev.Verdict("error", "runsortie_runtime", ("runsortie_runtime", code))), code
+    for code in ("evidence_commit_unmatched", "evidence_preservation_failed"):
+        assert not allowed(ev.Verdict("partial", "runsortie_committed_incomplete",
+                                      ("runsortie_committed_incomplete", code))), code
+    assert not allowed(ev.Verdict("timeout", "timeout", ("the shared ScanEval deadline expired",)))
+    assert not allowed(ev.Verdict("success", None, ()))
+
+
+def test_runsorties_own_one_hour_engine_timeout_is_named(runtime):
+    result, _, _ = _run(runtime, {"engine": {"findings": FINDINGS, "exit": 2,
+                                             "error": "scan engine exceeded the one-hour timeout"}})
+    assert result["status"] == "error" and result["error"]["code"] == "runsortie_runtime"
+    assert result["error"]["message"].startswith(
+        "RunSortie's scan engine exceeded its own one-hour timeout (a RunSortie limit, not the ScanEval deadline)")
 
 
 def test_a_guard_failure_after_findings_is_an_error_that_keeps_them(runtime):
@@ -1338,6 +1487,30 @@ def test_a_failed_challenger_is_partial(runtime):
     receipt = _reconciliation(bundle)
     assert result["status"] == "partial" and "verification_incomplete" in receipt["verdict"]["unmet"]
     assert receipt["native"]["outcome"] == "committed-incomplete"
+
+
+def test_a_failed_challenger_fail_closed_as_inconclusive_is_a_consistent_journal(runtime):
+    result, _, bundle = _run(runtime, {"engine": {"findings": FINDINGS}, "challenger": {"FG-CMDI-0001": "fail"}})
+    receipt = _reconciliation(bundle)
+    assert result["status"] == "partial" and "verification_incomplete" in receipt["verdict"]["unmet"]
+    assert receipt["readings"]["review_work_journal"] == {
+        "state": "valid", "issues": ["challenger failed: fixture challenger failure"]}
+    assert "challenger failed: fixture challenger failure" in result["error"]["message"]
+    assert "does not equal its source-bound verification group" not in result["error"]["message"]
+
+
+def test_a_failed_challenger_paired_with_a_conclusive_group_is_still_refused(runtime):
+    result, _, bundle = _run(runtime, {
+        "engine": {"findings": FINDINGS}, "challenger": {"FG-CMDI-0001": "fail", "FG-SQLI-0002": "fail"},
+        "hooks": {"before_commit": [{"op": "json_set", "path": ".fieldglass/verification-summary.json",
+                                     "keys": ["groups", 0, "verdict"], "value": "CONFIRMED VULNERABLE"}]}})
+    receipt = _reconciliation(bundle)
+    assert result["status"] != "success"
+    journal = receipt["readings"]["review_work_journal"]
+    assert journal["state"] == "invalid"
+    assert "a challenger journal result does not equal its source-bound verification group" in journal["issues"]
+    notice = [issue.startswith("challenger failed: ") for issue in journal["issues"]]
+    assert any(notice) and notice == sorted(notice), "defects precede notices so truncation cannot hide them"
 
 
 def test_an_inconclusive_disposition_the_native_summary_calls_complete_is_still_partial(runtime):
@@ -2385,6 +2558,33 @@ def test_emergency_cleanup_uses_a_fresh_budget_after_the_scan_deadline_expires(t
     assert not root.exists()
 
 
+def test_post_run_evidence_budget_keeps_the_scan_deadline_unless_the_scan_timed_out():
+    grace = rs.POST_RUN_EVIDENCE_GRACE_SECONDS
+    roomy = rs.Deadline(1000)
+    early = rs._post_run_deadline(roomy, False)
+    assert abs(early.ends - roomy.ends) < 1, "an early exit keeps the remaining scan budget"
+    nearly_spent = rs.Deadline(1)
+    floor = rs._post_run_deadline(nearly_spent, False)
+    assert floor.ends - floor.started >= grace - 0.01, "never less than the grace"
+    timed_out = rs._post_run_deadline(roomy, True)
+    assert abs((timed_out.ends - timed_out.started) - grace) < 0.01, "a real timeout keeps only the grace"
+
+
+def test_slow_post_run_evidence_work_after_an_early_exit_is_not_a_timeout(runtime, monkeypatch):
+    # Shrink the grace instead of sleeping 30 s: post-run work longer than the grace must still finish.
+    monkeypatch.setattr(rs, "POST_RUN_EVIDENCE_GRACE_SECONDS", 0.2)
+    native = rs._snapshot_evidence_tree
+
+    def slow_snapshot(*args, **kwargs):
+        time.sleep(0.6)
+        return native(*args, **kwargs)
+
+    monkeypatch.setattr(rs, "_snapshot_evidence_tree", slow_snapshot)
+    result, execution, _bundle = _run(runtime, {"engine": {"findings": FINDINGS}})
+    assert result["status"] == "success" and execution["timed_out"] is False
+    assert _claim_ids(result) == ["FG-CMDI-0001", "FG-LOG-0003", "FG-SQLI-0002"]
+
+
 def test_dependency_symlink_chain_above_the_explicit_hop_bound_is_refused(tmp_path):
     root = tmp_path / "package"
     root.mkdir()
@@ -2481,7 +2681,7 @@ def test_real_runsortie_cli_with_fabricated_engine_and_agents(tmp_path, monkeypa
     package_specs = {
         "npm": ("npm", "10.9.0", "bin/npm-cli.js", "npm-empty" if empty else "npm"),
         "pi": ("@earendil-works/pi-coding-agent", "1.4.0", "dist/bundle/cli.js", "pi"),
-        "claude": ("@anthropic-ai/claude-code", "2.1.310", "bin/claude.js", challenger),
+        "claude": ("@anthropic-ai/claude-code", "2.1.325", "bin/claude.js", challenger),
     }
     for tool, (package_name, package_version, relative, mode) in package_specs.items():
         package_root = tmp_path / "packages" / tool

@@ -573,6 +573,10 @@ class Run:
                 "root_cause_fingerprint_version": 2, "root_cause_fingerprint": root_fingerprint,
                 "root_cause_evidence_hash": root_hash, "root_cause_identity_status": "exact",
                 "root_cause_evidence": root_evidence,
+                **({"structural_evidence": finding["structural_evidence"]}
+                   if finding.get("structural_evidence") else {}),
+                **({"scan_site_json_b64": finding["scan_site_json_b64"]}
+                   if "scan_site_json_b64" in finding else {}),
             }
             name = finding.get("record", f"{finding['id'].lower()}-finding.md")
             (findings_dir / name).write_text(frontmatter(record) + f"# {record['title']}\n\n## Reasoning\nReason {finding['id']}.\n",
@@ -597,7 +601,8 @@ class Run:
         if engine.get("sleep"):
             time.sleep(engine["sleep"])
         if engine.get("exit", 0):
-            raise RuntimeError(f"scan engine failed with exit {engine['exit']}: model provider unavailable")
+            raise RuntimeError(engine.get(
+                "error", f"scan engine failed with exit {engine['exit']}: model provider unavailable"))
 
     def read_acceptance(self, product_head: str) -> dict:
         value = read_json(self.out / "baseline-acceptance.json")
@@ -1177,6 +1182,7 @@ def scan(scenario: dict, config: dict, target_name: str) -> int:
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.mkdir()
     budget = None
+    before_head = product_head = None
     try:
         if git(run.repo, "branch", "--show-current") != run.target["branch"]:
             raise RuntimeError("target is on another branch")
@@ -1281,8 +1287,16 @@ def scan(scenario: dict, config: dict, target_name: str) -> int:
     except Exception as error:  # the native catch path
         if budget is not None:
             budget.finish()
-        run.record_run({"target": target_name, "lastAttemptAt": attempted, "outcome": "failed", "message": str(error),
-                        **({"workBudget": budget.snapshot()} if budget is not None else {})})
+        # Like real RunSortie, the failed record names the heads once they were determined.
+        heads: dict = {}
+        if before_head is not None:
+            heads = {"repositoryHead": before_head, **({"productHead": product_head} if product_head else {})}
+            try:
+                heads["evidenceHead"] = git(run.repo, "rev-parse", "HEAD")
+            except Exception:
+                pass
+        run.record_run({"target": target_name, "lastAttemptAt": attempted, "outcome": "failed", **heads,
+                        "message": str(error), **({"workBudget": budget.snapshot()} if budget is not None else {})})
         print(f"✗ {target_name}: {error}", file=sys.stderr)
         return EXIT_RUNTIME
     finally:
