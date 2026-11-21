@@ -96,7 +96,7 @@ PLAN_MODE = "full"
 SCAN_MODES = ("full", "pr")
 DEFAULT_PROGRESS_INTERVAL_SECONDS = 30.0
 # The error code an adapter reports when every model call of an invocation failed, and how many
-# consecutive such invocations stop a run from invoking more (a model-provider outage).
+# consecutive such invocations of one system stop that system from being invoked again.
 LLM_PATH_FAILED = "llm_path_failed"
 DEFAULT_STOP_AFTER_LLM_PATH_FAILURES = 3
 ProgressReporter = Callable[[str], None]
@@ -971,10 +971,21 @@ def _evaluate_bundle(bundle: Path, pack: dict, spec: _InputSpec, prepared: execu
     return plan, record, evaluation, notes
 
 
-def _result_error_code(bundle: Path) -> str | None:
-    """The error code the bundle's saved result carries, or None when it carries no error."""
-    error = load_document(bundle / "result.json", "scan-result").get("error")
-    return error.get("code") if isinstance(error, dict) else None
+def _llm_path_outcome(bundle: Path) -> bool | None:
+    """What the bundle's saved result says about its model path: True failed, False worked, None says nothing.
+
+    Failed is the error code ``llm_path_failed``. Worked is ``success`` or ``partial`` with any other
+    code or none. Everything else (``unsupported``, ``timeout``, an ``error`` such as an adapter
+    failure before the scanner ran) never reached a verdict on the model path.
+    """
+    result = load_document(bundle / "result.json", "scan-result")
+    error = result.get("error")
+    code = error.get("code") if isinstance(error, dict) else None
+    if code == LLM_PATH_FAILED:
+        return True
+    if result["status"] in ("success", "partial"):
+        return False
+    return None
 
 
 def _skipped_invocation(row: dict, reason: str) -> dict:
@@ -1077,12 +1088,16 @@ def run_from_config(
     and the exception is re-raised; if writing that partial manifest itself fails, that error
     propagates with the original as its context.
 
-    A model-provider outage stops the invoking. After ``stop_after_llm_path_failures``
-    consecutive invocations whose result carries the error code ``llm_path_failed`` (every model
-    call failed), every remaining assignment is recorded as a skipped invocation with that reason,
-    no adapter is called for it, and a manifest warning names the invocation where the run
-    stopped. Any other result resets the count; 0 disables the stop. The run is still
-    ``completed``: the loop finished, and the skips say what was not scanned.
+    A system stops being invoked after ``stop_after_llm_path_failures`` consecutive invocations of
+    it whose result carries the error code ``llm_path_failed``, which an adapter reports when every
+    model call failed; only adapters that report that code can trigger this. The count is kept per
+    system. Only a result showing the model path worked (``success`` or ``partial`` with any other
+    error code) resets it; ``unsupported``, ``timeout``, and other errors neither count nor reset.
+    Every remaining assignment of that system is recorded as a skipped invocation naming the
+    system, no adapter is called for it, other systems keep running, and a manifest warning names
+    the system and the invocation where it stopped when at least one assignment was skipped. 0
+    disables the stop. The run is still ``completed``: the loop finished, and the skips say what
+    was not scanned.
 
     This does not approve any label, does not retry or rerun a failed invocation, and does not
     aggregate across inputs or systems. It enforces the declared network policy only for a system
@@ -1207,8 +1222,10 @@ def run_from_config(
                     if row["preparation_failure"] is not None}
         total_invocations = len(inputs) * len(prepared_systems) * repetitions
         invocation_number = 0
-        llm_path_failures = 0
-        outage_stop: str | None = None
+        # Per system: consecutive llm_path_failed results, and for a stopped system its skip reason
+        # and the warning, which is added once an assignment of it is actually skipped.
+        llm_path_failures: dict[str, int] = {}
+        stopped: dict[str, dict[str, Any]] = {}
         for spec in inputs:
             prepared = prepared_by_id.get(spec.input_id)
             for system in prepared_systems:
@@ -1232,9 +1249,17 @@ def run_from_config(
                         invocations.append(_skipped_invocation(row, system.skipped))
                         _emit_progress(progress, f"{label}: skipped because the system is unavailable")
                         continue
-                    if outage_stop is not None:
-                        invocations.append(_skipped_invocation(row, outage_stop))
-                        _emit_progress(progress, f"{label}: skipped because the run stopped invoking")
+                    stop = stopped.get(system_spec.system_id)
+                    if stop is not None:
+                        if stop["warning"] is not None:
+                            warnings.append(stop["warning"])
+                            stop["warning"] = None
+                            _emit_progress(progress, f"run {config['run_id']}: stopped invoking system "
+                                                     f"{system_spec.system_id}; {stop['count']} consecutive "
+                                                     f"invocations reported {LLM_PATH_FAILED}")
+                        invocations.append(_skipped_invocation(row, stop["reason"]))
+                        _emit_progress(progress, f"{label}: skipped because system {system_spec.system_id} "
+                                                 "stopped being invoked")
                         continue
                     with _invocation_heartbeat(
                         progress,
@@ -1260,20 +1285,25 @@ def run_from_config(
                         f"{label}: finished status={evaluation['status']} "
                         f"claims={metrics['claim_records']} ({elapsed:.1f}s)",
                     )
-                    if _result_error_code(bundle) == LLM_PATH_FAILED:
-                        llm_path_failures += 1
-                    else:
-                        llm_path_failures = 0
-                    if stop_after_llm_path_failures and llm_path_failures >= stop_after_llm_path_failures:
-                        outage_stop = (f"not invoked: the run stopped after {llm_path_failures} consecutive "
-                                       f"invocations reported {LLM_PATH_FAILED} (every model call failed), "
-                                       f"the last {row['invocation_id']}; a model-provider outage is likely")
-                        warnings.append(f"Stopped invoking after invocation {invocation_number}/{total_invocations} "
-                                        f"{row['invocation_id']}: {llm_path_failures} consecutive invocations "
-                                        f"reported {LLM_PATH_FAILED}; every later assignment is a skipped "
-                                        "invocation, not a scan.")
-                        _emit_progress(progress, f"run {config['run_id']}: stopping; {llm_path_failures} "
-                                                 f"consecutive invocations reported {LLM_PATH_FAILED}")
+                    system_id = system_spec.system_id
+                    failed = _llm_path_outcome(bundle)
+                    if failed is True:
+                        llm_path_failures[system_id] = llm_path_failures.get(system_id, 0) + 1
+                    elif failed is False:
+                        llm_path_failures[system_id] = 0
+                    count = llm_path_failures.get(system_id, 0)
+                    if stop_after_llm_path_failures and failed is True and count >= stop_after_llm_path_failures:
+                        stopped[system_id] = {
+                            "count": count,
+                            "reason": (f"not invoked: system {system_id} stopped being invoked after {count} "
+                                       f"consecutive invocations of it reported {LLM_PATH_FAILED} (every "
+                                       f"model call failed), the last {row['invocation_id']}"),
+                            "warning": (f"Stopped invoking system {system_id} after invocation "
+                                        f"{invocation_number}/{total_invocations} {row['invocation_id']}: "
+                                        f"{count} consecutive invocations of it reported {LLM_PATH_FAILED} "
+                                        "(every model call failed); its later assignments are skipped "
+                                        "invocations, not scans."),
+                        }
     except BaseException as exc:
         # Inputs prepared before the failure may never have reached the derivation above, and
         # the manifest cannot record them without a label state.

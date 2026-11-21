@@ -505,11 +505,14 @@ the source cache, and every exported input; a workspace root that does not exist
 `--only-input` (input ids) and `--only-system` narrow the run and are refused when they name
 something the configuration does not contain. What was narrowed away is recorded in the manifest's
 `selection` and in the schedule's notes.
-After 3 consecutive invocations report `llm_path_failed` (every model call failed, as in a
-model-provider outage), the run stops invoking: every remaining assignment is a `skipped`
-invocation with that reason, and a manifest warning names the invocation where it stopped. Any
-other result resets the count. `--stop-after-llm-path-failures N` changes the count; `0` disables
-the stop.
+When 3 consecutive invocations of one system end with its adapter reporting `llm_path_failed`
+(every model call failed), that system stops being invoked: each of its remaining assignments is a
+`skipped` invocation whose reason names the system, other systems keep running, and a manifest
+warning names the system and the invocation where it stopped. Only adapters that report
+`llm_path_failed` can trigger this (on main, the LLM harness adapter). Only a result showing the
+model path worked (`success`, or `partial` with any other error code) resets the count;
+`unsupported`, `timeout`, and other errors neither count nor reset it.
+`--stop-after-llm-path-failures N` changes the count; `0` disables the stop.
 
 `run` exits `1`, not `0`, when any input could not be prepared, when any invocation ended in
 `error`, `timeout`, or `skipped`, or when the manifest status is not `completed`. The bundles it

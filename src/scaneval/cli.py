@@ -1727,8 +1727,9 @@ def build_parser() -> argparse.ArgumentParser:
                          help="suppress live progress; final summaries and errors remain")
     running.add_argument("--stop-after-llm-path-failures", type=_non_negative_int, metavar="N",
                          default=runner.DEFAULT_STOP_AFTER_LLM_PATH_FAILURES,
-                         help="skip every remaining invocation after N consecutive invocations in which "
-                              "every model call failed (llm_path_failed); 0 disables (default: %(default)s)")
+                         help="skip a system's remaining invocations after N consecutive invocations of it "
+                              "whose adapter reported llm_path_failed (every model call failed); "
+                              "0 disables (default: %(default)s)")
     _add_import_commands(sub)
     _add_aggregate_commands(sub)
     _add_gate_commands(sub)
