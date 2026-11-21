@@ -6,6 +6,7 @@ calls, and no sleeping: the adapter is a fake that returns one claim.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import os
@@ -503,6 +504,58 @@ def test_an_adapter_exception_is_an_error_invocation_and_the_run_still_completes
     assert result["status"] == "error" and result["claims"] == []
     assert result["error"] == {"code": "adapter_failure",
                                "message": "RuntimeError: the harness died mid scan"}
+
+
+class OutageAdapter(FakeAdapter):
+    """Plays one scripted outcome per call: ``"ok"`` is the fake's success, ``"llm"`` an ``llm_path_failed``."""
+
+    def __init__(self, script: list[str]):
+        super().__init__()
+        self.script = script
+
+    def scan(self, **kwargs):
+        outcome = super().scan(**kwargs)
+        if self.script[self.calls - 1] == "llm":
+            return replace(outcome, status="partial",
+                           error={"code": "llm_path_failed", "message": "every harness model call failed"})
+        return outcome
+
+
+@pytest.mark.parametrize(("stop_after", "calls"), [(3, 6), (0, 7)], ids=["default-stop", "disabled"])
+def test_consecutive_llm_path_failures_skip_every_remaining_invocation(tmp_path, upstream, stop_after, calls):
+    """A provider outage used to be invoked through to the end; any other result resets the count."""
+    repo, commit = upstream
+    write_pack(tmp_path / "pack.json", repo, commit)
+    config_path = tmp_path / "run-config.json"
+    write_config(config_path, systems=[system_entry("fake-a", "fake")], repetitions=7)
+    adapter = OutageAdapter(["llm", "llm", "ok", "llm", "llm", "llm", "ok"])
+
+    manifest = run_from_config(config_path, tmp_path / "out", clock=CLOCK, adapters={"fake": adapter},
+                               stop_after_llm_path_failures=stop_after)
+
+    assert adapter.calls == calls
+    assert manifest["status"] == "completed"
+    statuses = [row["status"] for row in manifest["invocations"]]
+    stop_warnings = [warning for warning in manifest["warnings"] if warning.startswith("Stopped invoking")]
+    if stop_after:
+        assert statuses == ["partial", "partial", "success", "partial", "partial", "partial", "skipped"]
+        skipped = manifest["invocations"][6]
+        assert skipped["bundle_path"] is None
+        assert "3 consecutive invocations reported llm_path_failed" in skipped["skipped_reason"]
+        assert "snap-a__fake-a__r6" in skipped["skipped_reason"]
+        assert len(stop_warnings) == 1
+        assert stop_warnings[0].startswith("Stopped invoking after invocation 6/7 snap-a__fake-a__r6: ")
+        assert not (tmp_path / "out" / "invocations" / "snap-a__fake-a__r7").exists()
+    else:
+        assert statuses[-1] == "success" and "skipped" not in statuses
+        assert stop_warnings == []
+
+
+def test_cli_run_refuses_a_negative_llm_path_failure_stop(tmp_path, pilot):
+    with pytest.raises(SystemExit):
+        main(["run", str(pilot["config_path"]), "--output", str(tmp_path / "out"),
+              "--stop-after-llm-path-failures", "-1"])
+    assert not (tmp_path / "out").exists()
 
 
 def test_a_failing_export_is_recorded_against_its_input_and_never_invokes_a_system(tmp_path, upstream):

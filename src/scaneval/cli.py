@@ -739,6 +739,7 @@ def _run(args: argparse.Namespace) -> int:
         only_systems=set(args.only_system) if args.only_system else None,
         only_inputs=set(args.only_input) if args.only_input else None,
         progress=None if args.quiet else progress,
+        stop_after_llm_path_failures=args.stop_after_llm_path_failures,
     )
     for invocation in manifest["invocations"]:
         print(f"{invocation['invocation_id']} status={invocation['status']} "
@@ -1641,6 +1642,16 @@ def _add_gate_commands(sub: argparse._SubParsersAction) -> None:
                         help="new JSON file, outside any trial or run directory")
 
 
+def _non_negative_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        value = -1
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a non-negative integer")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--version", action="version", version=__version__)
@@ -1714,6 +1725,10 @@ def build_parser() -> argparse.ArgumentParser:
     running.add_argument("--workspace-root", type=Path)
     running.add_argument("--quiet", action="store_true",
                          help="suppress live progress; final summaries and errors remain")
+    running.add_argument("--stop-after-llm-path-failures", type=_non_negative_int, metavar="N",
+                         default=runner.DEFAULT_STOP_AFTER_LLM_PATH_FAILURES,
+                         help="skip every remaining invocation after N consecutive invocations in which "
+                              "every model call failed (llm_path_failed); 0 disables (default: %(default)s)")
     _add_import_commands(sub)
     _add_aggregate_commands(sub)
     _add_gate_commands(sub)
