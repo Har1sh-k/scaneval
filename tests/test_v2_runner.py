@@ -6,6 +6,7 @@ calls, and no sleeping: the adapter is a fake that returns one claim.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import os
@@ -503,6 +504,134 @@ def test_an_adapter_exception_is_an_error_invocation_and_the_run_still_completes
     assert result["status"] == "error" and result["claims"] == []
     assert result["error"] == {"code": "adapter_failure",
                                "message": "RuntimeError: the harness died mid scan"}
+
+
+class OutageAdapter(FakeAdapter):
+    """Plays one scripted outcome per call; past the end of the script every call is ``"llm"``.
+
+    ``"ok"`` is the fake's success, ``"llm"`` a partial ``llm_path_failed``, ``"unsupported"`` an
+    outcome that ran nothing, and ``"crash"`` an exception, which the runner records as ``adapter_failure``.
+    """
+
+    def __init__(self, script: list[str] = ()):
+        super().__init__()
+        self.script = list(script)
+
+    def scan(self, **kwargs):
+        step = self.script[self.calls] if self.calls < len(self.script) else "llm"
+        if step == "unsupported":
+            self.calls += 1
+            return NativeOutcome(status="unsupported", exit_code=None, command=[], bundles_resolved=False,
+                                 error={"code": "unsupported_language", "message": "nothing was executed"})
+        if step == "crash":
+            self.calls += 1
+            raise RuntimeError("the adapter failed before the scanner ran")
+        outcome = super().scan(**kwargs)
+        if step == "llm":
+            return replace(outcome, status="partial",
+                           error={"code": "llm_path_failed", "message": "every harness model call failed"})
+        return outcome
+
+
+def stop_warnings(manifest: dict) -> list[str]:
+    return [warning for warning in manifest["warnings"] if warning.startswith("Stopped invoking")]
+
+
+@pytest.mark.parametrize(("stop_after", "calls"), [(3, 6), (0, 7)], ids=["default-stop", "disabled"])
+def test_consecutive_llm_path_failures_skip_every_remaining_invocation(tmp_path, upstream, stop_after, calls):
+    """A system reporting llm_path_failed used to be invoked to the end; a working model path resets the count."""
+    repo, commit = upstream
+    write_pack(tmp_path / "pack.json", repo, commit)
+    config_path = tmp_path / "run-config.json"
+    write_config(config_path, systems=[system_entry("fake-a", "fake")], repetitions=7)
+    adapter = OutageAdapter(["llm", "llm", "ok", "llm", "llm", "llm", "ok"])
+
+    manifest = run_from_config(config_path, tmp_path / "out", clock=CLOCK, adapters={"fake": adapter},
+                               stop_after_llm_path_failures=stop_after)
+
+    assert adapter.calls == calls
+    assert manifest["status"] == "completed"
+    statuses = [row["status"] for row in manifest["invocations"]]
+    if stop_after:
+        assert statuses == ["partial", "partial", "success", "partial", "partial", "partial", "skipped"]
+        skipped = manifest["invocations"][6]
+        assert skipped["bundle_path"] is None
+        assert skipped["skipped_reason"].startswith(
+            "not invoked: system fake-a stopped being invoked after 3 consecutive invocations of it reported "
+            "llm_path_failed")
+        assert "snap-a__fake-a__r6" in skipped["skipped_reason"]
+        [warning] = stop_warnings(manifest)
+        assert warning.startswith("Stopped invoking system fake-a after invocation 6/7 snap-a__fake-a__r6: ")
+        assert not (tmp_path / "out" / "invocations" / "snap-a__fake-a__r7").exists()
+    else:
+        assert statuses[-1] == "success" and "skipped" not in statuses
+        assert stop_warnings(manifest) == []
+
+
+def test_the_llm_path_failure_stop_is_kept_per_system(tmp_path, upstream):
+    """Another system's results used to reset the count, and a stop used to skip systems that need no model.
+
+    Two inputs, two repetitions: the harness fails twice on snap-a, the plain system succeeds twice in
+    between, and the harness's third failure on snap-fixed stops it alone.
+    """
+    repo, commit = upstream
+    write_two_snapshot_pack(tmp_path / "pack.json", repo, commit, repaired_commit(repo))
+    config_path = tmp_path / "run-config.json"
+    write_config(config_path, systems=[system_entry("llm-a", "outage"), system_entry("plain-b", "fake")],
+                 inputs=[{"snapshot_id": "snap-a"}, {"snapshot_id": "snap-fixed"}], repetitions=2)
+    harness, plain = OutageAdapter(), FakeAdapter()
+
+    manifest = run_from_config(config_path, tmp_path / "out", clock=CLOCK,
+                               adapters={"outage": harness, "fake": plain})
+
+    assert harness.calls == 3 and plain.calls == 4
+    assert [(row["invocation_id"], row["status"]) for row in manifest["invocations"]] == [
+        ("snap-a__llm-a__r1", "partial"), ("snap-a__llm-a__r2", "partial"),
+        ("snap-a__plain-b__r1", "success"), ("snap-a__plain-b__r2", "success"),
+        ("snap-fixed__llm-a__r1", "partial"), ("snap-fixed__llm-a__r2", "skipped"),
+        ("snap-fixed__plain-b__r1", "success"), ("snap-fixed__plain-b__r2", "success")]
+    assert "system llm-a" in manifest["invocations"][5]["skipped_reason"]
+    [warning] = stop_warnings(manifest)
+    assert warning.startswith("Stopped invoking system llm-a after invocation 5/8 snap-fixed__llm-a__r1: ")
+
+
+def test_results_that_never_reached_the_model_neither_count_nor_reset_the_llm_path_failures(tmp_path, upstream):
+    """An unsupported outcome and an adapter failure between the failures used to break the streak."""
+    repo, commit = upstream
+    write_pack(tmp_path / "pack.json", repo, commit)
+    config_path = tmp_path / "run-config.json"
+    write_config(config_path, systems=[system_entry("fake-a", "fake")], repetitions=6)
+    adapter = OutageAdapter(["llm", "unsupported", "llm", "crash", "llm", "ok"])
+
+    manifest = run_from_config(config_path, tmp_path / "out", clock=CLOCK, adapters={"fake": adapter})
+
+    assert adapter.calls == 5
+    assert [row["status"] for row in manifest["invocations"]] == [
+        "partial", "unsupported", "partial", "error", "partial", "skipped"]
+    [warning] = stop_warnings(manifest)
+    assert warning.startswith("Stopped invoking system fake-a after invocation 5/6 snap-a__fake-a__r5: ")
+
+
+def test_a_stop_reached_on_a_systems_last_assignment_adds_no_warning(tmp_path, upstream):
+    """Nothing is skipped, so no warning may say later assignments were."""
+    repo, commit = upstream
+    write_pack(tmp_path / "pack.json", repo, commit)
+    config_path = tmp_path / "run-config.json"
+    write_config(config_path, systems=[system_entry("fake-a", "fake")], repetitions=3)
+    adapter = OutageAdapter()
+
+    manifest = run_from_config(config_path, tmp_path / "out", clock=CLOCK, adapters={"fake": adapter})
+
+    assert adapter.calls == 3
+    assert [row["status"] for row in manifest["invocations"]] == ["partial"] * 3
+    assert stop_warnings(manifest) == []
+
+
+def test_cli_run_refuses_a_negative_llm_path_failure_stop(tmp_path, pilot):
+    with pytest.raises(SystemExit):
+        main(["run", str(pilot["config_path"]), "--output", str(tmp_path / "out"),
+              "--stop-after-llm-path-failures", "-1"])
+    assert not (tmp_path / "out").exists()
 
 
 def test_a_failing_export_is_recorded_against_its_input_and_never_invokes_a_system(tmp_path, upstream):
