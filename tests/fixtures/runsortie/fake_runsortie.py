@@ -1345,6 +1345,34 @@ def main(argv: list[str]) -> int:
                                                    if arguments.is_file() else [])
                         output.unlink(missing_ok=True)
                         arguments.unlink(missing_ok=True)
+            # The engine's view: launch a tool the way ``npm run runtime`` launches Fieldglass (the lifecycle
+            # shell running ``tsx ...`` with node_modules/.bin first), where the test's fixture tsx execs
+            # the named tool from its own PATH, as Fieldglass's model driver resolves ``claude``.
+            engine_tool_env = {}
+            engine_tool_argv = {}
+            for tool in scenario.get("probe_engine_tools", []):
+                output = Path(os.environ["TMPDIR"]) / f"fixture-engine-{tool}-env"
+                lifecycle_env = dict(os.environ)
+                lifecycle_env["PATH"] = (str(Path(config_value["engine"]["localPath"]) / "node_modules" / ".bin")
+                                         + os.pathsep + lifecycle_env["PATH"])
+                # Variables something upstream of the engine launch might add to its inherited environment.
+                lifecycle_env.update(scenario.get("engine_probe_env", {}))
+                completed = subprocess.run(
+                    [os.environ["npm_config_script_shell"], "-c", 'tsx "$1" "$2"', "sh", tool,
+                     f"--fixture-env-output={output}"],
+                    env=lifecycle_env, capture_output=True, text=True, timeout=5, check=False)
+                if completed.returncode == 0 and output.is_file():
+                    values = {}
+                    for line in output.read_text(encoding="utf-8").splitlines():
+                        if "=" in line:
+                            key, value = line.split("=", 1)
+                            values[key] = value
+                    engine_tool_env[tool] = {key: values.get(key) for key in scenario.get("wrapper_log_env", [])}
+                    arguments = output.with_suffix(output.suffix + ".args")
+                    engine_tool_argv[tool] = (arguments.read_text(encoding="utf-8").splitlines()
+                                              if arguments.is_file() else [])
+                    output.unlink(missing_ok=True)
+                    arguments.unlink(missing_ok=True)
             npm_shell_resolutions = []
             if scenario.get("probe_npm_shell_path"):
                 poison_bin = Path(config_value["engine"]["localPath"]) / "node_modules" / ".bin"
@@ -1378,6 +1406,8 @@ def main(argv: list[str]) -> int:
                                      "private_poison_paths": poison_paths,
                                      "role_wrapper_env": role_wrapper_env,
                                      "role_wrapper_argv": role_wrapper_argv,
+                                     "engine_tool_env": engine_tool_env,
+                                     "engine_tool_argv": engine_tool_argv,
                                      "npm_shell_resolutions": npm_shell_resolutions,
                                      "resolved_pi": pi_path,
                                      "pi_wrapper": (Path(pi_path).read_text(encoding="utf-8")
